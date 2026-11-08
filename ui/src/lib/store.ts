@@ -24,6 +24,14 @@ export interface TabUi {
   diff: DiffTarget | null;
   search: string;
   searchOpen: boolean;
+  /** Commits picked with Ctrl / Shift + click (2 = compare them). */
+  multi: string[];
+  /** Comparing a commit with the working folder. */
+  compareWorkdir: string | null;
+  /** File History / Blame view in the centre. */
+  history: { file: string; mode: "history" | "blame"; sha: string | null } | null;
+  /** How many commits the graph has loaded (grows when scrolling near the end). */
+  limit: number;
 }
 
 export interface Draft {
@@ -49,7 +57,8 @@ export type DialogState =
   | { kind: "shortcuts" }
   | { kind: "about" }
   | { kind: "plan" }
-  | { kind: "prefs" };
+  | { kind: "prefs" }
+  | { kind: "fileFinder" };
 
 export interface Settings {
   showLeft: boolean;
@@ -61,10 +70,31 @@ export interface Settings {
   recents: string[];
   pushAfterCommit: boolean;
   fileView: "path" | "tree";
+  fileSort: "path" | "status";
   leftView: "list" | "agents";
   toolbarLabels: boolean;
   defaultCloneFolder: string;
+  diffMode: "hunk" | "inline" | "split";
+  ignoreWhitespace: boolean;
+  wordWrap: boolean;
+  columns: GraphColumns;
+  /** Hidden and soloed branches / tags per repository (full ref names). */
+  hidden: Record<string, string[]>;
+  solo: Record<string, string[]>;
+  lazyLoad: boolean;
 }
+
+export interface GraphColumns {
+  refs: boolean;
+  graph: boolean;
+  description: boolean;
+  author: boolean;
+  date: boolean;
+  sha: boolean;
+  changes: boolean;
+}
+
+export const DEFAULT_COLUMNS: GraphColumns = { refs: true, graph: true, description: true, author: false, date: false, sha: false, changes: false };
 
 export const DEFAULT_SETTINGS: Settings = {
   showLeft: true,
@@ -76,9 +106,17 @@ export const DEFAULT_SETTINGS: Settings = {
   recents: [],
   pushAfterCommit: false,
   fileView: "tree",
+  fileSort: "path",
   leftView: "list",
   toolbarLabels: true,
   defaultCloneFolder: "",
+  diffMode: "hunk",
+  ignoreWhitespace: false,
+  wordWrap: false,
+  columns: DEFAULT_COLUMNS,
+  hidden: {},
+  solo: {},
+  lazyLoad: true,
 };
 
 /** Same numbers as src/metrics.rs; replaced by the Rust values at start-up. */
@@ -104,6 +142,23 @@ export const DEFAULT_METRICS: Metrics = {
   min_alpha: 50,
   sha_len: 6,
   avatar_bg: "#199489",
+  lazy_offset: 1400,
+  time_units: [
+    [31556736, "y", "red"],
+    [2630016, "M", "red"],
+    [604800, "w", "red"],
+    [86400, "d", "orange"],
+    [3600, "h", "green"],
+    [60, "m", "green"],
+  ],
+  initial_commits: 2000,
+  author_zone: 130,
+  date_zone: 130,
+  sha_zone: 100,
+  changes_zone: 200,
+  stats_added: "#347d39",
+  stats_deleted: "#c93c37",
+  stats_files: "#e2c08d",
   summary_counter: 72,
   auto_fetch_min: 1,
   zoom_factors: [3, 2.5, 2, 1.75, 1.5, 1.4, 1.3, 1.2, 1.1, 1, 0.9, 0.8],
@@ -113,7 +168,7 @@ export const DEFAULT_METRICS: Metrics = {
 let nextId = 1;
 export const newId = () => `t${Date.now().toString(36)}${nextId++}`;
 
-const defaultUi = (): TabUi => ({ selection: { type: "wip" }, diff: null, search: "", searchOpen: false });
+const defaultUi = (): TabUi => ({ selection: { type: "wip" }, diff: null, search: "", searchOpen: false, multi: [], compareWorkdir: null, history: null, limit: 0 });
 
 interface Store {
   tabs: Tab[];

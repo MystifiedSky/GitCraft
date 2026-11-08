@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import type { Commit, FileChange, RepoView } from "@/lib/api";
-import { api } from "@/lib/api";
+import { api, WORKDIR } from "@/lib/api";
 import { useStore, useTabUi, type DiffTarget } from "@/lib/store";
 import { act, confirmThen, copy } from "@/lib/repo";
 import { fileMenu } from "@/lib/menus";
@@ -28,6 +28,14 @@ import { cn, fullDate, MOD } from "@/lib/utils";
 /** Right panel: staging and committing (WIP) or the details of a selected commit. */
 export function RightPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
   const ui = useTabUi(tabId);
+  if (ui.compareWorkdir) return <ComparePanel repo={repo} tabId={tabId} from={ui.compareWorkdir} to={WORKDIR} />;
+  if (ui.multi.length === 2) {
+    // Older commit first, so the diff reads "from -> to".
+    const pos = (x: string) => repo.commits.findIndex((c) => c.sha === x);
+    const [a, b] = [...ui.multi].sort((x, y) => pos(y) - pos(x));
+    return <ComparePanel repo={repo} tabId={tabId} from={a} to={b} />;
+  }
+  if (ui.multi.length > 2) return <MultiPanel repo={repo} tabId={tabId} />;
   if (ui.selection.type === "commit") {
     const sha = ui.selection.sha;
     const c = repo.commits.find((x) => x.sha === sha);
@@ -53,7 +61,11 @@ function ViewSwitch() {
   const v = s.settings.fileView;
   return (
     <div className="flex items-center h-[38px] px-[8px] shrink-0">
-      <button className="text-white/75 hover:text-white" title="Sort files">
+      <button
+        className="text-white/75 hover:text-white"
+        title={s.settings.fileSort === "status" ? "Sorted by status (click to sort by path)" : "Sorted by path (click to sort by status)"}
+        onClick={() => s.setSettings({ fileSort: s.settings.fileSort === "status" ? "path" : "status" })}
+      >
         <ArrowDownAZ size={16} />
       </button>
       <div className="flex-1 flex justify-center">
@@ -85,7 +97,12 @@ function FileList({
   activeFile?: string;
 }) {
   const view = useStore((s) => s.settings.fileView);
+  const sortBy = useStore((s) => s.settings.fileSort);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const sorted = useMemo(
+    () => [...files].sort((a, b) => (sortBy === "status" ? a.status.localeCompare(b.status) || a.path.localeCompare(b.path) : a.path.localeCompare(b.path))),
+    [files, sortBy],
+  );
   const row = (f: FileChange, indent: number, label: string) => (
     <CtxMenu key={f.path} items={() => menu(f)}>
       <div
@@ -100,34 +117,90 @@ function FileList({
       </div>
     </CtxMenu>
   );
-  if (view === "path") return <div>{files.map((f) => row(f, 0, f.path))}</div>;
-  // Tree view: group by folder.
-  const groups = new Map<string, FileChange[]>();
-  for (const f of files) {
-    const i = f.path.lastIndexOf("/");
-    const dir = i >= 0 ? f.path.slice(0, i) : "";
-    groups.set(dir, [...(groups.get(dir) ?? []), f]);
-  }
-  const dirs = [...groups.keys()].sort();
+  if (view === "path") return <div>{sorted.map((f) => row(f, 0, f.path))}</div>;
+
+  // Tree view: nested folders; a closed folder shows how many files changed inside it.
+  const root = buildTree(sorted);
+  const allDirs: string[] = [];
+  const collect = (n: TreeNode) => n.dirs.forEach((d) => (allDirs.push(d.path), collect(d)));
+  collect(root);
+  const anyOpen = allDirs.some((d) => !collapsed[d]);
+  const render = (n: TreeNode, depth: number): ReactNode[] => {
+    const out: ReactNode[] = [];
+    for (const d of [...n.dirs.values()].sort((a, b) => a.name.localeCompare(b.name))) {
+      const closed = !!collapsed[d.path];
+      const counts = countFiles(d);
+      out.push(
+        <div
+          key={"d:" + d.path}
+          className="flex items-center gap-[6px] h-[24px] pr-2 text-[12.5px] text-fg2 hover:bg-hoverrow cursor-default"
+          style={{ paddingLeft: 10 + depth * 14 }}
+          onClick={() => setCollapsed((c) => ({ ...c, [d.path]: !c[d.path] }))}
+        >
+          <ChevronRight size={12} className={cn("transition-transform shrink-0", !closed && "rotate-90")} />
+          <Folder size={13} className="shrink-0" />
+          <span className="truncate">{d.name}</span>
+          {closed && (
+            <span className="flex gap-1.5 text-[11.5px] font-semibold">
+              {counts.M ? <span className="text-[#de9b43]">✎ {counts.M}</span> : null}
+              {counts.A ? <span className="text-good">+ {counts.A}</span> : null}
+              {counts.D ? <span className="text-[#ef7a76]">− {counts.D}</span> : null}
+            </span>
+          )}
+        </div>,
+      );
+      if (!closed) out.push(...render(d, depth + 1));
+    }
+    for (const f of n.files) out.push(row(f, depth, f.path.split("/").pop()!));
+    return out;
+  };
   return (
     <div>
-      {dirs.map((d) => (
-        <div key={d || "."}>
-          {d && (
-            <div
-              className="flex items-center gap-[6px] h-[24px] pl-[10px] text-[12.5px] text-fg2 hover:bg-hoverrow cursor-default"
-              onClick={() => setCollapsed((c) => ({ ...c, [d]: !c[d] }))}
-            >
-              <ChevronRight size={12} className={cn("transition-transform", !collapsed[d] && "rotate-90")} />
-              <Folder size={13} />
-              <span className="truncate">{d}</span>
-            </div>
-          )}
-          {!collapsed[d] && groups.get(d)!.map((f) => row(f, d ? 2 : 0, f.path.slice(d ? d.length + 1 : 0)))}
-        </div>
-      ))}
+      {allDirs.length > 0 && (
+        <button
+          className="block pl-[12px] h-[20px] text-[11.5px] text-fg2 hover:text-white"
+          onClick={() => setCollapsed(anyOpen ? Object.fromEntries(allDirs.map((d) => [d, true])) : {})}
+        >
+          {anyOpen ? "Collapse All" : "Expand All"}
+        </button>
+      )}
+      {render(root, 0)}
     </div>
   );
+}
+
+interface TreeNode {
+  name: string;
+  path: string;
+  dirs: Map<string, TreeNode>;
+  files: FileChange[];
+}
+
+function buildTree(files: FileChange[]): TreeNode {
+  const root: TreeNode = { name: "", path: "", dirs: new Map(), files: [] };
+  for (const f of files) {
+    let node = root;
+    for (const part of f.path.split("/").slice(0, -1)) {
+      const p = node.path ? `${node.path}/${part}` : part;
+      if (!node.dirs.has(part)) node.dirs.set(part, { name: part, path: p, dirs: new Map(), files: [] });
+      node = node.dirs.get(part)!;
+    }
+    node.files.push(f);
+  }
+  return root;
+}
+
+function countFiles(n: TreeNode): Record<string, number> {
+  const out: Record<string, number> = {};
+  const walk = (x: TreeNode) => {
+    for (const f of x.files) {
+      const k = f.status === "?" ? "A" : f.status === "R" || f.status === "U" ? "M" : f.status;
+      out[k] = (out[k] ?? 0) + 1;
+    }
+    x.dirs.forEach(walk);
+  };
+  walk(n);
+  return out;
 }
 
 function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
@@ -425,6 +498,76 @@ function CommitDetails({ repo, tabId, commit: c }: { repo: RepoView; tabId: stri
           onOpen={(f) => s.setUi(tabId, { diff: { source: { kind: "Commit", sha: c.sha }, file: f.path, untracked: false, parent: c.parents[0] ?? null } })}
           menu={(f) => fileMenu(repo, f.path, false, true)}
         />
+      </div>
+    </div>
+  );
+}
+
+/** Two commits (or a commit and the working folder): the files that differ and their diffs. */
+function ComparePanel({ repo, tabId, from, to }: { repo: RepoView; tabId: string; from: string; to: string }) {
+  const s = useStore();
+  const ui = useTabUi(tabId);
+  const n = s.metrics.sha_len;
+  const files = useQuery({
+    queryKey: ["range", repo.path, from, to, to === WORKDIR ? JSON.stringify(repo.status) : ""],
+    queryFn: () => api.rangeFiles(repo.path, from, to),
+  });
+  const short = (x: string) => (x === WORKDIR ? "working folder" : x.slice(0, n));
+  const close = () => s.setUi(tabId, { multi: [], compareWorkdir: null, diff: null });
+  return (
+    <div className="h-full flex flex-col bg-panel min-w-0">
+      <PanelHeader>
+        <span className="text-[12.5px] text-white flex-1 truncate">{to === WORKDIR ? "Viewing diff between a commit and the WIP" : "Viewing diff between 2 commits"}</span>
+        <button className="text-fg2 hover:text-white" title="Close (Esc)" onClick={close}>
+          <X size={15} />
+        </button>
+      </PanelHeader>
+      <div className="px-3 py-2 text-[12px] text-fg2 border-b border-white/5 shrink-0">
+        <span className="mono text-link">{short(from)}</span> → <span className="mono text-link">{short(to)}</span>
+        <span className="ml-2 text-fg3">{files.data ? `${files.data.length} file${files.data.length === 1 ? "" : "s"} changed` : ""}</span>
+      </div>
+      <ViewSwitch />
+      <div className="flex-1 overflow-y-auto">
+        {files.isLoading && <div className="px-3 text-fg3 text-[12px]">Loading files…</div>}
+        <FileList
+          files={files.data ?? []}
+          activeFile={ui.diff?.source.kind === "Range" ? ui.diff.file : undefined}
+          onOpen={(f) => s.setUi(tabId, { diff: { source: { kind: "Range", sha: [from, to] }, file: f.path, untracked: false, parent: null } })}
+          menu={(f) => fileMenu(repo, f.path, false, true)}
+        />
+      </div>
+    </div>
+  );
+}
+
+/** Three or more commits picked: what can be done with them together. */
+function MultiPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
+  const s = useStore();
+  const ui = useTabUi(tabId);
+  const picked = repo.commits.filter((c) => ui.multi.includes(c.sha));
+  const oldestFirst = [...picked].reverse().map((c) => c.sha);
+  return (
+    <div className="h-full flex flex-col bg-panel min-w-0">
+      <PanelHeader>
+        <span className="text-[12.5px] text-white flex-1">{picked.length} commits selected</span>
+        <button className="text-fg2 hover:text-white" title="Clear selection (Esc)" onClick={() => s.setUi(tabId, { multi: [] })}>
+          <X size={15} />
+        </button>
+      </PanelHeader>
+      <div className="p-3 text-[12px] text-fg3 leading-relaxed">A combined diff is not shown for this selection. Select exactly 2 commits to compare them.</div>
+      <div className="px-3 pb-3">
+        <Button size="sm" variant="primary" onClick={() => act(repo.path, { type: "cherryPickMany", shas: oldestFirst })}>
+          Cherry pick {picked.length} commits
+        </Button>
+      </div>
+      <div className="flex-1 overflow-y-auto border-t border-white/5">
+        {picked.map((c) => (
+          <div key={c.sha} className="flex items-center gap-2 px-3 h-[30px] text-[12.5px] border-b border-white/5">
+            <Avatar name={c.author} email={c.email} size={18} />
+            <span className="truncate flex-1 text-white/90">{c.summary}</span>
+            <span className="mono text-[11px] text-fg3">{c.sha.slice(0, s.metrics.sha_len)}</span>
+          </div>
+        ))}
       </div>
     </div>
   );

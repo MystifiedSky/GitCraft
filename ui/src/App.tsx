@@ -1,6 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { ChevronRight } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { DEFAULT_METRICS, DEFAULT_SETTINGS, newId, tabUi, useStore, type Settings, type Tab } from "@/lib/store";
 import { act, openRepoPath, promptBranch, queryClient, refresh, repoData, useRepo } from "@/lib/repo";
@@ -11,6 +11,8 @@ import { Toolbar } from "./components/Toolbar";
 import { LeftPanel } from "./components/LeftPanel";
 import { GraphView } from "./components/GraphView";
 import { DiffView } from "./components/DiffView";
+import { HistoryView } from "./components/HistoryView";
+import { LeftStrip } from "./components/LeftPanel";
 import { RightPanel } from "./components/RightPanel";
 import { StatusBar } from "./components/StatusBar";
 import { LaunchpadScreen, StartScreen } from "./components/StartScreen";
@@ -38,7 +40,10 @@ export default function App() {
 
 function RepoScreen({ tab }: { tab: Tab }) {
   const s = useStore();
-  const q = useRepo(tab.path);
+  const q = useRepo(tab.path, tab.id);
+  const viewing = !!(s.ui[tab.id]?.diff || s.ui[tab.id]?.history);
+  const [peek, setPeek] = useState(false);
+  useEffect(() => setPeek(false), [viewing]);
   const repo = q.data;
   const ui = s.ui[tab.id];
   const set = s.settings;
@@ -49,7 +54,7 @@ function RepoScreen({ tab }: { tab: Tab }) {
     <>
       <Toolbar repo={repo} tabId={tab.id} />
       <div className="flex-1 flex min-h-0">
-        {set.showLeft ? (
+        {set.showLeft && !(viewing && !peek) ? (
           <>
             <div style={{ width: set.leftWidth }} className="shrink-0 min-w-0">
               <LeftPanel repo={repo} tabId={tab.id} onSelectSha={selectSha} />
@@ -57,13 +62,8 @@ function RepoScreen({ tab }: { tab: Tab }) {
             <Resizer onDrag={(dx) => s.setSettings({ leftWidth: clamp(useStore.getState().settings.leftWidth + dx, 180, 600) })} />
           </>
         ) : (
-          <button
-            onClick={() => s.setSettings({ showLeft: true })}
-            title="Expand Panel (Ctrl+J)"
-            className="w-[18px] bg-panel border-r border-black/30 flex items-start pt-3 justify-center text-white/70 hover:text-white shrink-0"
-          >
-            <ChevronRight size={14} />
-          </button>
+          // Like the original: while a file is open (or the panel is hidden) the left panel shrinks to icons.
+          <LeftStrip repo={repo} onExpand={() => (set.showLeft ? setPeek(true) : s.setSettings({ showLeft: true }))} />
         )}
         <div className="flex-1 min-w-[160px]">
           {q.isError && (
@@ -76,7 +76,14 @@ function RepoScreen({ tab }: { tab: Tab }) {
             </div>
           )}
           {!repo && q.isLoading && <div className="h-full flex items-center justify-center text-fg3">Loading repository…</div>}
-          {repo && (ui?.diff ? <DiffView repo={repo} tabId={tab.id} target={ui.diff} /> : <GraphView repo={repo} tabId={tab.id} />)}
+          {repo &&
+            (ui?.diff ? (
+              <DiffView repo={repo} tabId={tab.id} target={ui.diff} />
+            ) : ui?.history ? (
+              <HistoryView repo={repo} tabId={tab.id} file={ui.history.file} mode={ui.history.mode} sha={ui.history.sha} />
+            ) : (
+              <GraphView repo={repo} tabId={tab.id} />
+            ))}
         </div>
         {set.showRight && repo && (
           <>
@@ -123,7 +130,7 @@ function useStartup() {
     if (done.current) return;
     done.current = true;
     (async () => {
-      const opts = await api.launchOptions().catch(() => ({ screenshot: false, version: "0.1.0", metrics: DEFAULT_METRICS }));
+      const opts = await api.launchOptions().catch(() => ({ screenshot: false, shot_view: null as string | null, version: "0.1.0", metrics: DEFAULT_METRICS }));
       useStore.setState({ screenshot: opts.screenshot, version: opts.version, metrics: opts.metrics });
       if (opts.screenshot) {
         const sample = await api.sampleRepo().catch(() => null);
@@ -134,6 +141,23 @@ function useStartup() {
           const tab = useStore.getState().tabs.find((t) => t.kind === "repo");
           if (tab?.path && repoData(tab.path)) break;
           await new Promise((r) => setTimeout(r, 100));
+        }
+        // Test aid: open another screen before the picture.
+        const tab = useStore.getState().tabs.find((t) => t.kind === "repo");
+        const repo = tab?.path ? repoData(tab.path) : undefined;
+        if (tab && repo && opts.shot_view) {
+          const st = useStore.getState();
+          const file = repo.status.unstaged[0];
+          if (opts.shot_view === "diff" || opts.shot_view === "split" || opts.shot_view === "inline") {
+            st.setSettings({ diffMode: opts.shot_view === "diff" ? "hunk" : opts.shot_view, showLeft: true });
+            if (file) st.setUi(tab.id, { diff: { source: { kind: "Unstaged" }, file: file.path, untracked: file.status === "?", parent: null } });
+          } else if (opts.shot_view === "history" || opts.shot_view === "blame") {
+            st.setUi(tab.id, { history: { file: "src/api.rs", mode: opts.shot_view, sha: null } });
+          } else if (opts.shot_view === "compare" && repo.commits.length > 3) {
+            st.setUi(tab.id, { multi: [repo.commits[0].sha, repo.commits[3].sha], selection: { type: "commit", sha: repo.commits[0].sha } });
+            st.setSettings({ columns: { ...st.settings.columns, author: true, changes: true } });
+          } else if (opts.shot_view === "start") st.newTab();
+          await new Promise((r) => setTimeout(r, 1500));
         }
         let frames = 0;
         await new Promise<void>((res) => {
@@ -228,6 +252,8 @@ function useShortcuts() {
           if (k === "s") return run(() => act(path, { type: "stageAll" }, true));
           if (k === "u") return run(() => act(path, { type: "unstageAll" }, true));
           if (k === "z" && !typing) return run(() => act(path, { type: "redo" }));
+          if (k === "h") return run(() => st.setDialog({ kind: "fileFinder" }));
+          if (k === "e") return run(() => api.openInEditor(path));
           if (k === "m")
             return run(() => {
               st.setUi(tab!.id, { selection: { type: "wip" }, diff: null });
@@ -235,6 +261,8 @@ function useShortcuts() {
             });
         }
       }
+      if (e.altKey && !mod && path && k === "t") return run(() => api.openTerminal(path));
+      if (e.altKey && !mod && path && k === "o") return run(() => api.openFileManager(path));
       if (mod && e.altKey && k === "f") return run(() => (window as unknown as { focusLeftFilter?: () => void }).focusLeftFilter?.());
       if (e.key === "F11") return run(async () => {
         const { getCurrentWindow } = await import("@tauri-apps/api/window");
@@ -246,12 +274,15 @@ function useShortcuts() {
         const u = tabUi(tab.id);
         if (st.dialog) return;
         if (u.diff) return run(() => st.setUi(tab.id, { diff: null }));
+        if (u.history) return run(() => st.setUi(tab.id, { history: null }));
+        if (u.multi.length || u.compareWorkdir) return run(() => st.setUi(tab.id, { multi: [], compareWorkdir: null }));
         if (u.searchOpen) return run(() => st.setUi(tab.id, { searchOpen: false, search: "" }));
         if (u.selection.type === "commit") return run(() => st.setUi(tab.id, { selection: { type: "wip" } }));
       }
       if (path && tab && !st.dialog) {
         const repo = repoData(path);
         if (!repo) return;
+        if (tabUi(tab.id).diff || tabUi(tab.id).history) return; // keys belong to the open file view
         const down = e.key === "ArrowDown" || k === "j";
         const up = e.key === "ArrowUp" || k === "k";
         if (down || up) {
@@ -261,7 +292,7 @@ function useShortcuts() {
           const cur = u.selection.type === "wip" ? (wip ? 0 : -1) : ids.indexOf(u.selection.sha);
           const next = Math.min(ids.length - 1, Math.max(0, cur + (down ? 1 : -1)));
           const id = ids[next];
-          return run(() => st.setUi(tab.id, { selection: id === null || id === undefined ? { type: "wip" } : { type: "commit", sha: id }, diff: null }));
+          return run(() => st.setUi(tab.id, { selection: id === null || id === undefined ? { type: "wip" } : { type: "commit", sha: id }, diff: null, multi: [], compareWorkdir: null }));
         }
         if (k === "s" && tabUi(tab.id).diff?.source.kind === "Unstaged") {
           const f = tabUi(tab.id).diff!.file;

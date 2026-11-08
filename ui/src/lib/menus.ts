@@ -1,7 +1,7 @@
 import type { MenuEntry } from "@/components/ui/menu";
 import type { Commit, GitRef, RepoView, Stash } from "./api";
 import { api } from "./api";
-import { act, confirmThen, copy, promptBranch, promptTag } from "./repo";
+import { act, clearSolo, confirmThen, copy, openHistory, promptBranch, promptTag, toggleHidden, toggleSolo } from "./repo";
 import { useStore } from "./store";
 
 export function branchMenu(repo: RepoView, ref: GitRef): MenuEntry[] {
@@ -54,6 +54,13 @@ export function branchMenu(repo: RepoView, ref: GitRef): MenuEntry[] {
     });
   }
   items.push({ separator: true });
+  const st = useStore.getState().settings;
+  const hidden = (st.hidden[path] ?? []).includes(ref.full);
+  const soloed = (st.solo[path] ?? []).includes(ref.full);
+  items.push({ label: hidden ? "Show in the graph" : "Hide in the graph", disabled: isHead && !hidden, onSelect: () => toggleHidden(path, ref.full) });
+  items.push({ label: soloed ? "Stop soloing this branch" : "Solo", onSelect: () => toggleSolo(path, ref.full) });
+  if ((st.solo[path] ?? []).length > 0) items.push({ label: "Stop soloing all branches", onSelect: () => clearSolo(path) });
+  items.push({ separator: true });
   items.push({ label: "Copy branch name", onSelect: () => copy(ref.name) });
   items.push({ label: "Copy commit sha", onSelect: () => copy(ref.sha) });
   return items;
@@ -66,6 +73,7 @@ export function tagMenu(repo: RepoView, ref: GitRef): MenuEntry[] {
     { label: "Create branch here", onSelect: () => promptBranch(path, ref.sha) },
     { separator: true },
     { label: `Delete ${ref.name} locally`, danger: true, onSelect: () => act(path, { type: "deleteTag", name: ref.name }) },
+    { label: (useStore.getState().settings.hidden[path] ?? []).includes(ref.full) ? "Show in the graph" : "Hide in the graph", onSelect: () => toggleHidden(path, ref.full) },
     { separator: true },
     { label: "Copy tag name", onSelect: () => copy(ref.name) },
   ];
@@ -97,6 +105,14 @@ export function commitMenu(repo: RepoView, c: Commit): MenuEntry[] {
       ],
     },
     { label: "Revert commit", onSelect: () => act(path, { type: "revert", sha: c.sha }) },
+    { separator: true },
+    {
+      label: "Compare commit against working directory",
+      onSelect: () => {
+        const st = useStore.getState();
+        st.setUi(st.activeId, { compareWorkdir: c.sha, multi: [], selection: { type: "commit", sha: c.sha }, diff: null, history: null });
+      },
+    },
     { separator: true },
     { label: "Interactive rebase, reword and squash come in Stage 3", disabled: true },
     { separator: true },
@@ -137,6 +153,8 @@ export function fileMenu(repo: RepoView, file: string, staged: boolean, inCommit
   }
   items.push({ label: "Copy file path", onSelect: () => copy(file) });
   items.push({ label: "Open in File Manager", onSelect: () => api.openFileManager(`${path}\\${file.replace(/\/[^/]*$/, "").replace(/\//g, "\\")}`) });
-  items.push({ label: "File history and blame come in Stage 2", disabled: true });
+  items.push({ separator: true });
+  items.push({ label: "File History", onSelect: () => openHistory(file, "history") });
+  items.push({ label: "Blame", onSelect: () => openHistory(file, "blame") });
   return items;
 }

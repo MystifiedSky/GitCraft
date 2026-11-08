@@ -46,6 +46,16 @@ export function authorColor(email: string) {
   return GRAPH_COLORS[h % 10];
 }
 
+const TIME_COLORS: Record<string, string> = { red: "#ef7a76", orange: "#de9b43", green: "#5cb85c" };
+
+/** The original's timeSince: first unit that fits, e.g. "3d", coloured red / orange / green by age.
+ *  Units come from src/metrics.rs (year 31556736 s, month 2630016, week 604800, day 86400, hour 3600, minute 60). */
+export function timeSince(unix: number, units: [number, string, string][], now = Date.now() / 1000): { text: string; color: string | undefined } {
+  const secs = Math.floor(now - unix);
+  for (const [len, suffix, color] of units) if (secs >= len) return { text: `${Math.floor(secs / len)}${suffix}`, color: TIME_COLORS[color] };
+  return secs > 0 ? { text: `${secs}s`, color: TIME_COLORS.green } : { text: "--", color: undefined };
+}
+
 export function relTime(unix: number) {
   const s = Math.max(0, Date.now() / 1000 - unix);
   if (s < 60) return "<1 minute ago";

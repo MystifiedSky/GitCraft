@@ -60,11 +60,57 @@ export interface RepoView {
   head_sha: string;
   status: { unstaged: FileChange[]; staged: FileChange[]; conflicted: boolean };
   state_note: string | null;
+  has_more: boolean;
   graph: { rows: GraphRow[]; width: number };
   undo: { undo: string | null; redo: string | null };
 }
 
-export type DiffSource = { kind: "Unstaged" } | { kind: "Staged" } | { kind: "Commit"; sha: string };
+export type DiffSource =
+  | { kind: "Unstaged" }
+  | { kind: "Staged" }
+  | { kind: "Commit"; sha: string }
+  /** Between two points; the second may be WORKDIR (the working folder). */
+  | { kind: "Range"; sha: [string, string] };
+
+export const WORKDIR = "WORKDIR";
+
+export interface FileVersions {
+  old: string | null;
+  new: string | null;
+  binary: boolean;
+  old_image: string | null;
+  new_image: string | null;
+  encoding: string;
+  editable: boolean;
+}
+
+export interface HistoryEntry extends Commit {
+  path: string;
+  status: string;
+}
+
+export interface BlameLine {
+  sha: string;
+  author: string;
+  time: number;
+  summary: string;
+  line: number;
+  text: string;
+}
+
+export interface Stats {
+  sha: string;
+  files: number;
+  added: number;
+  deleted: number;
+}
+
+export interface RefView {
+  hidden: string[];
+  solo: string[];
+}
+
+export type PatchOp = "stage" | "unstage" | "discard";
 
 export interface DiffLine {
   kind: "Context" | "Added" | "Removed" | "Hunk" | "Meta";
@@ -112,6 +158,8 @@ export type Action =
   | { type: "abortRebase" }
   | { type: "continueRebase" }
   | { type: "addRemote"; name: string; url: string }
+  | { type: "patch"; file: string; untracked: boolean; op: PatchOp; hunk: number; lines: number[] | null }
+  | { type: "cherryPickMany"; shas: string[] }
   | { type: "undo" }
   | { type: "redo" };
 
@@ -142,6 +190,16 @@ export interface Metrics {
   auto_fetch_min: number;
   zoom_factors: number[];
   default_zoom: number;
+  lazy_offset: number;
+  time_units: [number, string, string][];
+  initial_commits: number;
+  author_zone: number;
+  date_zone: number;
+  sha_zone: number;
+  changes_zone: number;
+  stats_added: string;
+  stats_deleted: string;
+  stats_files: string;
 }
 
 export interface ActionResult {
@@ -150,11 +208,20 @@ export interface ActionResult {
 }
 
 export const api = {
-  launchOptions: () => invoke<{ screenshot: boolean; version: string; metrics: Metrics }>("launch_options"),
-  openRepo: (path: string) => invoke<RepoView>("open_repo", { path }),
+  launchOptions: () => invoke<{ screenshot: boolean; shot_view: string | null; version: string; metrics: Metrics }>("launch_options"),
+  openRepo: (path: string, max?: number, view?: RefView) => invoke<RepoView>("open_repo", { path, max: max ?? null, view: view ?? null }),
   commitFiles: (path: string, sha: string) => invoke<FileChange[]>("commit_files", { path, sha }),
-  fileDiff: (path: string, source: DiffSource, file: string, untracked: boolean, parent: string | null) =>
-    invoke<DiffLine[]>("file_diff", { path, source, file, untracked, parent }),
+  fileVersions: (path: string, source: DiffSource, file: string, untracked: boolean, parent: string | null) =>
+    invoke<FileVersions>("file_versions", { path, source, file, untracked, parent }),
+  saveFile: (path: string, file: string, content: string) => invoke<void>("save_file", { path, file, content }),
+  fileHistory: (path: string, file: string) => invoke<HistoryEntry[]>("file_history", { path, file }),
+  blame: (path: string, file: string, rev: string | null) => invoke<BlameLine[]>("blame", { path, file, rev }),
+  commitStats: (path: string, shas: string[]) => invoke<Stats[]>("commit_stats", { path, shas }),
+  rangeFiles: (path: string, from: string, to: string) => invoke<FileChange[]>("range_files", { path, from, to }),
+  trackedFiles: (path: string) => invoke<string[]>("tracked_files", { path }),
+  openInEditor: (path: string) => invoke<void>("open_in_editor", { path }),
+  fileDiff: (path: string, source: DiffSource, file: string, untracked: boolean, parent: string | null, ignoreWs = false) =>
+    invoke<DiffLine[]>("file_diff", { path, source, file, untracked, parent, ignoreWs }),
   run: (path: string, action: Action) => invoke<ActionResult>("run_action", { path, action }),
   activityLog: () => invoke<LogEntry[]>("activity_log"),
   sampleRepo: () => invoke<string>("sample_repo"),

@@ -75,6 +75,8 @@ pub struct RepoData {
     pub head_sha: String,
     pub status: WorkStatus,
     pub state_note: Option<String>, // "merging", "rebasing" ...
+    /// More commits exist beyond the ones loaded (lazy loading in the graph).
+    pub has_more: bool,
     #[serde(skip)]
     pub index_of: HashMap<String, usize>,
 }
@@ -148,7 +150,41 @@ pub fn repo_root(dir: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Which branches and tags the graph shows: hidden refs are left out; when any ref is
+/// soloed only the soloed refs are shown (full names such as "refs/heads/main").
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct RefView {
+    #[serde(default)]
+    pub hidden: Vec<String>,
+    #[serde(default)]
+    pub solo: Vec<String>,
+}
+
+/// Arguments for `git log` that select the commits the graph should show.
+pub fn log_revs(view: &RefView) -> Vec<String> {
+    if !view.solo.is_empty() {
+        return view.solo.clone();
+    }
+    let mut out = Vec::new();
+    let groups = [("refs/heads/", "--branches"), ("refs/remotes/", "--remotes"), ("refs/tags/", "--tags")];
+    for (prefix, flag) in groups {
+        for h in &view.hidden {
+            if let Some(short) = h.strip_prefix(prefix) {
+                out.push(format!("--exclude={short}"));
+            }
+        }
+        out.push(flag.to_string());
+    }
+    out.push("HEAD".into());
+    out
+}
+
+#[allow(dead_code)] // used by tests and kept as the simple entry point
 pub fn load(dir: &Path, max_commits: usize) -> RepoData {
+    load_view(dir, max_commits, &RefView::default())
+}
+
+pub fn load_view(dir: &Path, max_commits: usize, view: &RefView) -> RepoData {
     let mut d = RepoData::default();
 
     // Refs (branches, remote branches, tags) with ahead/behind info.
@@ -192,20 +228,13 @@ pub fn load(dir: &Path, max_commits: usize) -> RepoData {
     d.head_sha = run(dir, &["rev-parse", "HEAD"]).stdout.trim().to_string();
 
     // History, newest first, every branch.
-    let n = format!("-n{max_commits}");
-    let log = run(
-        dir,
-        &[
-            "log",
-            "--branches",
-            "--remotes",
-            "--tags",
-            "HEAD",
-            "--date-order",
-            &n,
-            "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%s%x1f%b%x1e",
-        ],
-    );
+    // One more than asked for tells us whether there is more history to load.
+    let n = format!("-n{}", max_commits + 1);
+    let revs = log_revs(view);
+    let mut args: Vec<&str> = vec!["log"];
+    args.extend(revs.iter().map(|s| s.as_str()));
+    args.extend(["--date-order", n.as_str(), "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%s%x1f%b%x1e", "--"]);
+    let log = run(dir, &args);
     for rec in log.stdout.split('\x1e') {
         let rec = rec.trim_start_matches(['\n', '\r']);
         if rec.is_empty() {
@@ -224,6 +253,10 @@ pub fn load(dir: &Path, max_commits: usize) -> RepoData {
             summary: f[5].to_string(),
             body: f[6].trim().to_string(),
         });
+    }
+    if d.commits.len() > max_commits {
+        d.commits.truncate(max_commits);
+        d.has_more = true;
     }
     for (i, c) in d.commits.iter().enumerate() {
         d.index_of.insert(c.sha.clone(), i);
@@ -419,9 +452,60 @@ pub enum DiffSource {
     Unstaged,
     Staged,
     Commit(String),
+    /// Between two points: commits, or a commit and "WORKDIR" (the working folder).
+    Range(String, String),
 }
 
+pub const WORKDIR: &str = "WORKDIR";
+
+#[allow(dead_code)] // used by tests
 pub fn file_diff(dir: &Path, src: &DiffSource, path: &str, untracked: bool, parent: Option<&str>) -> Vec<DiffLine> {
+    file_diff_opts(dir, src, path, untracked, parent, false)
+}
+
+/// Raw unified diff text for a file (used for the hunk view and for building partial patches).
+pub fn diff_text(dir: &Path, src: &DiffSource, path: &str, parent: Option<&str>, ignore_ws: bool) -> String {
+    // The original's diff options (nodegit.node 0x180107360): 3 context lines, hunks never merged.
+    let ctx = format!("-U{}", crate::metrics::DIFF_CONTEXT_LINES);
+    let inter = format!("--inter-hunk-context={}", crate::metrics::DIFF_INTERHUNK_LINES);
+    let mut args: Vec<&str> = vec!["diff", "--no-color", "--no-ext-diff", ctx.as_str(), inter.as_str()];
+    if ignore_ws {
+        // The original sets libgit2's IGNORE_WHITESPACE flag: ignore all whitespace (git -w).
+        args.push("--ignore-all-space");
+    }
+    let range;
+    match src {
+        DiffSource::Unstaged => {}
+        DiffSource::Staged => args.push("--cached"),
+        DiffSource::Commit(sha) => match parent {
+            Some(p) => {
+                args.push("-M");
+                args.push(p);
+                args.push(sha);
+            }
+            None => {
+                let mut a: Vec<&str> = vec!["show", "--no-color", "--format=", ctx.as_str(), inter.as_str()];
+                if ignore_ws {
+                    a.push("--ignore-all-space");
+                }
+                a.extend([sha.as_str(), "--", path]);
+                return run(dir, &a).stdout;
+            }
+        },
+        DiffSource::Range(from, to) => {
+            range = (from.clone(), to.clone());
+            args.push(range.0.as_str());
+            if range.1 != WORKDIR {
+                args.push(range.1.as_str());
+            }
+        }
+    }
+    args.push("--");
+    args.push(path);
+    run(dir, &args).stdout
+}
+
+pub fn file_diff_opts(dir: &Path, src: &DiffSource, path: &str, untracked: bool, parent: Option<&str>, ignore_ws: bool) -> Vec<DiffLine> {
     let text = match src {
         DiffSource::Unstaged if untracked => {
             let content = std::fs::read(dir.join(path)).unwrap_or_default();
@@ -438,12 +522,7 @@ pub fn file_diff(dir: &Path, src: &DiffSource, path: &str, untracked: bool, pare
             }
             t
         }
-        DiffSource::Unstaged => run(dir, &["diff", "--no-color", "--", path]).stdout,
-        DiffSource::Staged => run(dir, &["diff", "--cached", "--no-color", "--", path]).stdout,
-        DiffSource::Commit(sha) => match parent {
-            Some(p) => run(dir, &["diff", "--no-color", "-M", p, sha, "--", path]).stdout,
-            None => run(dir, &["show", "--no-color", "--format=", sha, "--", path]).stdout,
-        },
+        _ => diff_text(dir, src, path, parent, ignore_ws),
     };
     parse_diff(&text)
 }

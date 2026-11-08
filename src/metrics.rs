@@ -48,6 +48,41 @@ pub const NODE_MIN_ALPHA_PERCENT: u32 = 50;
 pub const SHORT_SHA_LENGTH: u32 = 6;
 /// DEFAULT_AVATAR_BACKGROUND_COLOR
 pub const DEFAULT_AVATAR_BACKGROUND: &str = "#199489";
+/// libgit2 (nodegit.node) diff defaults, set by the DiffOptions converter at 0x180107360:
+/// version 1, flags 0, context_lines 3, interhunk_lines 0.
+pub const DIFF_CONTEXT_LINES: u32 = 3;
+pub const DIFF_INTERHUNK_LINES: u32 = 0;
+/// git_blob_is_binary (nodegit.node 0x180257b80): only the first 8000 bytes are examined.
+pub const BINARY_CHECK_BYTES: usize = 8000;
+/// Text test (nodegit.node 0x1802e5380): binary when (printable >> 7) < non-printable,
+/// i.e. more than one control character per 128 printable ones.
+pub const BINARY_PRINTABLE_SHIFT: u32 = 7;
+/// timeSince (render.bundle.js): unit lengths in seconds, largest first, with the colour of each.
+pub const TIME_YEAR_SECS: u32 = 31556736;
+pub const TIME_MONTH_SECS: u32 = 2630016;
+pub const TIME_WEEK_SECS: u32 = 604800;
+pub const TIME_DAY_SECS: u32 = 86400;
+pub const TIME_HOUR_SECS: u32 = 3600;
+pub const TIME_MINUTE_SECS: u32 = 60;
+/// GRAPH_ROW_LAZY_LOAD_COMMITS_OFFSET: load more history when the view is this many rows from the end.
+pub const LAZY_LOAD_OFFSET: u32 = 1400;
+/// Commits read for the graph at first and added each time more are loaded
+/// ("Initial Commits in Graph": "Minimum 500"; GitCraft reads 2000).
+pub const INITIAL_COMMITS: usize = 2000;
+/// Commits listed in File History before "Go Deeper".
+pub const FILE_HISTORY_MAX: usize = 500;
+/// COMMIT_AUTHOR_ZONE_DEFAULT_WIDTH
+pub const AUTHOR_ZONE_DEFAULT_WIDTH: u32 = 130;
+/// COMMIT_DATE_TIME_ZONE_DEFAULT_WIDTH
+pub const DATE_TIME_ZONE_DEFAULT_WIDTH: u32 = 130;
+/// COMMIT_SHA_ZONE_MAX_WIDTH (the default, 130, is larger than its own maximum, so the maximum is used)
+pub const SHA_ZONE_WIDTH: u32 = 100;
+/// CHANGES_ZONE_DEFAULT_WIDTH
+pub const CHANGES_ZONE_DEFAULT_WIDTH: u32 = 200;
+/// Theme: stats-added-color / stats-deleted-color / stats-files-color
+pub const STATS_ADDED_COLOR: &str = "#347d39";
+pub const STATS_DELETED_COLOR: &str = "#c93c37";
+pub const STATS_FILES_COLOR: &str = "#e2c08d";
 /// Characters the commit summary counter counts down from.
 pub const COMMIT_SUMMARY_COUNTER: u32 = 72;
 /// Auto-fetch interval default in minutes (used from Stage 4).
@@ -91,6 +126,16 @@ pub struct Metrics {
     pub summary_counter: u32,
     pub auto_fetch_min: u32,
     pub zoom_factors: Vec<f32>,
+    pub lazy_offset: u32,
+    pub time_units: Vec<(u32, String, String)>,
+    pub initial_commits: u32,
+    pub author_zone: u32,
+    pub date_zone: u32,
+    pub sha_zone: u32,
+    pub changes_zone: u32,
+    pub stats_added: String,
+    pub stats_deleted: String,
+    pub stats_files: String,
     pub default_zoom: f32,
 }
 
@@ -120,6 +165,24 @@ pub fn metrics() -> Metrics {
         summary_counter: COMMIT_SUMMARY_COUNTER,
         auto_fetch_min: AUTO_FETCH_INTERVAL_MIN,
         zoom_factors: ZOOM_FACTORS.to_vec(),
+        lazy_offset: LAZY_LOAD_OFFSET,
+        // (seconds, suffix as in the Time-N* texts, colour class)
+        time_units: vec![
+            (TIME_YEAR_SECS, "y".into(), "red".into()),
+            (TIME_MONTH_SECS, "M".into(), "red".into()),
+            (TIME_WEEK_SECS, "w".into(), "red".into()),
+            (TIME_DAY_SECS, "d".into(), "orange".into()),
+            (TIME_HOUR_SECS, "h".into(), "green".into()),
+            (TIME_MINUTE_SECS, "m".into(), "green".into()),
+        ],
+        initial_commits: INITIAL_COMMITS as u32,
+        author_zone: AUTHOR_ZONE_DEFAULT_WIDTH,
+        date_zone: DATE_TIME_ZONE_DEFAULT_WIDTH,
+        sha_zone: SHA_ZONE_WIDTH,
+        changes_zone: CHANGES_ZONE_DEFAULT_WIDTH,
+        stats_added: STATS_ADDED_COLOR.to_string(),
+        stats_deleted: STATS_DELETED_COLOR.to_string(),
+        stats_files: STATS_FILES_COLOR.to_string(),
         default_zoom: DEFAULT_ZOOM_FACTOR,
     }
 }

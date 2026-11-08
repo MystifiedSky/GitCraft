@@ -17,11 +17,14 @@ import {
   Users,
   CircleDot,
   Network,
+  Eye,
+  EyeOff,
+  ChevronsRight,
 } from "lucide-react";
 import { useMemo, useRef, useState, type ReactNode } from "react";
 import type { GitRef, RepoView } from "@/lib/api";
 import { useStore } from "@/lib/store";
-import { act } from "@/lib/repo";
+import { act, toggleHidden } from "@/lib/repo";
 import { branchMenu, stashMenu } from "@/lib/menus";
 import { CtxMenu } from "./ui/menu";
 import { cn } from "@/lib/utils";
@@ -43,7 +46,10 @@ export function LeftPanel({ repo, tabId, onSelectSha }: { repo: RepoView | undef
   const tags = useMemo(() => (repo?.refs ?? []).filter((r) => r.kind === "Tag" && match(r.name)), [repo, f]);
   const stashes = (repo?.stashes ?? []).filter((x) => match(x.message));
   const worktrees = (repo?.worktrees ?? []).filter((w) => match(w.path) || match(w.branch));
-  const viewing = (repo?.refs ?? []).filter((r) => r.kind !== "Tag").length;
+  const hiddenList = (repo && s.settings.hidden[repo.path]) || [];
+  const soloList = (repo && s.settings.solo[repo.path]) || [];
+  // "Viewing N": branches shown in the graph (soloed ones only while soloing).
+  const viewing = soloList.length || (repo?.refs ?? []).filter((r) => r.kind !== "Tag" && !hiddenList.includes(r.full)).length;
   const isOpen = (k: SectionKey) => (f ? true : !!open[k]);
   const toggle = (k: SectionKey) => setOpen((o) => ({ ...o, [k]: !o[k] }));
 
@@ -73,8 +79,18 @@ export function LeftPanel({ repo, tabId, onSelectSha }: { repo: RepoView | undef
         >
           {isHead ? <Check size={13} className="shrink-0 text-good" /> : r.kind === "Local" ? <Laptop size={13} className="shrink-0 opacity-60" /> : <Cloud size={13} className="shrink-0 opacity-60" />}
           <span className={cn("truncate flex-1", isHead && "font-semibold")}>{label}</span>
+          {soloList.includes(r.full) && <Badge title="Soloing">solo</Badge>}
           {r.ahead > 0 && <Badge title={`${r.ahead} ahead`}>{r.ahead}↑</Badge>}
           {r.behind > 0 && <Badge title={`${r.behind} behind`}>{r.behind}↓</Badge>}
+          {repo && (
+            <button
+              title={hiddenList.includes(r.full) ? "Show in the graph" : "Hide in the graph"}
+              onClick={(e) => (e.stopPropagation(), toggleHidden(repo.path, r.full))}
+              className={cn("shrink-0 text-fg2 hover:text-white", hiddenList.includes(r.full) ? "opacity-100 text-warn" : "opacity-0 group-hover:opacity-100")}
+            >
+              {hiddenList.includes(r.full) ? <EyeOff size={13} /> : <Eye size={13} />}
+            </button>
+          )}
         </Row>
       </CtxMenu>
     );
@@ -263,7 +279,7 @@ function Row({
       title={title}
       onClick={onClick}
       onDoubleClick={onDoubleClick}
-      className={cn("flex items-center gap-[7px] h-[24px] pr-3 text-[13px] text-fg hover:bg-hoverrow cursor-default", className)}
+      className={cn("group flex items-center gap-[7px] h-[24px] pr-3 text-[13px] text-fg hover:bg-hoverrow cursor-default", className)}
       style={{ paddingLeft: 12 + indent * 16 }}
     >
       {children}
@@ -297,4 +313,31 @@ function groupByFolder(refs: GitRef[]) {
   for (const [folder, items] of folders) out.push({ folder, items });
   out.push({ folder: null, items: plain });
   return out;
+}
+
+/** The left panel shrunk to a strip of section icons with counts (shown while a file is open). */
+export function LeftStrip({ repo, onExpand }: { repo: RepoView | undefined; onExpand: () => void }) {
+  const locals = (repo?.refs ?? []).filter((r) => r.kind === "Local").length;
+  const items: [ReactNode, string, number | null][] = [
+    [<Laptop size={15} />, "Local", locals],
+    [<Cloud size={15} />, "Remote", repo?.remotes.length ?? 0],
+    [<Network size={15} />, "Worktrees", repo?.worktrees.length ?? 0],
+    [<CloudCog size={15} />, "Cloud Patches", 0],
+    [<GitPullRequest size={15} />, "Pull Requests", 0],
+    [<CircleDot size={15} />, "Issues", null],
+    [<Users size={15} />, "Teams", null],
+  ];
+  return (
+    <div className="w-[28px] shrink-0 bg-panel border-r border-black/30 flex flex-col items-center pt-[9px] gap-[3px]">
+      <button onClick={onExpand} title="Expand Panel (Ctrl+J)" className="w-[17px] h-[17px] rounded-full bg-white/85 text-panel flex items-center justify-center hover:bg-white mb-2">
+        <ChevronsRight size={12} strokeWidth={3} />
+      </button>
+      {items.map(([icon, label, n]) => (
+        <button key={label} onClick={onExpand} title={label} className="flex flex-col items-center text-white/70 hover:text-white py-1">
+          {icon}
+          {n !== null && <span className="text-[9.5px] leading-none mt-0.5 text-fg2">{n}</span>}
+        </button>
+      ))}
+    </div>
+  );
 }

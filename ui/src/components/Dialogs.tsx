@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
-import { openRepoPath, refresh } from "@/lib/repo";
+import { openHistory, openRepoPath, refresh } from "@/lib/repo";
 import { Dialog, Field, inputClass } from "./ui/dialog";
 import { Button } from "./ui/button";
 import { AppMark } from "./Icons";
@@ -65,6 +65,8 @@ export function Dialogs() {
       return <PlanDialog onClose={close} />;
     case "prefs":
       return <PrefsDialog onClose={close} />;
+    case "fileFinder":
+      return <FileFinder onClose={close} />;
   }
 }
 
@@ -298,6 +300,10 @@ const SHORTCUTS: [string, string][] = [
   [`${MOD}+Shift+S`, "Stage all files"],
   [`${MOD}+Shift+U`, "Unstage all files"],
   [`${MOD}+Shift+M`, "Focus commit message"],
+  [`${MOD}+Shift+H`, "Search for a file to view its history / blame"],
+  [`${MOD}+S`, "Save the file being edited"],
+  [`${MOD}+Click / Shift+Click`, "Select several commits (2 = compare)"],
+  ["S / U", "Stage / unstage the open file"],
   [`${MOD}+Enter`, "Commit (in message box)"],
   [`${MOD}+Shift+Enter`, "Stage all + commit (in message box)"],
   [`${MOD}+J`, "Toggle left panel"],
@@ -331,7 +337,7 @@ function ShortcutsDialog({ onClose }: { onClose: () => void }) {
 
 const STAGES: [string, string, string[]][] = [
   ["Stage 1", "Main window and everyday Git — done", ["Tabs, toolbar, panels, commit graph", "Stage, commit, amend, discard", "Branches, tags, stashes", "Fetch, pull, push", "Undo / redo, search, activity log"]],
-  ["Stage 2", "Deeper graph and diffs (Monaco)", ["Hunk / split diffs, line staging", "File history and blame", "More graph columns, solo / hide branches", "Compare commits"]],
+  ["Stage 2", "Deeper graph and diffs (Monaco) — done", ["Hunk / inline / split diffs, line staging, edit and save", "File history and blame", "More graph columns, solo / hide branches", "Compare commits, load more history, image diffs"]],
   ["Stage 3", "Rewriting history and conflicts", ["Interactive rebase", "Merge conflict tool", "Reword, squash, drop"]],
   ["Stage 4", "Repository management and accounts", ["Remotes, worktrees, submodules", "Gitflow, LFS", "Credential Manager, SSH, GPG", "Job queue with progress"]],
   ["Stage 5", "Productivity", ["Command palette", "Built-in terminal", "Workspaces, profiles, preferences", "Themes; gix and SQLite where needed"]],
@@ -343,7 +349,7 @@ function PlanDialog({ onClose }: { onClose: () => void }) {
     <Dialog open onClose={onClose} title="GitCraft feature plan" width={560}>
       <div className="flex flex-col gap-3">
         {STAGES.map(([n, t, items], i) => (
-          <div key={n} className={cn("rounded border px-3 py-2", i === 0 ? "border-good/60 bg-good/10" : "border-white/10 bg-field")}>
+          <div key={n} className={cn("rounded border px-3 py-2", i <= 1 ? "border-good/60 bg-good/10" : "border-white/10 bg-field")}>
             <div className="text-[13px] text-white font-semibold">
               {n} · {t}
             </div>
@@ -383,6 +389,52 @@ function PrefsDialog({ onClose }: { onClose: () => void }) {
         </Button>
       )}
       <div className="text-[12px] text-fg3 mt-3">Auto-fetch, SSH, GPG, external tools, themes and profiles come in Stages 4 and 5.</div>
+    </Dialog>
+  );
+}
+
+/** Ctrl+Shift+H: search for a file to view its history / blame. */
+function FileFinder({ onClose }: { onClose: () => void }) {
+  const s = useStore();
+  const tab = s.tabs.find((t) => t.id === s.activeId);
+  const path = tab?.kind === "repo" ? tab.path : undefined;
+  const q = useQuery({ queryKey: ["tracked", path], queryFn: () => api.trackedFiles(path!), enabled: !!path });
+  const [text, setText] = useState("");
+  const [idx, setIdx] = useState(0);
+  const words = text.toLowerCase().split(/\s+/).filter(Boolean);
+  const list = (q.data ?? []).filter((f) => words.every((w) => f.toLowerCase().includes(w))).slice(0, 200);
+  const pick = (f: string) => {
+    onClose();
+    openHistory(f, "history");
+  };
+  return (
+    <Dialog open onClose={onClose} title="Search for a file to view its history / blame" width={560}>
+      {!path && <div className="text-fg3 text-[13px]">Open a repository first.</div>}
+      {path && (
+        <>
+          <input
+            autoFocus
+            className={cn(inputClass, "w-full mb-2")}
+            placeholder="Type part of a file name"
+            value={text}
+            onChange={(e) => (setText(e.target.value), setIdx(0))}
+            onKeyDown={(e) => {
+              if (e.key === "ArrowDown") (e.preventDefault(), setIdx((i) => Math.min(list.length - 1, i + 1)));
+              if (e.key === "ArrowUp") (e.preventDefault(), setIdx((i) => Math.max(0, i - 1)));
+              if (e.key === "Enter" && list[idx]) pick(list[idx]);
+            }}
+          />
+          <div className="max-h-[320px] overflow-auto rounded border border-white/5">
+            {q.isLoading && <div className="p-2 text-fg3 text-[12px]">Loading files…</div>}
+            {list.map((f, i) => (
+              <button key={f} onClick={() => pick(f)} className={cn("w-full text-left px-2.5 py-1 text-[12.5px] truncate", i === idx ? "bg-accent/40 text-white" : "text-fg hover:bg-hoverrow")}>
+                <span className="text-white">{f.split("/").pop()}</span> <span className="text-fg3">{f}</span>
+              </button>
+            ))}
+            {!q.isLoading && list.length === 0 && <div className="p-2 text-fg3 text-[12px]">No matching files.</div>}
+          </div>
+        </>
+      )}
     </Dialog>
   );
 }

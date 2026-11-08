@@ -53,15 +53,20 @@ export function MenuBar() {
   const set = s.settings;
 
   const file: MenuEntry[] = [
+    // Same order as the original's File menu (reference picture 1).
     { label: "New Tab", shortcut: `${MOD}+T`, onSelect: s.newTab },
+    { label: "Close Tab", shortcut: `${MOD}+W`, onSelect: () => s.closeTab(s.activeId) },
+    { label: "Reopen Closed Tab", shortcut: `${MOD}+Shift+T`, disabled: s.closed.length === 0, onSelect: s.reopenTab },
     { separator: true },
     { label: "Clone Repo...", shortcut: `${MOD}+N`, onSelect: () => s.setDialog({ kind: "clone" }) },
     { label: "Init Repo...", shortcut: `${MOD}+I`, onSelect: () => s.setDialog({ kind: "init" }) },
     { label: "Open Repo...", shortcut: `${MOD}+O`, onSelect: () => s.setDialog({ kind: "open" }) },
+    { label: "Open Repo in VS Code", shortcut: `${MOD}+Shift+E`, disabled: !repoPath, onSelect: () => repoPath && api.openInEditor(repoPath) },
     { separator: true },
-    { label: "Open in File Manager", disabled: !repoPath, onSelect: () => repoPath && api.openFileManager(repoPath) },
-    { label: "Open External Terminal", shortcut: `${MOD}+Alt+T`, disabled: !repoPath, onSelect: () => repoPath && api.openTerminal(repoPath) },
-    { label: "Reopen Closed Tab", shortcut: `${MOD}+Shift+T`, disabled: s.closed.length === 0, onSelect: s.reopenTab },
+    { label: "Open External Terminal", shortcut: "Alt+T", disabled: !repoPath, onSelect: () => repoPath && api.openTerminal(repoPath) },
+    { label: "Open in File Manager", shortcut: "Alt+O", disabled: !repoPath, onSelect: () => repoPath && api.openFileManager(repoPath) },
+    { separator: true },
+    { label: "File History / Blame...", shortcut: `${MOD}+Shift+H`, disabled: !repoPath, onSelect: () => s.setDialog({ kind: "fileFinder" }) },
     { separator: true },
     { label: "Preferences...", shortcut: `${MOD}+,`, onSelect: () => s.setDialog({ kind: "prefs" }) },
     { separator: true },

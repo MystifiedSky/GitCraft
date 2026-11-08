@@ -1,6 +1,7 @@
 ﻿#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod actions;
+mod files;
 mod git;
 mod graph;
 mod metrics;
@@ -16,18 +17,20 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{Emitter, Manager, State};
 
-/// Most commits read for the graph at first (the original's "Initial Commits in Graph" minimum).
-const INITIAL_COMMITS: usize = 2000;
+use metrics::INITIAL_COMMITS;
 
 struct AppState {
     engine: Arc<Engine>,
     screenshot: Option<PathBuf>,
+    /// Test aid: which screen `--screenshot` pictures (`--shot-view diff|split|history|start`).
+    shot_view: Option<String>,
     watchers: Mutex<HashMap<String, watch::RepoWatch>>,
 }
 
 #[derive(Serialize)]
 struct LaunchOptions {
     screenshot: bool,
+    shot_view: Option<String>,
     version: String,
     metrics: metrics::Metrics,
 }
@@ -52,11 +55,11 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
 
 #[tauri::command]
 fn launch_options(state: State<'_, AppState>) -> LaunchOptions {
-    LaunchOptions { screenshot: state.screenshot.is_some(), version: env!("CARGO_PKG_VERSION").to_string(), metrics: metrics::metrics() }
+    LaunchOptions { screenshot: state.screenshot.is_some(), shot_view: state.shot_view.clone(), version: env!("CARGO_PKG_VERSION").to_string(), metrics: metrics::metrics() }
 }
 
 #[tauri::command]
-async fn open_repo(path: String, state: State<'_, AppState>) -> Result<RepoView, String> {
+async fn open_repo(path: String, max: Option<usize>, view: Option<git::RefView>, state: State<'_, AppState>) -> Result<RepoView, String> {
     let engine = state.engine.clone();
     blocking(move || {
         let p = PathBuf::from(&path);
@@ -64,7 +67,8 @@ async fn open_repo(path: String, state: State<'_, AppState>) -> Result<RepoView,
             return Err(format!("The folder {path} doesn't exist"));
         }
         let root = git::repo_root(&p).ok_or_else(|| format!("{path} is not a Git repository"))?;
-        let data = git::load(&root, INITIAL_COMMITS);
+        let view = view.unwrap_or_default();
+        let data = git::load_view(&root, max.unwrap_or(INITIAL_COMMITS).max(INITIAL_COMMITS), &view);
         let graph = graph::layout(&data.commits);
         let root_s = root.to_string_lossy().replace('/', "\\");
         Ok(RepoView {
@@ -105,8 +109,62 @@ async fn file_diff(
     file: String,
     untracked: bool,
     parent: Option<String>,
+    ignore_ws: Option<bool>,
 ) -> Result<Vec<git::DiffLine>, String> {
-    blocking(move || git::file_diff(Path::new(&path), &source, &file, untracked, parent.as_deref())).await
+    blocking(move || git::file_diff_opts(Path::new(&path), &source, &file, untracked, parent.as_deref(), ignore_ws.unwrap_or(false))).await
+}
+
+#[tauri::command]
+async fn file_versions(path: String, source: git::DiffSource, file: String, untracked: bool, parent: Option<String>) -> Result<files::FileVersions, String> {
+    blocking(move || files::versions(Path::new(&path), &source, &file, parent.as_deref(), untracked)).await
+}
+
+#[tauri::command]
+async fn save_file(path: String, file: String, content: String) -> Result<(), String> {
+    blocking(move || files::save(Path::new(&path), &file, &content)).await?
+}
+
+#[tauri::command]
+async fn file_history(path: String, file: String) -> Result<Vec<files::HistoryEntry>, String> {
+    blocking(move || files::history(Path::new(&path), &file, metrics::FILE_HISTORY_MAX)).await
+}
+
+#[tauri::command]
+async fn blame(path: String, file: String, rev: Option<String>) -> Result<Vec<files::BlameLine>, String> {
+    blocking(move || files::blame(Path::new(&path), &file, rev.as_deref())).await?
+}
+
+#[tauri::command]
+async fn commit_stats(path: String, shas: Vec<String>) -> Result<Vec<files::Stats>, String> {
+    blocking(move || files::stats(Path::new(&path), &shas)).await
+}
+
+#[tauri::command]
+async fn range_files(path: String, from: String, to: String) -> Result<Vec<git::FileChange>, String> {
+    blocking(move || files::range_files(Path::new(&path), &from, &to)).await
+}
+
+#[tauri::command]
+async fn tracked_files(path: String) -> Result<Vec<String>, String> {
+    blocking(move || files::tracked_files(Path::new(&path))).await
+}
+
+/// Open the repository in VS Code (File > Open Repo in VS Code).
+#[tauri::command]
+fn open_in_editor(path: String) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("cmd")
+            .args(["/C", "code", "."])
+            .current_dir(&path)
+            .creation_flags(0x0800_0000)
+            .spawn()
+            .map_err(err)?;
+    }
+    #[cfg(not(windows))]
+    std::process::Command::new("code").arg(".").current_dir(&path).spawn().map_err(err)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -267,6 +325,7 @@ fn take_and_exit(window: &tauri::WebviewWindow, out: &Path, app: &tauri::AppHand
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    let shot_view = args.iter().position(|a| a == "--shot-view").and_then(|i| args.get(i + 1)).cloned();
     let screenshot = args.iter().position(|a| a == "--screenshot").and_then(|i| args.get(i + 1)).map(|p| {
         let p = PathBuf::from(p);
         if p.is_absolute() {
@@ -277,7 +336,7 @@ fn main() {
     });
 
     tauri::Builder::default()
-        .manage(AppState { engine: Arc::new(Engine::default()), screenshot: screenshot.clone(), watchers: Mutex::new(HashMap::new()) })
+        .manage(AppState { engine: Arc::new(Engine::default()), screenshot: screenshot.clone(), shot_view, watchers: Mutex::new(HashMap::new()) })
         .setup(move |app| {
             if let Some(out) = screenshot.clone() {
                 // Safety net: take the picture anyway if the page never reports ready.
@@ -297,6 +356,14 @@ fn main() {
             open_repo,
             commit_files,
             file_diff,
+            file_versions,
+            save_file,
+            file_history,
+            blame,
+            commit_stats,
+            range_files,
+            tracked_files,
+            open_in_editor,
             run_action,
             activity_log,
             sample_repo,

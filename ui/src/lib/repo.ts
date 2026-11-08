@@ -1,22 +1,39 @@
 import { QueryClient, useQuery } from "@tanstack/react-query";
-import { api, type Action, type GitRef, type RepoView } from "./api";
+import { api, type Action, type GitRef, type RefView, type RepoView } from "./api";
 import { useStore } from "./store";
 
 export const queryClient = new QueryClient({
   defaultOptions: { queries: { refetchOnWindowFocus: true, staleTime: 2000, retry: false } },
 });
 
-export function useRepo(path: string | undefined) {
+/** Latest data per repository, whatever graph view (limit / hidden / solo) it was read with. */
+const latest = new Map<string, RepoView>();
+
+export function refView(path: string): RefView {
+  const st = useStore.getState().settings;
+  return { hidden: st.hidden[path] ?? [], solo: st.solo[path] ?? [] };
+}
+
+export function useRepo(path: string | undefined, tabId: string) {
+  const limit = useStore((s) => s.ui[tabId]?.limit ?? 0);
+  const hidden = useStore((s) => (path ? s.settings.hidden[path] : undefined));
+  const solo = useStore((s) => (path ? s.settings.solo[path] : undefined));
+  const view: RefView = { hidden: hidden ?? [], solo: solo ?? [] };
   return useQuery({
-    queryKey: ["repo", path],
-    queryFn: () => api.openRepo(path!),
+    queryKey: ["repo", path, limit, view],
+    queryFn: async () => {
+      const r = await api.openRepo(path!, limit || undefined, view);
+      latest.set(path!, r);
+      return r;
+    },
     enabled: !!path,
     placeholderData: (prev) => prev,
+    initialData: () => (path && limit === 0 && view.hidden.length === 0 && view.solo.length === 0 ? latest.get(path) : undefined),
   });
 }
 
 export function repoData(path: string): RepoView | undefined {
-  return queryClient.getQueryData<RepoView>(["repo", path]);
+  return latest.get(path);
 }
 
 export function refresh(path: string) {
@@ -61,7 +78,7 @@ export async function openRepoPath(path: string) {
   const st = useStore.getState();
   try {
     const r = await api.openRepo(path);
-    queryClient.setQueryData(["repo", r.path], r);
+    latest.set(r.path, r);
     st.openRepoTab(r.path, r.name);
   } catch (e) {
     st.toast(false, String(e));
@@ -104,6 +121,38 @@ export function promptStash(path: string) {
 
 export function confirmThen(title: string, text: string, confirm: string, onConfirm: () => void, danger = true) {
   useStore.getState().setDialog({ kind: "confirm", title, text, confirm, danger, onConfirm });
+}
+
+/** Open File History or Blame for a file in the active tab. */
+export function openHistory(file: string, mode: "history" | "blame" = "history") {
+  const st = useStore.getState();
+  st.setUi(st.activeId, { history: { file, mode, sha: null }, diff: null });
+}
+
+/** Hide a branch or tag from the graph (or show it again). */
+export function toggleHidden(path: string, full: string) {
+  const st = useStore.getState();
+  const cur = st.settings.hidden[path] ?? [];
+  const next = cur.includes(full) ? cur.filter((x) => x !== full) : [...cur, full];
+  st.setSettings({ hidden: { ...st.settings.hidden, [path]: next } });
+}
+
+/** Solo branches: only soloed refs are shown. */
+export function toggleSolo(path: string, full: string) {
+  const st = useStore.getState();
+  const cur = st.settings.solo[path] ?? [];
+  const next = cur.includes(full) ? cur.filter((x) => x !== full) : [...cur, full];
+  st.setSettings({ solo: { ...st.settings.solo, [path]: next } });
+}
+
+export function clearSolo(path: string) {
+  const st = useStore.getState();
+  st.setSettings({ solo: { ...st.settings.solo, [path]: [] } });
+}
+
+export function showAllRefs(path: string) {
+  const st = useStore.getState();
+  st.setSettings({ hidden: { ...st.settings.hidden, [path]: [] } });
 }
 
 export function copy(text: string) {

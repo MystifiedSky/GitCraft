@@ -40,6 +40,9 @@ pub enum Action {
     AbortRebase,
     ContinueRebase,
     AddRemote { name: String, url: String },
+    /// Stage, unstage or discard one hunk, or some lines of it.
+    Patch { file: String, untracked: bool, op: crate::files::PatchOp, hunk: usize, lines: Option<Vec<usize>> },
+    CherryPickMany { shas: Vec<String> },
     Undo,
     Redo,
 }
@@ -60,6 +63,7 @@ enum UndoRec {
     CreateTag { name: String, sha: String },
     DeleteTag { name: String, sha: String },
     Discard { stash: String },
+    Patch { patch: String, cached: bool, reverse: bool, label: String },
 }
 
 impl UndoRec {
@@ -73,6 +77,7 @@ impl UndoRec {
             UndoRec::CreateTag { name, .. } => format!("create tag {name}"),
             UndoRec::DeleteTag { name, .. } => format!("delete tag {name}"),
             UndoRec::Discard { .. } => "discard changes".into(),
+            UndoRec::Patch { label, .. } => label.clone(),
         }
     }
 }
@@ -136,6 +141,11 @@ impl Engine {
             l.remove(0);
         }
         o
+    }
+
+    fn log_note(&self, command: &str) {
+        let mut l = self.log.lock().unwrap();
+        l.push(LogEntry { time: chrono::Local::now().format("%H:%M:%S").to_string(), command: command.to_string(), ok: true, output: String::new() });
     }
 
     fn rev(&self, dir: &Path, r: &str) -> String {
@@ -358,6 +368,35 @@ impl Engine {
             Action::AbortRebase => done(self.git(dir, &["rebase", "--abort"]), "Rebase aborted"),
             Action::ContinueRebase => done(self.git(dir, &["-c", "core.editor=true", "rebase", "--continue"]), "Rebase continued"),
             Action::AddRemote { name, url } => done(self.git(dir, &["remote", "add", name.trim(), url.trim()]), "Remote added"),
+            Action::Patch { file, untracked, op, hunk, lines } => {
+                let what = if lines.is_some() { "lines" } else { "hunk" };
+                let verb = match op {
+                    crate::files::PatchOp::Stage => "stage",
+                    crate::files::PatchOp::Unstage => "unstage",
+                    crate::files::PatchOp::Discard => "discard",
+                };
+                self.log_note(&format!("git apply ({verb} {what} of {file})"));
+                match crate::files::apply_part(dir, &file, untracked, op, hunk, lines.as_deref()) {
+                    Ok((patch, cached, reverse)) => {
+                        // Staging is easy to reverse by hand; discards are recorded for Undo.
+                        if op == crate::files::PatchOp::Discard {
+                            self.push_undo(repo, UndoRec::Patch { patch, cached, reverse, label: format!("discard {what} in {file}") });
+                        }
+                        let past = match op {
+                            crate::files::PatchOp::Stage => "Staged",
+                            crate::files::PatchOp::Unstage => "Unstaged",
+                            crate::files::PatchOp::Discard => "Discarded",
+                        };
+                        ActionResult { ok: true, message: format!("{past} {what}") }
+                    }
+                    Err(e) => ActionResult { ok: false, message: e },
+                }
+            }
+            Action::CherryPickMany { shas } => {
+                let mut a = vec!["cherry-pick"];
+                a.extend(shas.iter().map(|s| s.as_str()));
+                done(self.git(dir, &a), &format!("Cherry picked {} commits", shas.len()))
+            }
             Action::Undo => self.undo(repo, dir),
             Action::Redo => self.redo(repo, dir),
         }
@@ -398,6 +437,14 @@ impl Engine {
             (UndoRec::CreateTag { name, sha }, false) | (UndoRec::DeleteTag { name, sha }, true) => self.git(dir, &["tag", name, sha]),
             (UndoRec::Discard { stash }, true) => self.git(dir, &["stash", "apply", "-q", stash]),
             (UndoRec::Discard { .. }, false) => self.git(dir, &["stash", "push", "--include-untracked", "-m", "Auto stash before redo discard"]),
+            (UndoRec::Patch { patch, cached, reverse, .. }, undo) => {
+                // Undo applies the patch the other way round; redo applies it again.
+                let rev = if undo { !*reverse } else { *reverse };
+                match crate::files::apply_patch(dir, patch, *cached, rev) {
+                    Ok(()) => git::GitOut { ok: true, stdout: String::new(), stderr: String::new() },
+                    Err(e) => git::GitOut { ok: false, stdout: String::new(), stderr: e },
+                }
+            }
         }
     }
 
@@ -523,4 +570,59 @@ mod tests {
         assert!(!e.log_entries().is_empty());
         let _ = fs::remove_dir_all(&d);
     }
+
+    #[test]
+    fn stage_and_discard_single_lines_hide_and_compare() {
+        let d = temp_repo("lines");
+        let repo = d.to_string_lossy().to_string();
+        let e = Engine::default();
+        // Line endings may become CRLF on Windows (core.autocrlf); compare without them.
+        let read = |p: &str| fs::read_to_string(d.join(p)).unwrap().replace("\r\n", "\n");
+        let index = |p: &str| git::run(&d, &["show", &format!(":{p}")]).stdout.replace("\r\n", "\n");
+        fs::write(d.join("f.txt"), "a\nb\nc\n").unwrap();
+        assert!(e.perform(&repo, Action::Commit { summary: "base".into(), description: String::new(), amend: false, stage_all: true }).ok);
+        let base = head(&d);
+        fs::write(d.join("f.txt"), "a\nB\nc\nnew\n").unwrap();
+        // Hunk body: " a", "-b", "+B", " c", "+new" -> stage only "+new" (index 4)
+        let r = e.perform(&repo, Action::Patch { file: "f.txt".into(), untracked: false, op: crate::files::PatchOp::Stage, hunk: 0, lines: Some(vec![4]) });
+        assert!(r.ok, "{}", r.message);
+        assert_eq!(index("f.txt"), "a\nb\nc\nnew\n");
+        // Discard the remaining unstaged change (b -> B), then undo the discard.
+        let r = e.perform(&repo, Action::Patch { file: "f.txt".into(), untracked: false, op: crate::files::PatchOp::Discard, hunk: 0, lines: None });
+        assert!(r.ok, "{}", r.message);
+        assert_eq!(read("f.txt"), "a\nb\nc\nnew\n");
+        assert!(e.perform(&repo, Action::Undo).ok);
+        assert_eq!(read("f.txt"), "a\nB\nc\nnew\n");
+        // Unstage the staged line again.
+        let r = e.perform(&repo, Action::Patch { file: "f.txt".into(), untracked: false, op: crate::files::PatchOp::Unstage, hunk: 0, lines: None });
+        assert!(r.ok, "{}", r.message);
+        assert!(git::status(&d).staged.is_empty());
+        // Untracked file: stage one line of a brand-new file.
+        fs::write(d.join("n.txt"), "one\ntwo\n").unwrap();
+        let r = e.perform(&repo, Action::Patch { file: "n.txt".into(), untracked: true, op: crate::files::PatchOp::Stage, hunk: 0, lines: Some(vec![0]) });
+        assert!(r.ok, "{}", r.message);
+        assert_eq!(index("n.txt"), "one\n");
+
+        // Commit and compare; hide a branch from the graph.
+        assert!(e.perform(&repo, Action::Commit { summary: "next".into(), description: String::new(), amend: false, stage_all: true }).ok);
+        assert!(e.perform(&repo, Action::CreateBranch { name: "side".into(), at: Some(base.clone()), checkout: false }).ok);
+        let files = crate::files::range_files(&d, &base, "HEAD");
+        assert_eq!(files.len(), 2);
+        let st = crate::files::stats(&d, &[head(&d)]);
+        assert_eq!(st[0].files, 2);
+        let hist = crate::files::history(&d, "f.txt", 10);
+        assert_eq!(hist.len(), 2);
+        let bl = crate::files::blame(&d, "f.txt", None).unwrap();
+        assert_eq!(bl.len(), 4);
+        let v = crate::files::versions(&d, &git::DiffSource::Range(base.clone(), git::WORKDIR.into()), "f.txt", None, false);
+        assert_eq!(v.old.as_deref().map(|s| s.replace("\r\n", "\n")), Some("a\nb\nc\n".to_string()));
+        let view = git::RefView { hidden: vec!["refs/heads/side".into()], solo: vec![] };
+        assert_eq!(git::load_view(&d, 100, &view).commits.len(), 2);
+        let solo = git::RefView { hidden: vec![], solo: vec!["refs/heads/side".into()] };
+        assert_eq!(git::load_view(&d, 100, &solo).commits.len(), 1);
+        let more = git::load_view(&d, 1, &git::RefView::default());
+        assert!(more.has_more);
+        let _ = fs::remove_dir_all(&d);
+    }
+
 }
