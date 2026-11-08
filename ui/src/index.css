@@ -1,0 +1,114 @@
+@import "tailwindcss";
+
+/* Colours measured from the original's dark theme (see MECHANICS.md). */
+@theme {
+  --color-app: #1c1e23;
+  --color-panel: #272a31;
+  --color-panel2: #2e3138;
+  --color-toolbar: #33373f;
+  --color-tabs: #2a2d34;
+  --color-field: #1f2227;
+  --color-titlebar: #202020;
+  --color-menubar: #1f1f1f;
+  --color-line: rgb(255 255 255 / 0.08);
+  --color-line2: rgb(255 255 255 / 0.16);
+  --color-accent: #4d88ff;
+  --color-good: #5cb85c;
+  --color-bad: #d9413d;
+  --color-warn: #de9b43;
+  --color-link: #40c5ec;
+  --color-ai: #7b00ff;
+  --color-fg: rgb(255 255 255 / 0.85);
+  --color-fg2: rgb(255 255 255 / 0.6);
+  --color-fg3: rgb(255 255 255 / 0.4);
+  --color-selrow: rgb(77 136 255 / 0.2);
+  --color-hoverrow: rgb(77 136 255 / 0.1);
+  --font-sans: "Open Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, "Courier New", monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--color-app);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(255 255 255 / 0.15) transparent;
+}
+
+input,
+textarea {
+  user-select: text;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+/* Context / dropdown menus (shadcn-style, Radix underneath) */
+.menu-content {
+  min-width: 190px;
+  background: #2b2e35;
+  border: 1px solid rgb(255 255 255 / 0.12);
+  border-radius: 6px;
+  padding: 4px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.45);
+  z-index: 60;
+  font-size: 13px;
+}
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border-radius: 4px;
+  outline: none;
+  cursor: default;
+  color: var(--color-fg);
+}
+.menu-item[data-highlighted] {
+  background: var(--color-accent);
+  color: white;
+}
+.menu-item[data-disabled] {
+  opacity: 0.4;
+}
+.menu-sep {
+  height: 1px;
+  background: rgb(255 255 255 / 0.1);
+  margin: 4px 2px;
+}
+.menu-label {
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--color-fg2);
+  text-transform: uppercase;
+}
+.menu-shortcut {
+  margin-left: auto;
+  padding-left: 16px;
+  font-size: 11px;
+  color: var(--color-fg3);
+}
+.menu-item[data-highlighted] .menu-shortcut {
+  color: rgb(255 255 255 / 0.8);
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.spin {
+  animation: spin 1s linear infinite;
+}
