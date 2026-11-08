@@ -14,7 +14,7 @@ import {
   X,
   Folder,
 } from "lucide-react";
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type { Commit, FileChange, RepoView } from "@/lib/api";
 import { api, WORKDIR } from "@/lib/api";
 import { useStore, useTabUi, type DiffTarget } from "@/lib/store";
@@ -212,8 +212,19 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
   const [unstagedOpen, setUnstagedOpen] = useState(true);
   const [stagedOpen, setStagedOpen] = useState(true);
   const [stashMsg, setStashMsg] = useState("");
-  const { unstaged, staged } = repo.status;
-  const total = new Set([...unstaged.map((f) => f.path), ...staged.map((f) => f.path)]).size;
+  const conflicted = repo.status.unstaged.filter((f) => f.status === "U");
+  const unstaged = repo.status.unstaged.filter((f) => f.status !== "U");
+  const staged = repo.status.staged;
+  const total = new Set([...repo.status.unstaged.map((f) => f.path), ...staged.map((f) => f.path)]).size;
+  const merging = repo.state_note === "merging";
+  const [cur, inc] = repo.conflict_labels ?? [repo.head_branch ?? "HEAD", "incoming"];
+  // Prefill the commit box with the message git prepared for the merge (MERGE_MSG).
+  useEffect(() => {
+    if (merging && repo.merge_msg && !draft.summary && !draft.description) {
+      const [first, ...rest] = repo.merge_msg.split("\n");
+      s.setDraft(repo.path, { summary: first, description: rest.join("\n").trim() });
+    }
+  }, [merging, repo.merge_msg]);
   const branch = repo.head_branch ?? repo.head_sha.slice(0, s.metrics.sha_len);
   const left = s.metrics.summary_counter - draft.summary.length; // the original's 72-character summary counter
   const push = s.settings.pushAfterCommit;
@@ -244,6 +255,11 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
   if (tab === "stash") {
     commitLabel = total === 0 ? "No Changes to Stash" : `Stash Changes to ${total} File${total === 1 ? "" : "s"}`;
     commitEnabled = total > 0;
+  } else if (conflicted.length > 0) {
+    commitLabel = `Resolve ${conflicted.length} Conflict${conflicted.length === 1 ? "" : "s"} to Commit`;
+    commitEnabled = false;
+  } else if (merging && draft.summary.trim()) {
+    commitLabel = "Commit and Merge";
   } else if (staged.length === 0 && !draft.amend) {
     commitLabel = "Stage Changes to Commit";
     commitEnabled = false;
@@ -277,6 +293,57 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
       </PanelHeader>
       <ViewSwitch />
       <div className="flex-1 overflow-y-auto min-h-[60px]">
+        {(conflicted.length > 0 || repo.state_note) && (
+          <div className="mx-2 mt-1 mb-2 rounded-[3px] border border-bad/50 bg-bad/10">
+            <div className="px-2 py-1.5 text-[12px] text-white/90 border-b border-bad/30">
+              {repo.state_note === "rebasing" ? `Rebasing ${inc} onto ${cur}` : merging ? `Merging ${inc} into ${cur}` : `${repo.state_note ?? "Conflicts"} in progress`}
+              {conflicted.length > 0 && (
+                <div className="text-[11.5px] text-[#ef7a76]">
+                  {conflicted.length === 1 ? "A file conflict was found" : `${conflicted.length} file conflicts were found`}
+                </div>
+              )}
+            </div>
+            {conflicted.length > 0 && (
+              <>
+                <div className="flex items-center gap-1 px-2 py-1">
+                  <span className="text-[12.5px] text-white/90 flex-1">Conflicted Files ({conflicted.length})</span>
+                  <Button size="sm" className="h-[20px] text-[11px]" onClick={() => act(repo.path, { type: "markResolved", paths: conflicted.map((f) => f.path) })}>
+                    Mark All Resolved
+                  </Button>
+                </div>
+                {conflicted.map((f) => (
+                  <CtxMenu
+                    key={f.path}
+                    items={[
+                      { label: "Open in the merge tool", onSelect: () => s.setUi(tabId, { conflict: f.path, diff: null }) },
+                      { label: `Take current (${cur})`, onSelect: () => act(repo.path, { type: "takeSide", paths: [f.path], side: "ours" }) },
+                      { label: `Take incoming (${inc})`, onSelect: () => act(repo.path, { type: "takeSide", paths: [f.path], side: "theirs" }) },
+                      { separator: true },
+                      { label: "Mark resolved", onSelect: () => act(repo.path, { type: "markResolved", paths: [f.path] }) },
+                    ]}
+                  >
+                    <div
+                      onClick={() => s.setUi(tabId, { conflict: f.path, diff: null })}
+                      className={cn("group flex items-center gap-[6px] h-[24px] px-2 text-[12.5px] cursor-default hover:bg-hoverrow", ui.conflict === f.path && "bg-selrow")}
+                      title="Open in the merge tool"
+                    >
+                      <StatusIcon status="U" />
+                      <span className="truncate flex-1 text-white/85">{f.path}</span>
+                      <span className="opacity-0 group-hover:opacity-100 flex gap-1">
+                        <Button size="sm" className="h-5 px-1.5 text-[11px]" title={`Take current (${cur})`} onClick={(e) => (e.stopPropagation(), act(repo.path, { type: "takeSide", paths: [f.path], side: "ours" }))}>
+                          Current
+                        </Button>
+                        <Button size="sm" className="h-5 px-1.5 text-[11px]" title={`Take incoming (${inc})`} onClick={(e) => (e.stopPropagation(), act(repo.path, { type: "takeSide", paths: [f.path], side: "theirs" }))}>
+                          Incoming
+                        </Button>
+                      </span>
+                    </div>
+                  </CtxMenu>
+                ))}
+              </>
+            )}
+          </div>
+        )}
         <SectionHead open={unstagedOpen} onToggle={() => setUnstagedOpen(!unstagedOpen)} title={`Unstaged Files (${unstaged.length})`}>
           {unstaged.length > 0 && (
             <Button size="sm" variant="success" onClick={() => act(repo.path, { type: "stageAll" }, true)} title={`${MOD}+Shift+S`}>

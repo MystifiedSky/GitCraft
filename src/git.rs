@@ -77,6 +77,10 @@ pub struct RepoData {
     pub state_note: Option<String>, // "merging", "rebasing" ...
     /// More commits exist beyond the ones loaded (lazy loading in the graph).
     pub has_more: bool,
+    /// Message git prepared for a merge commit (MERGE_MSG), to prefill the commit box.
+    pub merge_msg: Option<String>,
+    /// "current" and "incoming" names while resolving conflicts.
+    pub conflict_labels: Option<(String, String)>,
     #[serde(skip)]
     pub index_of: HashMap<String, usize>,
 }
@@ -306,10 +310,14 @@ pub fn load_view(dir: &Path, max_commits: usize, view: &RefView) -> RepoData {
     let gd = dir.join(gitdir);
     if gd.join("MERGE_HEAD").exists() {
         d.state_note = Some("merging".into());
+        d.merge_msg = crate::rewrite::merge_message(dir);
     } else if gd.join("rebase-merge").exists() || gd.join("rebase-apply").exists() {
         d.state_note = Some("rebasing".into());
     } else if gd.join("CHERRY_PICK_HEAD").exists() {
         d.state_note = Some("cherry-picking".into());
+    }
+    if d.state_note.is_some() {
+        d.conflict_labels = Some(crate::rewrite::conflict_labels(dir));
     }
     d
 }

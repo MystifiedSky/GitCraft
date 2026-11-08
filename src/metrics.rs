@@ -83,6 +83,10 @@ pub const CHANGES_ZONE_DEFAULT_WIDTH: u32 = 200;
 pub const STATS_ADDED_COLOR: &str = "#347d39";
 pub const STATS_DELETED_COLOR: &str = "#c93c37";
 pub const STATS_FILES_COLOR: &str = "#e2c08d";
+/// Merge tool colours (theme conflict-left / conflict-right / conflict-output border colours).
+pub const CONFLICT_A_COLOR: &str = "#15a0bf";
+pub const CONFLICT_B_COLOR: &str = "#f2ca33";
+pub const CONFLICT_OUTPUT_COLOR: &str = "#c517b6";
 /// Characters the commit summary counter counts down from.
 pub const COMMIT_SUMMARY_COUNTER: u32 = 72;
 /// Auto-fetch interval default in minutes (used from Stage 4).
@@ -127,6 +131,9 @@ pub struct Metrics {
     pub auto_fetch_min: u32,
     pub zoom_factors: Vec<f32>,
     pub lazy_offset: u32,
+    pub conflict_a: String,
+    pub conflict_b: String,
+    pub conflict_output: String,
     pub time_units: Vec<(u32, String, String)>,
     pub initial_commits: u32,
     pub author_zone: u32,
@@ -166,6 +173,9 @@ pub fn metrics() -> Metrics {
         auto_fetch_min: AUTO_FETCH_INTERVAL_MIN,
         zoom_factors: ZOOM_FACTORS.to_vec(),
         lazy_offset: LAZY_LOAD_OFFSET,
+        conflict_a: CONFLICT_A_COLOR.to_string(),
+        conflict_b: CONFLICT_B_COLOR.to_string(),
+        conflict_output: CONFLICT_OUTPUT_COLOR.to_string(),
         // (seconds, suffix as in the Time-N* texts, colour class)
         time_units: vec![
             (TIME_YEAR_SECS, "y".into(), "red".into()),

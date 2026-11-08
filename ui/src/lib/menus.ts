@@ -3,6 +3,23 @@ import type { Commit, GitRef, RepoView, Stash } from "./api";
 import { api } from "./api";
 import { act, clearSolo, confirmThen, copy, openHistory, promptBranch, promptTag, toggleHidden, toggleSolo } from "./repo";
 import { useStore } from "./store";
+import { baseFor, dropCommits, headLine, moveCommit, openRebase, rewordCommit, squashCommits } from "./rewrite";
+
+const activeTab = () => useStore.getState().activeId;
+
+/** Ask which remote branch a local branch should track ("Set Upstream"). */
+export function promptUpstream(repo: RepoView, ref: GitRef) {
+  const remotes = repo.refs.filter((r) => r.kind === "Remote").map((r) => r.name);
+  const guess = ref.upstream || remotes.find((r) => r.endsWith("/" + ref.name)) || `${repo.remotes[0] ?? "origin"}/${ref.name}`;
+  useStore.getState().setDialog({
+    kind: "prompt",
+    title: "Set Upstream",
+    label: `What remote/branch should "${ref.name}" push to and pull from? (empty = stop tracking)`,
+    value: guess,
+    confirm: "Set Upstream",
+    onSubmit: (v) => act(repo.path, { type: "setUpstream", branch: ref.name, upstream: v }),
+  });
+}
 
 export function branchMenu(repo: RepoView, ref: GitRef): MenuEntry[] {
   const path = repo.path;
@@ -18,9 +35,17 @@ export function branchMenu(repo: RepoView, ref: GitRef): MenuEntry[] {
   if (head && !isHead) {
     items.push({ label: `Merge ${ref.name} into ${head}`, onSelect: () => act(path, { type: "merge", branch: ref.name }) });
     items.push({ label: `Rebase ${head} onto ${ref.name}`, onSelect: () => act(path, { type: "rebase", onto: ref.name }) });
+    items.push({ label: `Interactive Rebase ${head} onto ${ref.name}`, onSelect: () => openRebase(activeTab(), path, ref.name, ref.name) });
+    // Fast-forward the checked-out branch when the other ref is strictly ahead of it.
+    const headIdx = repo.commits.findIndex((c) => c.sha === repo.head_sha);
+    const refIdx = repo.commits.findIndex((c) => c.sha === ref.sha);
+    if (refIdx >= 0 && headIdx > refIdx) items.push({ label: `Fast-forward ${head} to ${ref.name}`, onSelect: () => act(path, { type: "fastForward", branch: head, to: ref.name }) });
   }
   items.push({ separator: true });
   if (isHead) items.push({ label: `Push ${ref.name}`, onSelect: () => act(path, { type: "push", force: false }) });
+  if (ref.kind === "Local" && !isHead && ref.upstream && ref.behind > 0 && ref.ahead === 0)
+    items.push({ label: `Fast-forward ${ref.name} to ${ref.upstream}`, onSelect: () => act(path, { type: "fastForward", branch: ref.name, to: ref.upstream }) });
+  if (ref.kind === "Local") items.push({ label: ref.upstream ? `Set Upstream (now ${ref.upstream})` : "Set Upstream", onSelect: () => promptUpstream(repo, ref) });
   items.push({ label: "Create branch here", onSelect: () => promptBranch(path, ref.sha) });
   items.push({ label: "Create tag here", onSelect: () => promptTag(path, ref.sha) });
   items.push({ separator: true });
@@ -114,11 +139,33 @@ export function commitMenu(repo: RepoView, c: Commit): MenuEntry[] {
       },
     },
     { separator: true },
-    { label: "Interactive rebase, reword and squash come in Stage 3", disabled: true },
+    ...historyItems(repo, c),
     { separator: true },
     { label: "Copy commit sha", onSelect: () => copy(c.sha) },
     { label: "Copy commit message", onSelect: () => copy(c.body ? `${c.summary}\n\n${c.body}` : c.summary) },
   ];
+}
+
+/** Reword / squash / drop / move / interactive rebase, for commits on the checked-out branch's line. */
+function historyItems(repo: RepoView, c: Commit): MenuEntry[] {
+  const line = headLine(repo);
+  const pos = line.indexOf(c.sha);
+  if (pos < 0 || !repo.head_branch) return [{ label: "Reword, squash and drop work on commits of the checked-out branch", disabled: true }];
+  const children = pos; // commits newer than this one on the line
+  const head = repo.head_branch;
+  const items: MenuEntry[] = [];
+  if (children > 0)
+    items.push({
+      label: `Interactive Rebase ${children} children of ${c.sha.slice(0, useStore.getState().metrics.sha_len)}`,
+      onSelect: () => openRebase(activeTab(), repo.path, c.sha, c.sha.slice(0, useStore.getState().metrics.sha_len)),
+    });
+  items.push({ label: `Interactive Rebase ${head} from here`, onSelect: () => openRebase(activeTab(), repo.path, baseFor(repo, c.sha), head) });
+  items.push({ label: "Reword commit", onSelect: () => rewordCommit(repo, c.sha) });
+  if (pos + 1 < line.length) items.push({ label: "Squash into the commit below", onSelect: () => squashCommits(repo, [c.sha]) });
+  items.push({ label: "Drop commit", danger: true, onSelect: () => dropCommits(repo, [c.sha]) });
+  if (pos > 0) items.push({ label: "Move commit up", onSelect: () => moveCommit(repo, c.sha, "up") });
+  if (pos + 1 < line.length) items.push({ label: "Move commit down", onSelect: () => moveCommit(repo, c.sha, "down") });
+  return items;
 }
 
 export function stashMenu(repo: RepoView, st: Stash): MenuEntry[] {
@@ -126,6 +173,18 @@ export function stashMenu(repo: RepoView, st: Stash): MenuEntry[] {
   return [
     { label: "Apply Stash", onSelect: () => act(path, { type: "stashApply", index: st.index }) },
     { label: "Pop Stash", onSelect: () => act(path, { type: "stashPop", index: st.index }) },
+    {
+      label: "Edit stash message",
+      onSelect: () =>
+        useStore.getState().setDialog({
+          kind: "prompt",
+          title: "Edit stash message",
+          label: "Stash message",
+          value: st.message,
+          confirm: "Save",
+          onSubmit: (v) => act(path, { type: "stashRename", index: st.index, message: v }),
+        }),
+    },
     {
       label: "Delete Stash",
       danger: true,

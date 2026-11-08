@@ -32,6 +32,30 @@ export interface TabUi {
   history: { file: string; mode: "history" | "blame"; sha: string | null } | null;
   /** How many commits the graph has loaded (grows when scrolling near the end). */
   limit: number;
+  /** Interactive rebase / cherry pick being planned in the centre. */
+  rebase: RebasePlan | null;
+  /** File open in the merge conflict tool. */
+  conflict: string | null;
+}
+
+export interface RebaseItem {
+  action: import("./api").Step;
+  sha: string;
+  author: string;
+  email: string;
+  summary: string;
+  /** Full message (summary + body); edited for reword. */
+  message: string;
+}
+
+export interface RebasePlan {
+  mode: "rebase" | "cherry";
+  /** Commit (or "--root") the rebase replays onto; unused for cherry pick. */
+  base: string;
+  onto: string;
+  /** Newest first, as shown. */
+  items: RebaseItem[];
+  original: RebaseItem[];
 }
 
 export interface Draft {
@@ -58,7 +82,9 @@ export type DialogState =
   | { kind: "about" }
   | { kind: "plan" }
   | { kind: "prefs" }
-  | { kind: "fileFinder" };
+  | { kind: "fileFinder" }
+  | { kind: "choice"; title: string; text: string; choices: { label: string; variant?: "primary" | "danger" | "default"; onSelect: () => void }[] }
+  | { kind: "message"; title: string; label: string; value: string; confirm: string; help?: string; onSubmit: (v: string) => void };
 
 export interface Settings {
   showLeft: boolean;
@@ -143,6 +169,9 @@ export const DEFAULT_METRICS: Metrics = {
   sha_len: 6,
   avatar_bg: "#199489",
   lazy_offset: 1400,
+  conflict_a: "#15a0bf",
+  conflict_b: "#f2ca33",
+  conflict_output: "#c517b6",
   time_units: [
     [31556736, "y", "red"],
     [2630016, "M", "red"],
@@ -168,7 +197,7 @@ export const DEFAULT_METRICS: Metrics = {
 let nextId = 1;
 export const newId = () => `t${Date.now().toString(36)}${nextId++}`;
 
-const defaultUi = (): TabUi => ({ selection: { type: "wip" }, diff: null, search: "", searchOpen: false, multi: [], compareWorkdir: null, history: null, limit: 0 });
+const defaultUi = (): TabUi => ({ selection: { type: "wip" }, diff: null, search: "", searchOpen: false, multi: [], compareWorkdir: null, history: null, limit: 0, rebase: null, conflict: null });
 
 interface Store {
   tabs: Tab[];

@@ -4,6 +4,7 @@ mod actions;
 mod files;
 mod git;
 mod graph;
+mod rewrite;
 mod metrics;
 mod sample;
 mod shot;
@@ -147,6 +148,16 @@ async fn range_files(path: String, from: String, to: String) -> Result<Vec<git::
 #[tauri::command]
 async fn tracked_files(path: String) -> Result<Vec<String>, String> {
     blocking(move || files::tracked_files(Path::new(&path))).await
+}
+
+#[tauri::command]
+async fn rebase_commits(path: String, base: String) -> Result<Vec<git::Commit>, String> {
+    blocking(move || rewrite::rebase_commits(Path::new(&path), &base)).await?
+}
+
+#[tauri::command]
+async fn conflict_info(path: String, file: String) -> Result<rewrite::ConflictInfo, String> {
+    blocking(move || rewrite::conflict_info(Path::new(&path), &file)).await
 }
 
 /// Open the repository in VS Code (File > Open Repo in VS Code).
@@ -364,6 +375,8 @@ fn main() {
             range_files,
             tracked_files,
             open_in_editor,
+            rebase_commits,
+            conflict_info,
             run_action,
             activity_log,
             sample_repo,

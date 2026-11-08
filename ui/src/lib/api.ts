@@ -61,6 +61,8 @@ export interface RepoView {
   status: { unstaged: FileChange[]; staged: FileChange[]; conflicted: boolean };
   state_note: string | null;
   has_more: boolean;
+  merge_msg: string | null;
+  conflict_labels: [string, string] | null;
   graph: { rows: GraphRow[]; width: number };
   undo: { undo: string | null; redo: string | null };
 }
@@ -112,6 +114,25 @@ export interface RefView {
 
 export type PatchOp = "stage" | "unstage" | "discard";
 
+/** The original's four interactive rebase actions. */
+export type Step = "pick" | "reword" | "squash" | "drop";
+
+export interface TodoItem {
+  action: Step;
+  sha: string;
+  message: string | null;
+}
+
+export interface ConflictInfo {
+  working: string | null;
+  base: string | null;
+  ours: string | null;
+  theirs: string | null;
+  ours_label: string;
+  theirs_label: string;
+  binary: boolean;
+}
+
 export interface DiffLine {
   kind: "Context" | "Added" | "Removed" | "Hunk" | "Meta";
   old_no: number | null;
@@ -144,7 +165,17 @@ export type Action =
   | { type: "deleteTag"; name: string }
   | { type: "fetch" }
   | { type: "pull"; mode: string }
-  | { type: "push"; force: boolean }
+  | { type: "push"; force: boolean; lease?: boolean }
+  | { type: "skipRebase" }
+  | { type: "interactiveRebase"; base: string; items: TodoItem[] }
+  | { type: "interactiveCherryPick"; items: TodoItem[] }
+  | { type: "takeSide"; paths: string[]; side: "ours" | "theirs" }
+  | { type: "markResolved"; paths: string[] }
+  | { type: "markConflicted"; paths: string[] }
+  | { type: "saveResolved"; file: string; content: string }
+  | { type: "fastForward"; branch: string; to: string }
+  | { type: "setUpstream"; branch: string; upstream: string }
+  | { type: "stashRename"; index: number; message: string }
   | { type: "stash"; message: string }
   | { type: "stashPop"; index: number }
   | { type: "stashApply"; index: number }
@@ -191,6 +222,9 @@ export interface Metrics {
   zoom_factors: number[];
   default_zoom: number;
   lazy_offset: number;
+  conflict_a: string;
+  conflict_b: string;
+  conflict_output: string;
   time_units: [number, string, string][];
   initial_commits: number;
   author_zone: number;
@@ -220,6 +254,8 @@ export const api = {
   rangeFiles: (path: string, from: string, to: string) => invoke<FileChange[]>("range_files", { path, from, to }),
   trackedFiles: (path: string) => invoke<string[]>("tracked_files", { path }),
   openInEditor: (path: string) => invoke<void>("open_in_editor", { path }),
+  rebaseCommits: (path: string, base: string) => invoke<Commit[]>("rebase_commits", { path, base }),
+  conflictInfo: (path: string, file: string) => invoke<ConflictInfo>("conflict_info", { path, file }),
   fileDiff: (path: string, source: DiffSource, file: string, untracked: boolean, parent: string | null, ignoreWs = false) =>
     invoke<DiffLine[]>("file_diff", { path, source, file, untracked, parent, ignoreWs }),
   run: (path: string, action: Action) => invoke<ActionResult>("run_action", { path, action }),
