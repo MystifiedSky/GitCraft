@@ -75,6 +75,64 @@ pub fn apply_patch_file(dir: &Path, file: &Path, run: &dyn Fn(&[&str]) -> git::G
 }
 
 #[derive(Serialize, Default)]
+pub struct RepoSummary {
+    /// False when the folder is gone or isn't a repository ("Repo is unreachable and may have been deleted").
+    pub exists: bool,
+    pub branch: Option<String>,
+    /// Changed files in the working folder (the "WIP summary").
+    pub changes: usize,
+    pub ahead: u32,
+    pub behind: u32,
+}
+
+/// Branch, uncommitted-change count and ahead / behind for the Repository Management list.
+pub fn repo_summary(dir: &Path) -> RepoSummary {
+    if !dir.is_dir() {
+        return RepoSummary::default();
+    }
+    let o = git::run(dir, &["status", "--porcelain=v2", "--branch"]);
+    if !o.ok {
+        return RepoSummary::default();
+    }
+    let mut s = RepoSummary { exists: true, ..Default::default() };
+    for line in o.stdout.lines() {
+        if let Some(b) = line.strip_prefix("# branch.head ") {
+            s.branch = (b != "(detached)").then(|| b.to_string());
+        } else if let Some(ab) = line.strip_prefix("# branch.ab ") {
+            let mut it = ab.split_whitespace();
+            s.ahead = it.next().and_then(|x| x.trim_start_matches('+').parse().ok()).unwrap_or(0);
+            s.behind = it.next().and_then(|x| x.trim_start_matches('-').parse().ok()).unwrap_or(0);
+        } else if !line.starts_with('#') && !line.is_empty() {
+            s.changes += 1;
+        }
+    }
+    s
+}
+
+/// The repository's pull / merge request template (GitHub or GitLab locations), if it has one.
+pub fn pr_template(dir: &Path) -> Option<String> {
+    let mut candidates: Vec<PathBuf> = [
+        ".github/pull_request_template.md",
+        ".github/PULL_REQUEST_TEMPLATE.md",
+        "pull_request_template.md",
+        "PULL_REQUEST_TEMPLATE.md",
+        "docs/pull_request_template.md",
+        "docs/PULL_REQUEST_TEMPLATE.md",
+        ".gitlab/merge_request_templates/Default.md",
+    ]
+    .iter()
+    .map(|p| dir.join(p))
+    .collect();
+    // Several templates: GitHub uses .github/PULL_REQUEST_TEMPLATE/*.md; take the first.
+    if let Ok(rd) = std::fs::read_dir(dir.join(".github").join("PULL_REQUEST_TEMPLATE")) {
+        let mut more: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.extension().map(|x| x == "md").unwrap_or(false)).collect();
+        more.sort();
+        candidates.extend(more);
+    }
+    candidates.into_iter().find_map(|p| std::fs::read_to_string(p).ok()).map(|t| t.trim().to_string()).filter(|t| !t.is_empty())
+}
+
+#[derive(Serialize, Default)]
 pub struct ConflictCheck {
     pub target: String,
     pub files: Vec<String>,
@@ -221,6 +279,40 @@ mod tests {
         let p = "From abc Mon Sep 17 00:00:00 2001\nSubject: [PATCH] Fix it\n";
         assert_eq!(number_subject(p, 1, 1), p);
         assert!(number_subject(p, 2, 3).contains("Subject: [PATCH 2/3] Fix it"));
+    }
+
+    #[test]
+    fn summary_of_a_missing_folder_and_a_repo() {
+        assert!(!repo_summary(Path::new("Z:/surely/not/here")).exists);
+        let d = std::env::temp_dir().join(format!("gitcraft-summary-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        assert!(git::run(&d, &["init", "-q", "-b", "main"]).ok);
+        fs::write(d.join("x.txt"), "x").unwrap();
+        let s = repo_summary(&d);
+        assert!(s.exists && s.changes == 1 && s.branch.as_deref() == Some("main"));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn status_finds_staged_renames_even_when_config_turns_them_off() {
+        let d = std::env::temp_dir().join(format!("gitcraft-renames-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        let g = |a: &[&str]| assert!(git::run(&d, a).ok, "{a:?}");
+        g(&["init", "-q", "-b", "main"]);
+        g(&["config", "user.name", "T"]);
+        g(&["config", "user.email", "t@e.x"]);
+        g(&["config", "commit.gpgsign", "false"]);
+        g(&["config", "status.renames", "false"]);
+        fs::write(d.join("old.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-q", "-m", "base"]);
+        g(&["mv", "old.txt", "new.txt"]);
+        let s = git::status(&d);
+        assert_eq!(s.staged.len(), 1, "{:?}", s.staged);
+        assert_eq!((s.staged[0].path.as_str(), s.staged[0].status), ("new.txt", 'R'));
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]

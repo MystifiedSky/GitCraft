@@ -4,7 +4,8 @@ import { describe, expect, it } from "vitest";
 import { parseConflicts } from "./components/ConflictView";
 import { comboOf, fuzzy } from "./lib/commands";
 import { todo } from "./lib/rewrite";
-import { timeSince } from "./lib/utils";
+import { timeSince, withCoauthors } from "./lib/utils";
+import { indexOnly, predictStatus } from "./lib/repo";
 import { DEFAULT_METRICS, type RebasePlan } from "./lib/store";
 
 describe("merge tool", () => {
@@ -60,5 +61,29 @@ describe("time format (the original's timeSince)", () => {
     expect(timeSince(now - 2 * 604800, units, now).text).toBe("2w");
     expect(timeSince(now - 31556736, units, now).text).toBe("1y");
     expect(timeSince(now - 5, units, now).text).toBe("5s");
+  });
+});
+
+describe("co-authors", () => {
+  it("adds one Co-authored-by line per valid person after a blank line", () => {
+    expect(withCoauthors("Body", "Ann <ann@x.org>, bad entry, Bo <bo@y.io>")).toBe("Body\n\nCo-authored-by: Ann <ann@x.org>\nCo-authored-by: Bo <bo@y.io>");
+    expect(withCoauthors("", "Ann <ann@x.org>")).toBe("Co-authored-by: Ann <ann@x.org>");
+    expect(withCoauthors("Body", "")).toBe("Body");
+  });
+});
+
+describe("staging feedback", () => {
+  const s = { unstaged: [{ path: "a.txt", status: "M" }, { path: "new.txt", status: "?" }, { path: "c.txt", status: "U" }], staged: [{ path: "b.txt", status: "A" }], conflicted: true };
+  it("moves files to Staged straight away (new files become added; conflicts stay put)", () => {
+    const r = predictStatus(s, { type: "stageAll" })!;
+    expect(r.unstaged.map((f) => f.path)).toEqual(["c.txt"]);
+    expect(r.staged).toEqual([{ path: "a.txt", status: "M" }, { path: "b.txt", status: "A" }, { path: "new.txt", status: "A" }]);
+  });
+  it("moves one file back to Unstaged, and only staging actions count as index-only", () => {
+    const r = predictStatus(s, { type: "unstage", paths: ["b.txt"] })!;
+    expect(r.staged).toEqual([]);
+    expect(r.unstaged.find((f) => f.path === "b.txt")?.status).toBe("?");
+    expect(indexOnly({ type: "stageAll" })).toBe(true);
+    expect(indexOnly({ type: "commit", summary: "x", description: "", amend: false, stageAll: false, skipHooks: false })).toBe(false);
   });
 });

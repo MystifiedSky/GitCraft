@@ -102,6 +102,10 @@ pub struct GitOut {
 }
 
 impl GitOut {
+    pub fn failed(why: &str) -> Self {
+        GitOut { ok: false, stdout: String::new(), stderr: why.to_string() }
+    }
+
     pub fn message(&self) -> String {
         let s = if self.stderr.trim().is_empty() { &self.stdout } else { &self.stderr };
         s.trim().to_string()
@@ -195,17 +199,42 @@ pub fn load(dir: &Path, max_commits: usize) -> RepoData {
 pub fn load_view(dir: &Path, max_commits: usize, view: &RefView) -> RepoData {
     let mut d = RepoData::default();
 
-    // Refs (branches, remote branches, tags) with ahead/behind info.
-    let refs = run(
-        dir,
-        &[
-            "for-each-ref",
-            "--format=%(refname)%1f%(objectname)%1f%(*objectname)%1f%(upstream:short)%1f%(upstream:track)",
-            "refs/heads",
-            "refs/remotes",
-            "refs/tags",
-        ],
-    );
+    // History, newest first, every branch.
+    // One more than asked for tells us whether there is more history to load.
+    let n = format!("-n{}", max_commits + 1);
+    let revs = log_revs(view);
+    let mut log_args: Vec<&str> = vec!["log"];
+    log_args.extend(revs.iter().map(|s| s.as_str()));
+    log_args.extend(["--date-order", n.as_str(), "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%s%x1f%b%x1e", "--"]);
+
+    // The ten reads don't depend on each other, and on Windows each Git process costs 20-50 ms just to start,
+    // so they run at the same time instead of one after another.
+    let (refs, head, head_sha, log, st, wt, sm, remotes, work, gitdir) = std::thread::scope(|s| {
+        // Refs (branches, remote branches, tags) with ahead/behind info.
+        let refs = s.spawn(|| {
+            run(
+                dir,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname)%1f%(objectname)%1f%(*objectname)%1f%(upstream:short)%1f%(upstream:track)",
+                    "refs/heads",
+                    "refs/remotes",
+                    "refs/tags",
+                ],
+            )
+        });
+        let head = s.spawn(|| run(dir, &["symbolic-ref", "--short", "-q", "HEAD"]));
+        let head_sha = s.spawn(|| run(dir, &["rev-parse", "HEAD"]));
+        let log = s.spawn(|| run(dir, &log_args));
+        let st = s.spawn(|| run(dir, &["stash", "list", "--format=%H%x1f%gs"]));
+        let wt = s.spawn(|| run(dir, &["worktree", "list", "--porcelain"]));
+        let sm = s.spawn(|| run(dir, &["config", "--file", ".gitmodules", "--get-regexp", "path"]));
+        let remotes = s.spawn(|| run(dir, &["remote"]));
+        let work = s.spawn(|| status(dir));
+        let gitdir = s.spawn(|| run(dir, &["rev-parse", "--git-dir"]));
+        let j = |h: std::thread::ScopedJoinHandle<'_, GitOut>| h.join().unwrap_or_else(|_| GitOut::failed("a Git read stopped unexpectedly"));
+        (j(refs), j(head), j(head_sha), j(log), j(st), j(wt), j(sm), j(remotes), work.join().unwrap_or_default(), j(gitdir))
+    });
     for line in refs.stdout.lines() {
         let f: Vec<&str> = line.split('\x1f').collect();
         if f.len() < 5 {
@@ -229,20 +258,11 @@ pub fn load_view(dir: &Path, max_commits: usize, view: &RefView) -> RepoData {
         d.refs.push(GitRef { name, full, sha, kind, upstream: f[3].to_string(), ahead, behind });
     }
 
-    let head = run(dir, &["symbolic-ref", "--short", "-q", "HEAD"]);
     if head.ok {
         d.head_branch = Some(head.stdout.trim().to_string());
     }
-    d.head_sha = run(dir, &["rev-parse", "HEAD"]).stdout.trim().to_string();
+    d.head_sha = head_sha.stdout.trim().to_string();
 
-    // History, newest first, every branch.
-    // One more than asked for tells us whether there is more history to load.
-    let n = format!("-n{}", max_commits + 1);
-    let revs = log_revs(view);
-    let mut args: Vec<&str> = vec!["log"];
-    args.extend(revs.iter().map(|s| s.as_str()));
-    args.extend(["--date-order", n.as_str(), "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%s%x1f%b%x1e", "--"]);
-    let log = run(dir, &args);
     for rec in log.stdout.split('\x1e') {
         let rec = rec.trim_start_matches(['\n', '\r']);
         if rec.is_empty() {
@@ -270,7 +290,6 @@ pub fn load_view(dir: &Path, max_commits: usize, view: &RefView) -> RepoData {
         d.index_of.insert(c.sha.clone(), i);
     }
 
-    let st = run(dir, &["stash", "list", "--format=%H%x1f%gs"]);
     for (i, line) in st.stdout.lines().enumerate() {
         let f: Vec<&str> = line.split('\x1f').collect();
         if f.len() == 2 {
@@ -278,7 +297,6 @@ pub fn load_view(dir: &Path, max_commits: usize, view: &RefView) -> RepoData {
         }
     }
 
-    let wt = run(dir, &["worktree", "list", "--porcelain"]);
     let mut cur: Option<Worktree> = None;
     for line in wt.stdout.lines() {
         if let Some(p) = line.strip_prefix("worktree ") {
@@ -304,17 +322,16 @@ pub fn load_view(dir: &Path, max_commits: usize, view: &RefView) -> RepoData {
         d.worktrees.push(w);
     }
 
-    let sm = run(dir, &["config", "--file", ".gitmodules", "--get-regexp", "path"]);
     for line in sm.stdout.lines() {
         if let Some((_, p)) = line.split_once(' ') {
             d.submodules.push(p.to_string());
         }
     }
 
-    d.remotes = run(dir, &["remote"]).stdout.lines().map(|s| s.to_string()).collect();
-    d.status = status(dir);
+    d.remotes = remotes.stdout.lines().map(|s| s.to_string()).collect();
+    d.status = work;
 
-    let gitdir = run(dir, &["rev-parse", "--git-dir"]).stdout.trim().to_string();
+    let gitdir = gitdir.stdout.trim().to_string();
     let gd = dir.join(gitdir);
     if gd.join("MERGE_HEAD").exists() {
         d.state_note = Some("merging".into());
@@ -347,7 +364,14 @@ fn parse_track(s: &str) -> (usize, usize) {
 
 pub fn status(dir: &Path) -> WorkStatus {
     let mut w = WorkStatus::default();
-    let o = run(dir, &["status", "--porcelain=v1", "-z", "-uall"]);
+    // --no-optional-locks: don't rewrite the index while reading it, so a status check never
+    // wakes the .git watcher and starts another refresh.
+    // The original asks libgit2 (git_status_list_new, nodegit.node 0x1802d7b00) for INCLUDE_UNTRACKED |
+    // RECURSE_UNTRACKED_DIRS | RENAMES_HEAD_TO_INDEX | RENAMES_INDEX_TO_WORKDIR, showing index and working folder.
+    // -uall = untracked files inside untracked folders; --find-renames=50% = rename detection at libgit2's
+    // default similarity, whatever status.renames says in the person's Git config. libgit2 re-reads the index
+    // but only writes it back with UPDATE_INDEX (0x2000), which the original doesn't pass: --no-optional-locks.
+    let o = run(dir, &["--no-optional-locks", "status", "--porcelain=v1", "-z", "-uall", "--find-renames=50%"]);
     let mut parts = o.stdout.split('\0').peekable();
     while let Some(entry) = parts.next() {
         if entry.len() < 4 {

@@ -37,6 +37,13 @@ export function branchMenu(repo: RepoView, ref: GitRef): MenuEntry[] {
   }
   if (head && !isHead) {
     items.push({ label: `Merge ${ref.name} into ${head}`, onSelect: () => act(path, { type: "merge", branch: ref.name }) });
+    items.push({
+      label: `Squash merge ${ref.name} into ${head}`,
+      onSelect: async () => {
+        // The original's commit message for this: "Squash merge {0} into {1}".
+        if (await act(path, { type: "mergeSquash", branch: ref.name })) useStore.getState().setDraft(path, { summary: `Squash merge ${ref.name} into ${head}`, description: "", amend: false });
+      },
+    });
     items.push({ label: `Rebase ${head} onto ${ref.name}`, onSelect: () => act(path, { type: "rebase", onto: ref.name }) });
     items.push({ label: `Interactive Rebase ${head} onto ${ref.name}`, onSelect: () => openRebase(activeTab(), path, ref.name, ref.name) });
     // Fast-forward the checked-out branch when the other ref is strictly ahead of it.
@@ -203,13 +210,19 @@ export function stashMenu(repo: RepoView, st: Stash): MenuEntry[] {
   ];
 }
 
-export function fileMenu(repo: RepoView, file: string, staged: boolean, inCommit: boolean): MenuEntry[] {
+export function fileMenu(repo: RepoView, file: string, staged: boolean, inCommit: boolean, commitSha?: string): MenuEntry[] {
   const path = repo.path;
   const items: MenuEntry[] = [];
+  const stash = commitSha ? repo.stashes.find((st) => st.sha === commitSha) : undefined;
+  if (stash) {
+    items.push({ label: "Apply stashed file", onSelect: () => act(path, { type: "stashTakeFile", index: stash.index, path: file }) });
+    items.push({ separator: true });
+  }
   if (!inCommit) {
     if (staged) items.push({ label: "Unstage", onSelect: () => act(path, { type: "unstage", paths: [file] }, true) });
     else {
       items.push({ label: "Stage", onSelect: () => act(path, { type: "stage", paths: [file] }, true) });
+      items.push({ label: "Stash file", onSelect: () => act(path, { type: "stashFiles", paths: [file], message: "" }) });
       items.push({
         label: "Discard changes",
         danger: true,

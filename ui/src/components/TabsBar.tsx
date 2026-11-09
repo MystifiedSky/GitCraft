@@ -1,5 +1,5 @@
 import { Bell, ChevronDown, Folder, GitBranch, Plus, Rocket, Settings, X } from "lucide-react";
-import { useStore } from "@/lib/store";
+import { useStore, usePanelStore } from "@/lib/store";
 import { DropMenu, type MenuEntry } from "./ui/menu";
 import { CtxMenu } from "./ui/menu";
 import { ProfileMark } from "./Icons";
@@ -8,7 +8,7 @@ import { cn, MOD } from "@/lib/utils";
 
 /** Repository tabs, like the original's tab strip. */
 export function TabsBar() {
-  const s = useStore();
+  const s = usePanelStore();
   const tabList: MenuEntry[] = [
     { heading: "Open Tabs" },
     ...s.tabs.map((t) => ({ label: t.title, onSelect: () => s.setActive(t.id) })),

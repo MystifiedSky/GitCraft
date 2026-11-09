@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { useShallow } from "zustand/react/shallow";
 import type { DiffSource, Metrics } from "./api";
 
 export type TabKind = "repo" | "start" | "launchpad";
@@ -94,6 +95,7 @@ export type DialogState =
   | { kind: "workspaces" }
   | { kind: "choice"; title: string; text: string; choices: { label: string; variant?: "primary" | "danger" | "default"; onSelect: () => void }[] }
   | { kind: "info"; title: string; text: string }
+  | { kind: "repoManagement" }
   | { kind: "message"; title: string; label: string; value: string; confirm: string; help?: string; onSubmit: (v: string) => void };
 
 export interface Settings {
@@ -134,6 +136,10 @@ export interface Settings {
   /** Tab / repository aliases (path -> name). */
   aliases: Record<string, string>;
   spellcheck: boolean;
+  /** Check GitHub Releases for new versions and download them in the background. */
+  autoUpdate: boolean;
+  /** Starred repositories (Repository Management, start screen, Open Favorite Repo 1-9). */
+  favorites: string[];
   /** Commit template: prefilled summary / description. */
   templateSummary: string;
   templateDescription: string;
@@ -218,6 +224,8 @@ export const DEFAULT_SETTINGS: Settings = {
   workspaces: [],
   aliases: {},
   spellcheck: true,
+  autoUpdate: true,
+  favorites: [],
   templateSummary: "",
   templateDescription: "",
   diffTool: "",
@@ -430,3 +438,17 @@ export function useTabUi(id: string): TabUi {
   return useStore((s) => s.ui[id]) ?? defaultUiConst;
 }
 const defaultUiConst = defaultUi();
+
+/** The whole store except the busy note, job progress and toasts. Those change several times during every
+ *  action; big panels (file lists, branch lists, diffs) use this so they don't re-render for them. */
+export function usePanelStore() {
+  return useStore(
+    useShallow((st: Store) => {
+      const { busy, job, toasts, ...rest } = st;
+      void busy;
+      void job;
+      void toasts;
+      return rest;
+    }),
+  );
+}

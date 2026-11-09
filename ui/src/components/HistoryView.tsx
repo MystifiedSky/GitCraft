@@ -3,7 +3,7 @@ import { History, ScanLine, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { BlameLine, RepoView } from "@/lib/api";
 import { api } from "@/lib/api";
-import { useStore } from "@/lib/store";
+import { useStore, usePanelStore } from "@/lib/store";
 import { Avatar } from "./Icons";
 import { MonacoDiff } from "./MonacoViews";
 import { cn, fullDate, GRAPH_COLORS, timeSince } from "@/lib/utils";
@@ -20,7 +20,7 @@ function Since({ time }: { time: number }) {
 
 /** File History and Blame for one file (opened from a file's menu or Ctrl+Shift+H). */
 export function HistoryView({ repo, tabId, file, mode, sha }: { repo: RepoView; tabId: string; file: string; mode: "history" | "blame"; sha: string | null }) {
-  const s = useStore();
+  const s = usePanelStore();
   const m = s.metrics;
   const hist = useQuery({ queryKey: ["history", repo.path, file], queryFn: () => api.fileHistory(repo.path, file) });
   const entries = hist.data ?? [];

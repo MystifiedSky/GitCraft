@@ -206,6 +206,59 @@ pub fn apply_part(dir: &Path, file: &str, untracked: bool, op: PatchOp, hunk: us
     Ok((patch, cached, reverse))
 }
 
+/// libgit2's hunk rule (nodegit.node 0x180245620): a hunk applies only at its own position - the old start
+/// line, moved by the lines earlier hunks added or removed - and every preimage line (context and removed lines)
+/// must match there exactly. Otherwise: "hunk at line N did not apply". Git's own `apply` would search nearby
+/// lines instead, so GitCraft checks this first. For a reverse patch the preimage is the context and '+' lines,
+/// starting at the new start line.
+pub fn check_hunks_exact(text: &str, patch: &str, reverse: bool) -> Result<(), String> {
+    let file: Vec<&str> = text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)).collect();
+    let mut shift: i64 = 0;
+    let mut lines = patch.lines().peekable();
+    while let Some(line) = lines.next() {
+        let Some(rest) = line.strip_prefix("@@ -") else { continue };
+        let nums: Vec<i64> = rest
+            .split(|c: char| c == ' ' || c == ',' || c == '+')
+            .take_while(|t| *t != "@@")
+            .filter_map(|t| t.parse().ok())
+            .collect();
+        // "-a,b +c,d" (counts may be missing when they are 1).
+        let (old_start, new_start) = match nums.len() {
+            4 => (nums[0], nums[2]),
+            3 => (nums[0], if rest.split(' ').next().unwrap_or("").contains(',') { nums[2] } else { nums[1] }),
+            2 => (nums[0], nums[1]),
+            _ => continue,
+        };
+        let start = if reverse { new_start } else { old_start };
+        let (keep, gone) = if reverse { ('+', '-') } else { ('-', '+') };
+        let mut pre = Vec::new();
+        let mut post_len = 0i64;
+        while let Some(l) = lines.peek() {
+            if l.starts_with("@@") || l.starts_with("diff ") {
+                break;
+            }
+            let l = lines.next().unwrap_or_default();
+            if l.starts_with(' ') || l.starts_with(keep) {
+                pre.push(&l[1..]);
+            }
+            if l.starts_with(' ') || l.starts_with(gone) {
+                post_len += 1;
+            }
+        }
+        if start == 0 && pre.is_empty() {
+            shift += post_len;
+            continue;
+        }
+        let at = start - 1 + shift;
+        let ok = at >= 0 && pre.iter().enumerate().all(|(i, p)| file.get((at as usize) + i).map(|f| f == p).unwrap_or(false));
+        if !ok {
+            return Err(format!("hunk at line {start} did not apply"));
+        }
+        shift += post_len - pre.len() as i64;
+    }
+    Ok(())
+}
+
 pub fn apply_patch(dir: &Path, patch: &str, cached: bool, reverse: bool) -> Result<(), String> {
     use std::io::Write;
     use std::process::Stdio;
@@ -440,6 +493,17 @@ world
         let mut big = vec![b'a'; 8000];
         big.push(0);
         assert!(!is_binary(&big));
+    }
+
+    #[test]
+    fn hunks_apply_only_at_their_own_line() {
+        let patch = "--- a/f\n+++ b/f\n@@ -2,2 +2,2 @@\n b\n-c\n+C\n";
+        // Forward: lines 2-3 must be "b", "c".
+        assert!(check_hunks_exact("a\nb\nc\nd\n", patch, false).is_ok());
+        // The same text one line lower would be found by git apply, but not by libgit2.
+        assert_eq!(check_hunks_exact("x\na\nb\nc\nd\n", patch, false).unwrap_err(), "hunk at line 2 did not apply");
+        // Reverse (revert): the file must hold "b", "C" at the new start line; CRLF files compare the same.
+        assert!(check_hunks_exact("a\r\nb\r\nC\r\nd\r\n", patch, true).is_ok());
     }
 
     #[test]

@@ -261,6 +261,10 @@ export type Action =
   | { type: "lfsInstall" }
   | { type: "composeCommits"; commits: { summary: string; description: string; files: string[] }[] }
   | { type: "applyPatchFile"; file: string }
+  | { type: "stashFiles"; paths: string[]; message: string }
+  | { type: "stashTakeFile"; index: number; path: string }
+  | { type: "revertHunk"; sha: string; parent: string | null; file: string; hunk: number; lines: number[] | null }
+  | { type: "mergeSquash"; branch: string }
   | { type: "externalDiff"; file: string; staged: boolean; tool: string }
   | { type: "externalMerge"; file: string; tool: string }
   | { type: "lfsTrack"; pattern: string }
@@ -340,6 +344,7 @@ export interface ActionResult {
 
 export const api = {
   launchOptions: () => invoke<{ screenshot: boolean; shot_view: string | null; version: string; metrics: Metrics }>("launch_options"),
+  repoStatus: (path: string) => invoke<RepoView["status"]>("repo_status", { path }),
   openRepo: (path: string, max?: number, view?: RefView) => invoke<RepoView>("open_repo", { path, max: max ?? null, view: view ?? null }),
   commitFiles: (path: string, sha: string) => invoke<FileChange[]>("commit_files", { path, sha }),
   fileVersions: (path: string, source: DiffSource, file: string, untracked: boolean, parent: string | null) =>

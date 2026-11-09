@@ -1,3 +1,5 @@
+import { onWatcherChange } from "@/lib/repo";
+import { startUpdateChecks } from "@/lib/updates";
 import { listen } from "@tauri-apps/api/event";
 import { ChevronRight } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -33,6 +35,7 @@ export default function App() {
   useShortcuts();
   useWatchers();
   useAutoFetch();
+  useUpdateChecks();
   const theme = useStore((x) => x.settings.theme);
   useEffect(() => applyTheme(theme), [theme]);
 
@@ -236,6 +239,13 @@ function useStartup() {
   }, []);
 }
 
+/** Look for GitCraft updates shortly after start-up and every few hours (not in screenshot mode). */
+function useUpdateChecks() {
+  const screenshot = useStore((s) => s.screenshot);
+  const auto = useStore((s) => s.settings.autoUpdate);
+  useEffect(() => (screenshot || !auto ? undefined : startUpdateChecks()), [screenshot, auto]);
+}
+
 /** Auto-fetch every open repository every N minutes (0 = off), pruning if enabled. A failure is
  *  reported once per repository, like the original's "Autofetch failed" notice. */
 function useAutoFetch() {
@@ -276,8 +286,8 @@ function useWatchers() {
     };
   }, []);
   useEffect(() => {
-    const un = listen<string>("repo-changed", (e) => {
-      refresh(e.payload);
+    const un = listen<{ path: string; full: boolean }>("repo-changed", (e) => {
+      onWatcherChange(e.payload.path, e.payload.full);
     });
     return () => {
       un.then((f) => f());

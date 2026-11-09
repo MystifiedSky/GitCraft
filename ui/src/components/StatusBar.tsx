@@ -2,9 +2,11 @@ import { Keyboard, List, Loader2, Map as MapIcon, Rocket, ZoomIn } from "lucide-
 import { useStore } from "@/lib/store";
 import { api } from "@/lib/api";
 import { resetZoom } from "@/lib/zoom";
+import { installAndRestart, useUpdates } from "@/lib/updates";
 
 export function StatusBar() {
   const s = useStore();
+  const up = useUpdates();
   return (
     <div className="h-[26px] bg-panel flex items-center shrink-0 border-t border-black/30 text-[13px] text-white/90">
       <div className="flex items-center gap-2 pl-[22px] flex-1 min-w-0">
@@ -21,6 +23,12 @@ export function StatusBar() {
           </button>
         )}
       </div>
+      {up.phase === "ready" && (
+        <button className="px-3 h-full text-[12.5px] text-good hover:bg-white/5 font-semibold" title={`Install GitCraft ${up.version} and restart`} onClick={installAndRestart}>
+          Update Ready (Restart GitCraft)
+        </button>
+      )}
+      {up.phase === "downloading" && <span className="px-3 text-[12px] text-fg2">Downloading update{up.percent != null ? ` ${up.percent}%` : "…"}</span>}
       <SB title="Activity log" onClick={() => s.setDialog({ kind: "log" })}>
         <List size={15} />
       </SB>

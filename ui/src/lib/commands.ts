@@ -1,3 +1,4 @@
+import { openFavorite } from "@/components/RepoManagement";
 // Every command GitCraft offers, in one place: the command palette lists them, the keyboard
 // handler runs them, and the shortcut editor changes their keys. Groups follow the original's
 // Keyboard Shortcuts headers (Repo Actions, Navigation, Command Palette, UI).
@@ -126,6 +127,8 @@ export const COMMANDS: Command[] = [
   { id: "nav:clone", label: "Clone Repo", group: "Navigation", keys: "Ctrl+N", run: () => st().setDialog({ kind: "clone" }) },
   { id: "nav:init", label: "Init Repo", group: "Navigation", keys: "Ctrl+I", keywords: "initialize create", run: () => st().setDialog({ kind: "init" }) },
   { id: "nav:workspaces", label: "Open Workspaces", group: "Navigation", picker: "workspace" },
+  { id: "nav:repoManagement", label: "Open Repo Management", group: "Navigation", keys: "Ctrl+Alt+O", keywords: "repositories favorites recent fetch all pull all", run: () => st().setDialog({ kind: "repoManagement" }) },
+  ...[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n): Command => ({ id: `nav:favorite${n}`, label: `Open Favorite Repo ${n}`, group: "Navigation", run: () => openFavorite(n) })),
 
   // Command Palette
   { id: "palette:toggle", label: "Toggle Command Palette", group: "Command Palette", keys: "Ctrl+Shift+P", inInputs: true, run: () => togglePalette() },

@@ -15,7 +15,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { DiffLine, DiffSource, PatchOp, RepoView } from "@/lib/api";
 import { api, WORKDIR } from "@/lib/api";
 import type { DiffTarget } from "@/lib/store";
-import { useStore } from "@/lib/store";
+import { useStore, usePanelStore } from "@/lib/store";
 import { act, confirmThen, refresh } from "@/lib/repo";
 import { Button } from "./ui/button";
 import { StatusIcon } from "./Icons";
@@ -37,7 +37,7 @@ export function sourceLabel(src: DiffSource, shaLen: number) {
 
 /** A file's changes, opened over the graph like the original: Hunk / Inline / Split diff, or File View. */
 export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: string; target: DiffTarget }) {
-  const s = useStore();
+  const s = usePanelStore();
   const set = s.settings;
   const m = s.metrics;
   const [view, setView] = useState<"diff" | "file">("diff");
@@ -352,6 +352,19 @@ function HunkView({
                     {n ? `Stage ${n} Line${n === 1 ? "" : "s"}` : "Stage Hunk"}
                   </Button>
                 </>
+              )}
+              {target.source.kind === "Commit" && (
+                <Button
+                  size="sm"
+                  className="h-[20px] text-[11px]"
+                  title="Apply the inverse of this hunk to your working directory"
+                  onClick={() => {
+                    const sha = (target.source as { kind: "Commit"; sha: string }).sha;
+                    act(repo.path, { type: "revertHunk", sha, parent: target.parent, file: target.file, hunk: hi, lines: n ? picked : null }).then(() => setSel(null));
+                  }}
+                >
+                  {n ? `Revert ${n} Line${n === 1 ? "" : "s"}` : "Revert Hunk"}
+                </Button>
               )}
               {actions && staged && (
                 <Button size="sm" variant="danger" className="h-[20px] text-[11px]" onClick={() => run("unstage", hi, n ? picked : null)}>

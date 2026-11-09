@@ -1,0 +1,91 @@
+# Builds GitCraft for Windows, macOS and Linux when a version tag (v1.2.3) is pushed, signs the update
+# files with the private key kept in the repository's secrets, and attaches everything (installers and
+# latest.json, which installed copies read to find updates) to a draft GitHub Release.
+# Publish the draft and every installed copy offers the update. See RELEASING.md.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: ""
+          - platform: macos-latest
+            args: "--target universal-apple-darwin"
+          - platform: ubuntu-22.04
+            args: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches the app version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          v=$(node -p "require('./tauri.conf.json').version")
+          if [ "v$v" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match version $v in tauri.conf.json (run: npm --prefix ui run version:set -- <version>)"
+            exit 1
+          fi
+
+      - name: Check the update signing key is set up
+        shell: bash
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::The TAURI_SIGNING_PRIVATE_KEY secret is missing. Run scripts/setup-updates.ps1 once (see RELEASING.md)."
+            exit 1
+          fi
+          if [ -z "$(node -p "require('./tauri.conf.json').plugins.updater.pubkey")" ]; then
+            echo "::error::plugins.updater.pubkey in tauri.conf.json is empty. Run scripts/setup-updates.ps1 once and commit the change."
+            exit 1
+          fi
+
+      - name: Install Linux build packages
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: swatinem/rust-cache@v2
+
+      - name: Install front-end packages
+        run: npm ci --prefix ui
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tauriScript: node ui/node_modules/@tauri-apps/cli/tauri.js
+          args: --config tauri.release.conf.json ${{ matrix.args }}
+          tagName: v__VERSION__
+          releaseName: GitCraft v__VERSION__
+          releaseBody: |
+            Download the installer for your system below. Copies of GitCraft that are already installed will offer this update by themselves.
+          releaseDraft: true
+          prerelease: false
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true

@@ -18,14 +18,14 @@ import {
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type { Commit, FileChange, RepoView } from "@/lib/api";
 import { api, WORKDIR } from "@/lib/api";
-import { useStore, useTabUi, type DiffTarget } from "@/lib/store";
+import { useStore, useTabUi, type DiffTarget, usePanelStore } from "@/lib/store";
 import { act, confirmThen, copy } from "@/lib/repo";
 import { fileMenu } from "@/lib/menus";
 import { baseFor, dropCommits, headLine, openCherryPick, openRebase, squashCommits } from "@/lib/rewrite";
 import { CtxMenu } from "./ui/menu";
 import { Button } from "./ui/button";
 import { Avatar, StatusIcon } from "./Icons";
-import { cn, fullDate, mix, MOD } from "@/lib/utils";
+import { cn, fullDate, mix, MOD, withCoauthors } from "@/lib/utils";
 import { applyPatch, composeCommits, explainCommit, generateCommitMessage, generateStashTitle, patchName, savePatch } from "@/lib/ai";
 
 /** Right panel: staging and committing (WIP) or the details of a selected commit. */
@@ -60,7 +60,7 @@ function AiButton({ title, onClick }: { title: string; onClick: () => void }) {
 }
 
 function ViewSwitch() {
-  const s = useStore();
+  const s = usePanelStore();
   const v = s.settings.fileView;
   return (
     <div className="flex items-center h-[38px] px-[8px] shrink-0">
@@ -207,7 +207,7 @@ function countFiles(n: TreeNode): Record<string, number> {
 }
 
 function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
-  const s = useStore();
+  const s = usePanelStore();
   const ui = useTabUi(tabId);
   const draft = s.drafts[repo.path] ?? { summary: "", description: "", amend: false };
   const [tab, setTab] = useState<"commit" | "stash" | "patch">("commit");
@@ -238,6 +238,8 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
   const left = s.metrics.summary_counter - draft.summary.length; // the original's 72-character summary counter
   const push = s.settings.pushAfterCommit;
   const [skipHooks, setSkipHooks] = useState(s.settings.skipHooks);
+  const [coauthors, setCoauthors] = useState("");
+  const knownAuthors = useMemo(() => [...new Set(repo.commits.map((c) => `${c.author} <${c.email}>`))].slice(0, 200), [repo.commits]);
 
   const openDiff = (f: FileChange, isStaged: boolean) => {
     const target: DiffTarget = { source: { kind: isStaged ? "Staged" : "Unstaged" }, file: f.path, untracked: f.status === "?", parent: null };
@@ -245,8 +247,10 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
   };
 
   const doCommit = async (stageAll: boolean) => {
-    const ok = await act(repo.path, { type: "commit", summary: draft.summary, description: draft.description, amend: draft.amend, stageAll, skipHooks });
+    const description = withCoauthors(draft.description, coauthors);
+    const ok = await act(repo.path, { type: "commit", summary: draft.summary, description, amend: draft.amend, stageAll, skipHooks });
     if (ok) {
+      setCoauthors("");
       s.setDraft(repo.path, { summary: "", description: "", amend: false });
       s.setUi(tabId, { diff: null });
       if (push) await act(repo.path, { type: "push", force: false });
@@ -472,6 +476,23 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
               </label>
             )}
             {optionsOpen && (
+              <label className="flex items-center gap-2 text-[12.5px] text-white/80 pl-5" title="Adds a Co-authored-by line for each person (separate several with commas)">
+                Co-authors:
+                <input
+                  list="gitcraft-authors"
+                  value={coauthors}
+                  onChange={(e) => setCoauthors(e.target.value)}
+                  placeholder="Name <email>, …"
+                  className="flex-1 min-w-0 h-[22px] px-1.5 bg-field rounded-[2px] border border-white/10 outline-none focus:border-accent text-[12px]"
+                />
+                <datalist id="gitcraft-authors">
+                  {knownAuthors.map((a) => (
+                    <option key={a} value={a} />
+                  ))}
+                </datalist>
+              </label>
+            )}
+            {optionsOpen && (
               <label className="flex items-center gap-2 text-[12.5px] text-white/80 pl-5 cursor-pointer">
                 <input type="checkbox" checked={skipHooks} onChange={(e) => setSkipHooks(e.target.checked)} className="accent-[#80B1EA]" />
                 Skip Git hooks
@@ -555,7 +576,7 @@ function TabBtn({ active, onClick, children, title }: { active: boolean; onClick
 }
 
 function CommitDetails({ repo, tabId, commit: c }: { repo: RepoView; tabId: string; commit: Commit }) {
-  const s = useStore();
+  const s = usePanelStore();
   const ui = useTabUi(tabId);
   const files = useQuery({ queryKey: ["commitFiles", repo.path, c.sha], queryFn: () => api.commitFiles(repo.path, c.sha), staleTime: Infinity });
   const counts = useMemo(() => {
@@ -610,7 +631,7 @@ function CommitDetails({ repo, tabId, commit: c }: { repo: RepoView; tabId: stri
           files={files.data ?? []}
           activeFile={ui.diff?.source.kind === "Commit" ? ui.diff.file : undefined}
           onOpen={(f) => s.setUi(tabId, { diff: { source: { kind: "Commit", sha: c.sha }, file: f.path, untracked: false, parent: c.parents[0] ?? null } })}
-          menu={(f) => fileMenu(repo, f.path, false, true)}
+          menu={(f) => fileMenu(repo, f.path, false, true, c.sha)}
         />
       </div>
     </div>
@@ -619,7 +640,7 @@ function CommitDetails({ repo, tabId, commit: c }: { repo: RepoView; tabId: stri
 
 /** Two commits (or a commit and the working folder): the files that differ and their diffs. */
 function ComparePanel({ repo, tabId, from, to }: { repo: RepoView; tabId: string; from: string; to: string }) {
-  const s = useStore();
+  const s = usePanelStore();
   const ui = useTabUi(tabId);
   const n = s.metrics.sha_len;
   const files = useQuery({
@@ -656,7 +677,7 @@ function ComparePanel({ repo, tabId, from, to }: { repo: RepoView; tabId: string
 
 /** Three or more commits picked: what can be done with them together. */
 function MultiPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
-  const s = useStore();
+  const s = usePanelStore();
   const ui = useTabUi(tabId);
   const picked = repo.commits.filter((c) => ui.multi.includes(c.sha));
   const oldestFirst = [...picked].reverse().map((c) => c.sha);

@@ -1,3 +1,4 @@
+import { RepoManagementDialog } from "./RepoManagement";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
@@ -97,6 +98,8 @@ export function Dialogs() {
           <p className="text-[13px] text-fg leading-relaxed whitespace-pre-wrap">{d.text}</p>
         </Dialog>
       );
+    case "repoManagement":
+      return <RepoManagementDialog onClose={close} />;
     case "info":
       return (
         <Dialog open onClose={close} title={d.title} width={560} footer={<Button variant="primary" onClick={close}>Close</Button>}>
@@ -511,6 +514,7 @@ function PrefsDialog({ onClose }: { onClose: () => void }) {
           ))}
         </select>
       </Field>
+      <Check label="Automatically download GitCraft updates (from GitHub Releases)" value={set.autoUpdate} onChange={(v) => s.setSettings({ autoUpdate: v })} />
       <Check label="Enable spell checking (commit messages)" value={set.spellcheck} onChange={(v) => s.setSettings({ spellcheck: v })} />
       <Check label="Show a notice after successful actions" value={set.notifySuccess} onChange={(v) => s.setSettings({ notifySuccess: v })} />
       <Check label="Show ghost branch/tag when hovering over or selecting a commit" value={set.ghostRefs} onChange={(v) => s.setSettings({ ghostRefs: v })} />

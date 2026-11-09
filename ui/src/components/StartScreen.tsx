@@ -8,6 +8,7 @@ import { useStore } from "@/lib/store";
 import { openRepoPath } from "@/lib/repo";
 import { openWorkspace } from "@/lib/prefs";
 import { MOD } from "@/lib/utils";
+import { RELEASES_URL } from "@/lib/updates";
 
 /** "New Tab" screen, laid out like the original: Repositories (Open / Clone / Create, search, Recent)
  *  on the left and integrations / resources on the right. */
@@ -43,7 +44,27 @@ export function StartScreen() {
             <Search size={12} className="ml-1.5 mr-1 text-fg3" />
             <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search repositories (Ctrl + Alt + F)" className="flex-1 bg-transparent outline-none text-[11.5px] placeholder:text-fg3" />
           </div>
-          <div className="text-[12px] text-fg mb-1">Recent</div>
+          {s.settings.favorites.length > 0 && (
+            <>
+              <div className="text-[12px] text-fg mb-1">Favorites</div>
+              <div className="mb-[12px]">
+                {s.settings.favorites.filter((r) => r.toLowerCase().includes(q.toLowerCase())).map((r) => (
+                  <div key={r} className="flex items-baseline gap-2.5 h-[17px] text-[12px] whitespace-nowrap">
+                    <button onClick={() => openRepoPath(r)} className="text-link font-semibold hover:underline shrink-0">
+                      {r.split(/[\\/]/).pop()}
+                    </button>
+                    <span className="text-fg2 truncate">{r}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+          <div className="flex items-baseline text-[12px] text-fg mb-1">
+            <span className="flex-1">Recent</span>
+            <button className="text-link hover:underline" onClick={() => s.setDialog({ kind: "repoManagement" })}>
+              Repository Management
+            </button>
+          </div>
           {recents.length === 0 && (
             <div className="text-[12.5px] text-fg3 py-1">
               No recent repositories yet.{" "}
@@ -88,6 +109,9 @@ export function StartScreen() {
           <div className="flex flex-col items-start text-[12px] leading-[17px]">
             <button className="text-link hover:underline" onClick={openSample}>
               {busy ? "Preparing…" : "Try the sample project"}
+            </button>
+            <button className="text-link hover:underline" onClick={() => hosting.openUrl(RELEASES_URL)}>
+              Release Notes
             </button>
             <button className="text-link hover:underline" onClick={() => s.setDialog({ kind: "shortcuts" })}>
               Keyboard Shortcuts

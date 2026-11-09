@@ -77,3 +77,14 @@ export function fullDate(unix: number) {
 
 export const isMac = navigator.platform.toLowerCase().includes("mac");
 export const MOD = isMac ? "⌘" : "Ctrl";
+
+/** Add "Co-authored-by:" trailers (GitHub / GitLab credit every listed person). */
+export function withCoauthors(description: string, list: string): string {
+  const people = list
+    .split(",")
+    .map((p) => p.trim())
+    .filter((p) => /^.+<[^<>@\s]+@[^<>\s]+>$/.test(p));
+  if (!people.length) return description;
+  const trailers = people.map((p) => `Co-authored-by: ${p}`).join("\n");
+  return description.trim() ? `${description.trimEnd()}\n\n${trailers}` : trailers;
+}

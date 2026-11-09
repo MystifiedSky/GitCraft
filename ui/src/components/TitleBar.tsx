@@ -1,3 +1,5 @@
+import { checkForUpdates, download, installAndRestart, RELEASES_URL, updateMenuLabel, useUpdates } from "@/lib/updates";
+import { hosting } from "@/lib/hosting";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Minus, Square, X } from "lucide-react";
 import { DropMenu, type MenuEntry } from "./ui/menu";
@@ -51,6 +53,7 @@ export function MenuBar() {
   const tab = s.tabs.find((t) => t.id === s.activeId);
   const repoPath = tab?.kind === "repo" ? tab.path : undefined;
   const set = s.settings;
+  const up = useUpdates();
 
   const file: MenuEntry[] = [
     // Same order as the original's File menu (reference picture 1).
@@ -61,6 +64,7 @@ export function MenuBar() {
     { label: "Clone Repo...", shortcut: `${MOD}+N`, onSelect: () => s.setDialog({ kind: "clone" }) },
     { label: "Init Repo...", shortcut: `${MOD}+I`, onSelect: () => s.setDialog({ kind: "init" }) },
     { label: "Open Repo...", shortcut: `${MOD}+O`, onSelect: () => s.setDialog({ kind: "open" }) },
+    { label: "Open Repo Management", shortcut: `Alt+${MOD}+O`, onSelect: () => s.setDialog({ kind: "repoManagement" }) },
     { label: "Open Repo in VS Code", shortcut: `${MOD}+Shift+E`, disabled: !repoPath, onSelect: () => repoPath && api.openInEditor(repoPath) },
     { separator: true },
     { label: "Open External Terminal", shortcut: "Alt+T", disabled: !repoPath, onSelect: () => repoPath && api.openTerminal(repoPath) },
@@ -70,6 +74,11 @@ export function MenuBar() {
     { separator: true },
     { label: "Preferences...", shortcut: `${MOD}+,`, onSelect: () => s.setDialog({ kind: "prefs" }) },
     { separator: true },
+    {
+      label: updateMenuLabel(up),
+      disabled: up.phase === "checking" || up.phase === "downloading",
+      onSelect: () => (up.phase === "ready" ? installAndRestart() : up.phase === "available" ? download() : checkForUpdates(true)),
+    },
     { label: "Exit", onSelect: () => win().close() },
   ];
   const edit: MenuEntry[] = [
@@ -101,6 +110,7 @@ export function MenuBar() {
     { label: "Feature Plan", onSelect: () => s.setDialog({ kind: "plan" }) },
     { label: "View Activity Logs", onSelect: () => s.setDialog({ kind: "log" }) },
     { separator: true },
+    { label: "View Release Notes", onSelect: () => hosting.openUrl(RELEASES_URL) },
     { label: "About GitCraft", onSelect: () => s.setDialog({ kind: "about" }) },
   ];
 

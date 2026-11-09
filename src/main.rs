@@ -420,9 +420,33 @@ async fn conflict_check(path: String, target: Option<String>) -> Result<extras::
     blocking(move || extras::conflict_check(Path::new(&path), target.as_deref())).await
 }
 
+/// Just the file lists (one `git status`), for staging and working-folder edits.
+#[tauri::command]
+async fn repo_status(path: String) -> Result<git::WorkStatus, String> {
+    blocking(move || git::status(Path::new(&path))).await
+}
+
+#[tauri::command]
+async fn repo_summary(path: String) -> Result<extras::RepoSummary, String> {
+    blocking(move || extras::repo_summary(Path::new(&path))).await
+}
+
+#[tauri::command]
+async fn pr_template(path: String) -> Result<Option<String>, String> {
+    blocking(move || extras::pr_template(Path::new(&path))).await
+}
+
 #[tauri::command]
 async fn agent_sessions(path: String) -> Result<Vec<extras::AgentSession>, String> {
     blocking(move || extras::agent_sessions(Path::new(&path))).await
+}
+
+/// Whether automatic updates are set up in this build (a public key is configured), and where they come from.
+#[tauri::command]
+fn update_config(app: tauri::AppHandle) -> serde_json::Value {
+    let u = app.config().plugins.0.get("updater").cloned().unwrap_or_default();
+    let configured = u["pubkey"].as_str().map(|k| !k.trim().is_empty()).unwrap_or(false);
+    serde_json::json!({ "configured": configured, "endpoint": u["endpoints"][0] })
 }
 
 /// Open the repository in VS Code (File > Open Repo in VS Code).
@@ -584,8 +608,8 @@ fn watch_repo(path: String, app: tauri::AppHandle, state: State<'_, AppState>) -
         return Ok(());
     }
     let key = path.clone();
-    let watcher = watch::start(Path::new(&path), move || {
-        let _ = app.emit("repo-changed", key.clone());
+    let watcher = watch::start(Path::new(&path), move |full| {
+        let _ = app.emit("repo-changed", serde_json::json!({ "path": key, "full": full }));
     })?;
     w.insert(path, watcher);
     Ok(())
@@ -632,6 +656,8 @@ fn main() {
     });
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(AppState { engine: Arc::new(Engine::default()), screenshot: screenshot.clone(), shot_view, watchers: Mutex::new(HashMap::new()), terminals: terminal::Terminals::default() })
         .setup(move |app| {
             // Long jobs report progress to the window ("job-progress" events).
@@ -668,6 +694,7 @@ fn main() {
             open_in_editor,
             rebase_commits,
             gitflow_config,
+            update_config,
             ai_commit_message,
             ai_stash_message,
             ai_explain_commit,
@@ -677,6 +704,9 @@ fn main() {
             pick_patch_file,
             conflict_check,
             agent_sessions,
+            pr_template,
+            repo_summary,
+            repo_status,
             hosting_status,
             set_secret,
             repo_remote,

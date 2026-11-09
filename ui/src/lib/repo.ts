@@ -1,5 +1,5 @@
 import { QueryClient, useQuery } from "@tanstack/react-query";
-import { api, type Action, type GitRef, type RefView, type RepoView } from "./api";
+import { api, type Action, type FileChange, type GitRef, type RefView, type RepoView } from "./api";
 import { useStore } from "./store";
 
 export const queryClient = new QueryClient({
@@ -28,6 +28,8 @@ export function useRepo(path: string | undefined, tabId: string) {
       return r;
     },
     enabled: !!path,
+    // The file watcher already reports every change, so switching back to the window doesn't reload everything.
+    refetchOnWindowFocus: false,
     placeholderData: (prev) => prev,
     initialData: () => (path && limit === 0 && view.hidden.length === 0 && view.solo.length === 0 ? latest.get(path) : undefined),
   });
@@ -37,11 +39,85 @@ export function repoData(path: string): RepoView | undefined {
   return latest.get(path);
 }
 
+/** When this window last finished its own full refresh of each repository (see `onWatcherChange`). */
+const lastOwnRefresh = new Map<string, number>();
+
 export function refresh(path: string) {
   return queryClient.invalidateQueries({ queryKey: ["repo", path] });
 }
 
+/** Put new file lists into every cached view of the repository, keeping commits and graph as they are
+ *  (same objects), so only the file panels re-render. */
+function setStatus(path: string, status: RepoView["status"]) {
+  queryClient.setQueriesData<RepoView>({ queryKey: ["repo", path] }, (old) => (old ? { ...old, status } : old));
+  const l = latest.get(path);
+  if (l) latest.set(path, { ...l, status });
+}
+
+/** Re-read only the file lists (one `git status`, ~25 ms) instead of the whole repository. */
+export async function refreshStatus(path: string) {
+  try {
+    setStatus(path, await api.repoStatus(path));
+    // Open diffs of these files may show different lines now.
+    queryClient.invalidateQueries({ queryKey: ["diff", path] });
+    queryClient.invalidateQueries({ queryKey: ["versions", path] });
+  } catch {
+    await refresh(path);
+  }
+}
+
+/** File watcher: working-folder edits and index changes refresh the file lists only; anything else
+ *  (commits, branches, HEAD) reloads the repository, unless this window's own action just did that. */
+export function onWatcherChange(path: string, full: boolean) {
+  if (!full) return void refreshStatus(path);
+  if (Date.now() - (lastOwnRefresh.get(path) ?? 0) < OWN_CHANGE_WINDOW_MS) return;
+  void refresh(path);
+}
+const OWN_CHANGE_WINDOW_MS = 1000;
+
+type Status = RepoView["status"];
+const STAGE_TYPES = new Set<Action["type"]>(["stage", "unstage", "stageAll", "unstageAll"]);
+
+/** Actions that only move changes in or out of the index: the file lists are all that can change. */
+export function indexOnly(a: Action): boolean {
+  return STAGE_TYPES.has(a.type) || (a.type === "patch" && a.op !== "discard");
+}
+
+/** What the lists will look like once Git has finished, shown straight away. */
+export function predictStatus(s: Status, a: Action): Status | null {
+  const move = (from: FileChange[], to: FileChange[], paths: Set<string> | null, toStaged: boolean) => {
+    const moving = from.filter((f) => f.status !== "U" && (!paths || paths.has(f.path)));
+    if (!moving.length) return null;
+    const left = from.filter((f) => !moving.includes(f));
+    const kept = to.filter((f) => !moving.some((m) => m.path === f.path));
+    const moved = moving.map((f) => ({ ...f, status: toStaged ? (f.status === "?" ? "A" : f.status) : f.status === "A" ? "?" : f.status }));
+    // A partly staged file stays listed on the side it leaves only if it still has changes there; unknown until Git
+    // answers, so it is shown on the destination side and the real status corrects it a moment later.
+    const merged = [...kept, ...moved].sort((x, y) => x.path.localeCompare(y.path));
+    return { left, merged };
+  };
+  switch (a.type) {
+    case "stage":
+    case "stageAll": {
+      const r = move(s.unstaged, s.staged, a.type === "stage" ? new Set(a.paths) : null, true);
+      return r && { ...s, unstaged: r.left, staged: r.merged };
+    }
+    case "unstage":
+    case "unstageAll": {
+      const r = move(s.staged, s.unstaged, a.type === "unstage" ? new Set(a.paths) : null, false);
+      return r && { ...s, staged: r.left, unstaged: r.merged };
+    }
+    default:
+      return null;
+  }
+}
+
 const BUSY_LABEL: Partial<Record<Action["type"], string>> = {
+  stage: "Staging…",
+  stageAll: "Staging all changes…",
+  unstage: "Unstaging…",
+  unstageAll: "Unstaging all changes…",
+  patch: "Updating…",
   fetch: "Fetching…",
   pull: "Pulling…",
   push: "Pushing…",
@@ -56,6 +132,14 @@ const BUSY_LABEL: Partial<Record<Action["type"], string>> = {
 export async function act(path: string, action: Action, quiet = false): Promise<boolean> {
   const st = useStore.getState();
   st.setBusy(BUSY_LABEL[action.type] ?? "Working…");
+  const light = indexOnly(action);
+  const before = latest.get(path)?.status;
+  if (light && before) {
+    // Show the result immediately; Git's answer replaces it a moment later.
+    const guess = predictStatus(before, action);
+    if (guess) setStatus(path, guess);
+  }
+  let ok = false;
   try {
     const r = await api.run(path, action);
     if (!r.ok && action.type === "push" && !action.force && /rejected|non-fast-forward|fetch first/i.test(r.message)) {
@@ -63,13 +147,19 @@ export async function act(path: string, action: Action, quiet = false): Promise<
       return false;
     }
     if (!r.ok || (!quiet && st.settings.notifySuccess)) st.toast(r.ok, r.message);
+    ok = r.ok;
     return r.ok;
   } catch (e) {
     st.toast(false, String(e));
     return false;
   } finally {
+    // Keep the busy note until the lists are up to date, so there is always something showing it's working.
+    if (light && ok) await refreshStatus(path);
+    else {
+      await refresh(path);
+      lastOwnRefresh.set(path, Date.now());
+    }
     st.setBusy(null);
-    await refresh(path);
   }
 }
 

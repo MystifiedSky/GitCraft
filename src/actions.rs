@@ -75,6 +75,14 @@ pub enum Action {
     ComposeCommits { commits: Vec<crate::ai::ComposedCommit> },
     /// Apply a .patch file (mailbox patches become commits).
     ApplyPatchFile { file: String },
+    /// "Stash this file" / "Stash N files": stash only the chosen files.
+    StashFiles { paths: Vec<String>, message: String },
+    /// "Cherry pick file from stash": copy one file's stashed version into the working folder.
+    StashTakeFile { index: usize, path: String },
+    /// "Revert this hunk": undo one hunk (or chosen lines) of a commit in the working folder.
+    RevertHunk { sha: String, parent: Option<String>, file: String, hunk: usize, lines: Option<Vec<usize>> },
+    /// Squash merge: bring a branch's changes in as staged changes, to commit as one commit.
+    MergeSquash { branch: String },
     /// Open a file in the external diff tool (git difftool), or a conflict in the merge tool.
     ExternalDiff { file: String, staged: bool, tool: String },
     ExternalMerge { file: String, tool: String },
@@ -595,6 +603,55 @@ impl Engine {
                 }
                 ActionResult { ok: true, message: format!("Created {} commits", commits.len()) }
             }
+            Action::StashFiles { paths, message } => {
+                // libgit2 (nodegit.node 0x1802d3490) refuses the whole stash if any chosen file is unchanged.
+                for p in &paths {
+                    if git::run(dir, &["status", "--porcelain", "--untracked-files=all", "--", p]).stdout.trim().is_empty() {
+                        return ActionResult { ok: false, message: "cannot stash changes - one of the files does not have any changes to stash.".into() };
+                    }
+                }
+                let mut args = vec!["stash", "push", "--include-untracked"];
+                let msg = message.trim().to_string();
+                if !msg.is_empty() {
+                    args.extend(["-m", msg.as_str()]);
+                }
+                args.push("--");
+                args.extend(paths.iter().map(|p| p.as_str()));
+                let n = paths.len();
+                done(self.git(dir, &args), &format!("Stashed {n} file{}", if n == 1 { "" } else { "s" }))
+            }
+            Action::StashTakeFile { index, path } => {
+                // Tracked files are in the stash commit; new files are in its third parent.
+                let stash = format!("stash@{{{index}}}");
+                let mut o = self.git(dir, &["checkout", &stash, "--", &path]);
+                if !o.ok {
+                    let untracked = format!("{stash}^3");
+                    let o2 = self.git(dir, &["checkout", &untracked, "--", &path]);
+                    if o2.ok {
+                        o = o2;
+                    }
+                }
+                done(o, &format!("Took {path} from the stash"))
+            }
+            Action::RevertHunk { sha, parent, file, hunk, lines } => {
+                let diff = git::diff_text(dir, &git::DiffSource::Commit(sha.clone()), &file, parent.as_deref(), false);
+                let Some(patch) = crate::files::partial_patch(&diff, hunk, lines.as_deref(), true) else {
+                    return ActionResult { ok: false, message: "That change could not be found in the commit.".into() };
+                };
+                let current = std::fs::read_to_string(dir.join(&file)).unwrap_or_default();
+                if let Err(e) = crate::files::check_hunks_exact(&current, &patch, true) {
+                    return ActionResult { ok: false, message: format!("Could not revert the hunk: {e} ({file} has changed since that commit)") };
+                }
+                self.log_note(&format!("git apply --reverse (revert hunk of {file} from {})", &sha[..sha.len().min(7)]));
+                match crate::files::apply_patch(dir, &patch, false, true) {
+                    Ok(()) => {
+                        self.push_undo(repo, UndoRec::Patch { patch, cached: false, reverse: true, label: format!("revert hunk in {file}") });
+                        ActionResult { ok: true, message: format!("Reverted the change in {file}; it is now an uncommitted change") }
+                    }
+                    Err(e) => ActionResult { ok: false, message: format!("The hunk could not be reverted because {file} has changed since: {e}") },
+                }
+            }
+            Action::MergeSquash { branch } => done(self.git(dir, &["merge", "--squash", &branch]), &format!("Squashed {branch}; review and commit the staged changes")),
             Action::ApplyPatchFile { file } => {
                 let o = crate::extras::apply_patch_file(dir, Path::new(&file), &|a: &[&str]| self.git(dir, a));
                 done(o, "Patch applied")
@@ -1162,6 +1219,54 @@ mod tests {
         let _ = fs::remove_dir_all(&bare);
     }
 
+
+    #[test]
+    fn stash_files_take_from_stash_revert_hunk_squash_merge() {
+        let d = temp_repo("gaps");
+        let repo = d.to_string_lossy().to_string();
+        let e = Engine::default();
+        let rd = |p: std::path::PathBuf| fs::read_to_string(p).unwrap().replace("\r\n", "\n");
+        let commit = |m: &str| assert!(e.perform(&repo, Action::Commit { summary: m.into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false }).ok);
+        fs::write(d.join("a.txt"), "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n").unwrap();
+        fs::write(d.join("b.txt"), "b\n").unwrap();
+        commit("base");
+
+        // Stash only a.txt; b.txt stays changed.
+        fs::write(d.join("a.txt"), "1\n2\n3\n4\n5\n6\n7\n8\n9\nten\n").unwrap();
+        fs::write(d.join("b.txt"), "B\n").unwrap();
+        assert!(e.perform(&repo, Action::StashFiles { paths: vec!["a.txt".into()], message: "only a".into() }).ok);
+        assert_eq!(rd(d.join("a.txt")), "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n");
+        assert_eq!(rd(d.join("b.txt")), "B\n");
+        // A file without changes stops the stash, like libgit2.
+        let r = e.perform(&repo, Action::StashFiles { paths: vec!["a.txt".into()], message: String::new() });
+        assert!(!r.ok && r.message.contains("does not have any changes to stash"), "{}", r.message);
+        // Take a.txt back out of the stash without applying the rest.
+        assert!(e.perform(&repo, Action::StashTakeFile { index: 0, path: "a.txt".into() }).ok);
+        assert!(rd(d.join("a.txt")).ends_with("ten\n"));
+        commit("two changes");
+
+        // Revert the first hunk of a commit with two hunks, keeping the second.
+        fs::write(d.join("a.txt"), "one\n2\n3\n4\n5\n6\n7\n8\n9\nTEN\n").unwrap();
+        commit("edit both ends");
+        let sha = head(&d);
+        let r = e.perform(&repo, Action::RevertHunk { sha, parent: None, file: "a.txt".into(), hunk: 0, lines: None });
+        assert!(r.ok, "{}", r.message);
+        assert_eq!(rd(d.join("a.txt")), "1\n2\n3\n4\n5\n6\n7\n8\n9\nTEN\n");
+        assert!(e.perform(&repo, Action::Undo).ok);
+        assert!(rd(d.join("a.txt")).starts_with("one\n"));
+        assert_eq!(rd(d.join("a.txt")), "one\n2\n3\n4\n5\n6\n7\n8\n9\nTEN\n", "undo puts the file back as committed");
+
+        // Squash merge: the branch's work arrives staged, with no merge commit.
+        assert!(git::run(&d, &["checkout", "-q", "-b", "side"]).ok);
+        fs::write(d.join("c.txt"), "c\n").unwrap();
+        commit("side 1");
+        assert!(git::run(&d, &["checkout", "-q", "master"]).ok);
+        let before = head(&d);
+        assert!(e.perform(&repo, Action::MergeSquash { branch: "side".into() }).ok);
+        assert_eq!(head(&d), before);
+        assert!(git::status(&d).staged.iter().any(|f| f.path == "c.txt"));
+        let _ = fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn templates_ignore_hooks_sparse_and_shallow() {

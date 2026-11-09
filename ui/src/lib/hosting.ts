@@ -66,11 +66,13 @@ export const hosting = {
   launchpad: () => invoke<{ pull_requests: PullRequest[]; issues: Issue[]; errors: string[] }>("launchpad", { gitlabHost: gh() }),
   issueBranch: (number: number, title: string) => invoke<string>("issue_branch_name", { number, title }),
   openUrl: (url: string) => invoke<void>("open_url", { url }),
+  template: (path: string) => invoke<string | null>("pr_template", { path }),
 };
 
 /** "Start a pull request": push the branch if needed, then create the PR / MR. */
-export function startPullRequest(path: string, branch: string, target?: string) {
+export async function startPullRequest(path: string, branch: string, target?: string) {
   const s = useStore.getState();
+  const template = await hosting.template(path).catch(() => null);
   const repo = repoData(path);
   const ref = repo?.refs.find((r) => r.kind === "Local" && r.name === branch);
   const head = repo?.commits.find((c) => c.sha === ref?.sha);
@@ -81,7 +83,7 @@ export function startPullRequest(path: string, branch: string, target?: string) 
     fields: [
       { key: "target", label: "Into branch", value: target ?? remoteDefault ?? "main" },
       { key: "title", label: "Title", value: head?.summary ?? branch },
-      { key: "body", label: "Description", value: head?.body ?? "" },
+      { key: "body", label: "Description", value: [head?.body, template].filter(Boolean).join("\n\n") },
       { key: "draft", label: "Create as a draft", value: false, type: "checkbox" },
     ],
     confirm: "Create Pull Request",

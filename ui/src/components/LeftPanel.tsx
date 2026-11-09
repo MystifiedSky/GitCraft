@@ -23,7 +23,7 @@ import {
 } from "lucide-react";
 import { useMemo, useRef, useState, type ReactNode } from "react";
 import type { GitRef, RepoView } from "@/lib/api";
-import { useStore } from "@/lib/store";
+import { useStore, usePanelStore } from "@/lib/store";
 import { act, openRepoPath, toggleHidden } from "@/lib/repo";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
@@ -51,7 +51,7 @@ type SectionKey = "lfs" | "gitflow" | "local" | "remote" | "worktrees" | "stashe
 
 /** Left panel: branches, remotes, worktrees, stashes, tags and the service sections. */
 export function LeftPanel({ repo, tabId, onSelectSha }: { repo: RepoView | undefined; tabId: string; onSelectSha: (sha: string) => void }) {
-  const s = useStore();
+  const s = usePanelStore();
   const [open, setOpen] = useState<Record<SectionKey, boolean>>({} as Record<SectionKey, boolean>);
   const [filter, setFilter] = useState("");
   const filterRef = useRef<HTMLInputElement>(null);
@@ -295,7 +295,7 @@ export function LeftPanel({ repo, tabId, onSelectSha }: { repo: RepoView | undef
 }
 
 function Shell({ children, tabId }: { children: ReactNode; tabId: string }) {
-  const s = useStore();
+  const s = usePanelStore();
   void tabId;
   const view = s.settings.leftView;
   return (
@@ -567,7 +567,7 @@ function LfsSection({ repo, open, onToggle }: { repo: RepoView; open: boolean; o
 
 /** PULL REQUESTS and ISSUES from GitHub / GitLab for this repository's remote. */
 function HostedLists({ repo, tabId, prsOpen, issuesOpen, toggle }: { repo: RepoView; tabId: string; prsOpen: boolean; issuesOpen: boolean; toggle: (k: SectionKey) => void }) {
-  const s = useStore();
+  const s = usePanelStore();
   const remote = useQuery({ queryKey: ["remote", repo.path, repo.remotes.join()], queryFn: () => hosting.remote(repo.path), staleTime: Infinity });
   const on = !!remote.data;
   const prs = useQuery({ queryKey: ["prs", repo.path], queryFn: () => hosting.prs(repo.path), enabled: on && prsOpen, staleTime: 60_000 });

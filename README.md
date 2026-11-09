@@ -17,6 +17,8 @@ GitCraft is a desktop Git client for exploring repository history and managing e
 - **Power tools.** Remotes, worktrees, submodules, Gitflow, Git LFS, sparse checkout, a command palette, a built-in terminal, workspaces, profiles, and four themes.
 - **Pull requests and issues.** Connect GitHub or GitLab with a personal access token to list, view, create, comment on, and merge pull requests, work with issues, and see everything on the Launchpad.
 - **AI helpers (optional).** With your own Anthropic API key, generate commit and stash messages, explain a commit or branch, or split your changes into focused commits. Nothing is sent unless you press an AI button.
+- **Manage many repositories.** Repository Management lists open, favorite, and recent repositories with their branch and uncommitted changes, and fetches or pulls them all at once.
+- **Stays up to date.** Installed copies check GitHub Releases, download signed updates in the background, and install them on restart. See [RELEASING.md](RELEASING.md) to publish a version.
 - **Share and stay ahead of conflicts.** Save or apply .patch files, see early whether your branch would conflict with the main branch, and list the Claude Code sessions that worked in a repository.
 
 ## Under the hood
@@ -56,7 +58,7 @@ On Windows, the executable is `target/release/gitcraft.exe`. To package an insta
 npm --prefix ui run installer
 ```
 
-Installers are written to `target/release/bundle/`. Signed automatic updates are not set up yet; they need a download server and a private signing key.
+Installers are written to `target/release/bundle/`. Published releases are built by GitHub Actions and delivered to installed copies as signed updates; [RELEASING.md](RELEASING.md) covers the one-time key setup and each release.
 
 ## Testing
 

@@ -60,7 +60,17 @@ fn not_ignored(root: &Path, paths: Vec<PathBuf>) -> Vec<PathBuf> {
         .collect()
 }
 
-pub fn start(root: &Path, on_change: impl Fn() + Send + Sync + Clone + 'static) -> Result<RepoWatch, String> {
+/// True when every change in the .git folder is to the index (staging), which only affects the file lists.
+pub fn index_only(gitdir: &Path, paths: &[PathBuf]) -> bool {
+    !paths.is_empty()
+        && paths.iter().all(|p| {
+            p.parent() == Some(gitdir) && matches!(p.file_name().and_then(|n| n.to_str()), Some("index") | Some("index.lock"))
+        })
+}
+
+/// `on_change(full)`: `full` is false when only the file lists can have changed (files edited in the working
+/// folder, or the index), so the window refreshes just the status instead of the whole repository.
+pub fn start(root: &Path, on_change: impl Fn(bool) + Send + Sync + Clone + 'static) -> Result<RepoWatch, String> {
     let gitdir = {
         let o = crate::git::run(root, &["rev-parse", "--absolute-git-dir"]);
         if o.ok {
@@ -80,7 +90,7 @@ pub fn start(root: &Path, on_change: impl Fn() + Send + Sync + Clone + 'static) 
         if let Ok(events) = res {
             let paths: Vec<PathBuf> = events.into_iter().map(|e| e.path).filter(|p| !under(p, &dg) && !under(p, &lt)).collect();
             if !not_ignored(&r, paths).is_empty() {
-                cb();
+                cb(false);
             }
         }
     })
@@ -91,10 +101,12 @@ pub fn start(root: &Path, on_change: impl Fn() + Send + Sync + Clone + 'static) 
     let git = if gitdir.exists() {
         let lt = lfs_tmp.clone();
         let cb = on_change.clone();
+        let gd = gitdir.clone();
         let mut g = new_debouncer(debounce(GITDIR_WATCH_DEBOUNCE_MS), move |res: DebounceEventResult| {
             if let Ok(events) = res {
-                if events.iter().any(|e| !under(&e.path, &lt)) {
-                    cb();
+                let paths: Vec<PathBuf> = events.into_iter().map(|e| e.path).filter(|p| !under(p, &lt)).collect();
+                if !paths.is_empty() {
+                    cb(!index_only(&gd, &paths));
                 }
             }
         })
@@ -110,6 +122,15 @@ pub fn start(root: &Path, on_change: impl Fn() + Send + Sync + Clone + 'static) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn index_changes_only_need_a_status_refresh() {
+        let g = PathBuf::from("/r/.git");
+        assert!(index_only(&g, &[g.join("index"), g.join("index.lock")]));
+        assert!(!index_only(&g, &[g.join("index"), g.join("HEAD")]));
+        assert!(!index_only(&g, &[g.join("refs").join("heads").join("index")]));
+        assert!(!index_only(&g, &[]));
+    }
 
     #[test]
     fn debounce_is_clamped_like_the_original() {
