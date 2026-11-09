@@ -319,6 +319,8 @@ export interface Metrics {
   sha_len: number;
   avatar_bg: string;
   summary_counter: number;
+  toolbar_left_max: number;
+  toolbar_center: number;
   auto_fetch_min: number;
   zoom_factors: number[];
   default_zoom: number;

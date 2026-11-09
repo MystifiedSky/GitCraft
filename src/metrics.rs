@@ -104,6 +104,14 @@ pub const GITDIR_WATCH_DEBOUNCE_MS: u32 = 200;
 pub const WATCH_DEBOUNCE_MIN_MS: u32 = 1;
 pub const WATCH_DEBOUNCE_MAX_MS: u32 = 60000;
 
+/// capture/window.png (930 px window): the original's Undo starts at x 389, against Actions; wider windows centre
+/// the Undo ... Terminal group (reference pictures 3 and 4). The group has styles.css padding-left:20px, so the
+/// pickers' column ends 20 px earlier: 389 - 20 = 369.
+pub const TOOLBAR_LEFT_MAX: u32 = 369;
+/// Undo ... Terminal group width: styles.css .toolbar-btn{width:48px;margin:0 2px} x 8 buttons, the Pull options
+/// button (width:14px, margin-left:0, + 2 px right), padding-left:20px and the 9 px divider before Terminal.
+pub const TOOLBAR_CENTER_WIDTH: u32 = 461;
+
 #[derive(Serialize, Clone)]
 pub struct Metrics {
     pub node: u32,
@@ -144,6 +152,8 @@ pub struct Metrics {
     pub stats_deleted: String,
     pub stats_files: String,
     pub default_zoom: f32,
+    pub toolbar_left_max: u32,
+    pub toolbar_center: u32,
 }
 
 pub fn metrics() -> Metrics {
@@ -170,6 +180,8 @@ pub fn metrics() -> Metrics {
         sha_len: SHORT_SHA_LENGTH,
         avatar_bg: DEFAULT_AVATAR_BACKGROUND.to_string(),
         summary_counter: COMMIT_SUMMARY_COUNTER,
+        toolbar_left_max: TOOLBAR_LEFT_MAX,
+        toolbar_center: TOOLBAR_CENTER_WIDTH,
         auto_fetch_min: AUTO_FETCH_INTERVAL_MIN,
         zoom_factors: ZOOM_FACTORS.to_vec(),
         lazy_offset: LAZY_LOAD_OFFSET,

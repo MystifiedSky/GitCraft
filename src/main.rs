@@ -666,6 +666,20 @@ fn main() {
             engine.jobs.set_listener(std::sync::Arc::new(move |id: &str, text: &str, pct: Option<u32>| {
                 let _ = handle.emit("job-progress", serde_json::json!({ "id": id, "text": text, "percent": pct }));
             }));
+            // Test aid: `--shot-size 1920x1040` opens the window at that size (to check wide layouts).
+            let args: Vec<String> = std::env::args().collect();
+            if let Some((w, h)) = args
+                .iter()
+                .position(|a| a == "--shot-size")
+                .and_then(|i| args.get(i + 1))
+                .and_then(|s| s.split_once('x'))
+                .and_then(|(w, h)| Some((w.parse::<f64>().ok()?, h.parse::<f64>().ok()?)))
+            {
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.set_size(tauri::LogicalSize::new(w, h));
+                    let _ = win.center();
+                }
+            }
             if let Some(out) = screenshot.clone() {
                 // Safety net: take the picture anyway if the page never reports ready.
                 let handle = app.handle().clone();

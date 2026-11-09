@@ -280,6 +280,8 @@ export const DEFAULT_METRICS: Metrics = {
   stats_deleted: "#c93c37",
   stats_files: "#e2c08d",
   summary_counter: 72,
+  toolbar_left_max: 369,
+  toolbar_center: 461,
   auto_fetch_min: 1,
   zoom_factors: [3, 2.5, 2, 1.75, 1.5, 1.4, 1.3, 1.2, 1.1, 1, 0.9, 0.8],
   default_zoom: 1,
