@@ -1,5 +1,6 @@
 import { Keyboard, List, Loader2, Map as MapIcon, Rocket, ZoomIn } from "lucide-react";
 import { useStore } from "@/lib/store";
+import { api } from "@/lib/api";
 import { resetZoom } from "@/lib/zoom";
 
 export function StatusBar() {
@@ -7,8 +8,18 @@ export function StatusBar() {
   return (
     <div className="h-[26px] bg-panel flex items-center shrink-0 border-t border-black/30 text-[13px] text-white/90">
       <div className="flex items-center gap-2 pl-[22px] flex-1 min-w-0">
-        {s.busy ? <Loader2 size={14} className="spin text-link" /> : <Rocket size={14} className="text-white/80" />}
-        <span className="truncate">{s.busy ?? "Ready"}</span>
+        {s.busy || s.job ? <Loader2 size={14} className="spin text-link" /> : <Rocket size={14} className="text-white/80" />}
+        <span className="truncate">{s.job?.text || s.busy || "Ready"}</span>
+        {s.job?.percent != null && (
+          <span className="w-[90px] h-[5px] rounded bg-white/10 overflow-hidden shrink-0">
+            <span className="block h-full bg-link" style={{ width: `${s.job.percent}%` }} />
+          </span>
+        )}
+        {s.job && (
+          <button className="text-[12px] text-[#ef7a76] hover:underline shrink-0" onClick={() => api.cancelJob(s.job!.id)} title="Stop this job">
+            Cancel
+          </button>
+        )}
       </div>
       <SB title="Activity log" onClick={() => s.setDialog({ kind: "log" })}>
         <List size={15} />

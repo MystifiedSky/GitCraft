@@ -85,6 +85,7 @@ export function MenuBar() {
     { label: `${set.showLeft ? "✓ " : "   "}Show Left Panel`, shortcut: `${MOD}+J`, onSelect: () => s.setSettings({ showLeft: !set.showLeft }) },
     { label: `${set.showRight ? "✓ " : "   "}Show Commit Details Panel`, shortcut: `${MOD}+K`, onSelect: () => s.setSettings({ showRight: !set.showRight }) },
     { label: `${set.toolbarLabels ? "✓ " : "   "}Show Toolbar Labels`, onSelect: () => s.setSettings({ toolbarLabels: !set.toolbarLabels }) },
+    { label: `${set.showTerminal ? "✓ " : "   "}Show Terminal Panel`, shortcut: `${MOD}+\``, onSelect: () => s.setSettings({ showTerminal: !set.showTerminal }) },
     { separator: true },
     { label: "Increase Zoom", shortcut: `${MOD}+=`, onSelect: () => stepZoom(1) },
     { label: "Decrease Zoom", shortcut: `${MOD}+-`, onSelect: () => stepZoom(-1) },
@@ -95,6 +96,7 @@ export function MenuBar() {
     { label: "Reload Window", onSelect: () => location.reload() },
   ];
   const help: MenuEntry[] = [
+    { label: "Command Palette", shortcut: `${MOD}+Shift+P`, onSelect: () => s.setPalette("root") },
     { label: "Keyboard Shortcuts", shortcut: `${MOD}+/`, onSelect: () => s.setDialog({ kind: "shortcuts" }) },
     { label: "Feature Plan", onSelect: () => s.setDialog({ kind: "plan" }) },
     { label: "View Activity Logs", onSelect: () => s.setDialog({ kind: "log" }) },

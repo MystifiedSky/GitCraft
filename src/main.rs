@@ -1,13 +1,18 @@
 ﻿#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod accounts;
 mod actions;
+mod jobs;
 mod files;
 mod git;
 mod graph;
+mod hosting;
+mod manage;
 mod rewrite;
 mod metrics;
 mod sample;
 mod shot;
+mod terminal;
 mod watch;
 
 use actions::{Action, ActionResult, Engine, UndoInfo};
@@ -26,6 +31,7 @@ struct AppState {
     /// Test aid: which screen `--screenshot` pictures (`--shot-view diff|split|history|start`).
     shot_view: Option<String>,
     watchers: Mutex<HashMap<String, watch::RepoWatch>>,
+    terminals: terminal::Terminals,
 }
 
 #[derive(Serialize)]
@@ -70,7 +76,8 @@ async fn open_repo(path: String, max: Option<usize>, view: Option<git::RefView>,
         let root = git::repo_root(&p).ok_or_else(|| format!("{path} is not a Git repository"))?;
         let view = view.unwrap_or_default();
         let data = git::load_view(&root, max.unwrap_or(INITIAL_COMMITS).max(INITIAL_COMMITS), &view);
-        let graph = graph::layout(&data.commits);
+        let pinned_sha = view.pinned.as_ref().and_then(|p| data.refs.iter().find(|r| &r.full == p)).map(|r| r.sha.clone());
+        let graph = graph::layout_pinned(&data.commits, pinned_sha.as_deref());
         let root_s = root.to_string_lossy().replace('/', "\\");
         Ok(RepoView {
             name: git::repo_name(&root),
@@ -160,6 +167,204 @@ async fn conflict_info(path: String, file: String) -> Result<rewrite::ConflictIn
     blocking(move || rewrite::conflict_info(Path::new(&path), &file)).await
 }
 
+#[tauri::command]
+async fn gitflow_config(path: String) -> Result<manage::GitflowConfig, String> {
+    blocking(move || manage::gitflow_config(Path::new(&path))).await
+}
+
+#[tauri::command]
+async fn cleanup_list(path: String) -> Result<Vec<manage::CleanupBranch>, String> {
+    blocking(move || manage::cleanup_list(Path::new(&path))).await
+}
+
+#[tauri::command]
+async fn remotes_list(path: String) -> Result<Vec<manage::Remote>, String> {
+    blocking(move || manage::remotes(Path::new(&path))).await
+}
+
+#[tauri::command]
+async fn submodules_list(path: String) -> Result<Vec<manage::Submodule>, String> {
+    blocking(move || manage::submodules(Path::new(&path))).await
+}
+
+#[tauri::command]
+async fn lfs_info(path: String) -> Result<manage::LfsInfo, String> {
+    blocking(move || manage::lfs_info(Path::new(&path))).await
+}
+
+#[tauri::command]
+async fn sparse_info(path: String) -> Result<manage::SparseInfo, String> {
+    blocking(move || manage::sparse_info(Path::new(&path))).await
+}
+
+#[tauri::command]
+fn gitignore_templates() -> Vec<String> {
+    manage::GITIGNORE_TEMPLATES.iter().map(|(n, _)| n.to_string()).collect()
+}
+
+#[tauri::command]
+async fn account_info(path: Option<String>) -> Result<accounts::AccountInfo, String> {
+    blocking(move || accounts::info(Path::new(&path.unwrap_or_else(|| ".".into())))).await
+}
+
+#[tauri::command]
+async fn set_git_config(path: Option<String>, scope: String, key: String, value: String) -> Result<(), String> {
+    blocking(move || accounts::set(Path::new(&path.unwrap_or_else(|| ".".into())), &scope, &key, &value)).await?
+}
+
+#[tauri::command]
+async fn generate_ssh_key(email: String, name: String) -> Result<String, String> {
+    blocking(move || accounts::generate_ssh_key(&email, &name)).await?
+}
+
+#[tauri::command]
+fn cancel_job(id: String, state: State<'_, AppState>) -> bool {
+    state.engine.jobs.cancel(&id)
+}
+
+#[tauri::command]
+fn term_open(cwd: String, cols: u16, rows: u16, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<u32, String> {
+    let a1 = app.clone();
+    let a2 = app.clone();
+    state.terminals.open(
+        &cwd,
+        cols,
+        rows,
+        std::sync::Arc::new(move |id, data| {
+            let _ = a1.emit("term-data", serde_json::json!({ "id": id, "data": data }));
+        }),
+        std::sync::Arc::new(move |id| {
+            let _ = a2.emit("term-exit", id);
+        }),
+    )
+}
+
+#[tauri::command]
+fn term_write(id: u32, data: String, state: State<'_, AppState>) -> Result<(), String> {
+    state.terminals.write(id, &data)
+}
+
+#[tauri::command]
+fn term_resize(id: u32, cols: u16, rows: u16, state: State<'_, AppState>) -> Result<(), String> {
+    state.terminals.resize(id, cols, rows)
+}
+
+#[tauri::command]
+fn term_close(id: u32, state: State<'_, AppState>) {
+    state.terminals.close(id)
+}
+
+/// The hosting service of a repository's origin (or first) remote, if it's GitHub or GitLab.
+fn remote_of(path: &str, gitlab_host: &str) -> Result<hosting::RemoteRepo, String> {
+    let dir = Path::new(path);
+    let mut url = git::run(dir, &["remote", "get-url", "origin"]).stdout.trim().to_string();
+    if url.is_empty() {
+        if let Some(first) = git::run(dir, &["remote"]).stdout.lines().next() {
+            url = git::run(dir, &["remote", "get-url", first]).stdout.trim().to_string();
+        }
+    }
+    hosting::parse_remote(&url, gitlab_host).ok_or_else(|| "This repository's remote isn't on GitHub or GitLab.".to_string())
+}
+
+#[derive(Serialize)]
+struct HostingStatus {
+    github: Option<String>,
+    gitlab: Option<String>,
+    github_error: Option<String>,
+    gitlab_error: Option<String>,
+    ai: bool,
+}
+
+#[tauri::command]
+async fn hosting_status(gitlab_host: String) -> Result<HostingStatus, String> {
+    blocking(move || {
+        let check = |p: hosting::Provider, name: &str| -> (Option<String>, Option<String>) {
+            if hosting::secret_get(name).is_none() {
+                return (None, None);
+            }
+            match hosting::whoami(&p, &gitlab_host) {
+                Ok(u) => (Some(u), None),
+                Err(e) => (None, Some(e)),
+            }
+        };
+        let (github, github_error) = check(hosting::Provider::Github, "github-token");
+        let (gitlab, gitlab_error) = check(hosting::Provider::Gitlab, "gitlab-token");
+        HostingStatus { github, gitlab, github_error, gitlab_error, ai: hosting::secret_get("anthropic-key").is_some() }
+    })
+    .await
+}
+
+/// Store (or with an empty value, remove) a token or API key in the OS credential store.
+#[tauri::command]
+fn set_secret(name: String, value: String) -> Result<(), String> {
+    if !["github-token", "gitlab-token", "anthropic-key"].contains(&name.as_str()) {
+        return Err("unknown secret".into());
+    }
+    hosting::secret_set(&name, value.trim())
+}
+
+#[tauri::command]
+async fn repo_remote(path: String, gitlab_host: String) -> Result<Option<hosting::RemoteRepo>, String> {
+    blocking(move || remote_of(&path, &gitlab_host).ok()).await
+}
+
+#[tauri::command]
+async fn list_prs(path: String, gitlab_host: String) -> Result<Vec<hosting::PullRequest>, String> {
+    blocking(move || hosting::pull_requests(&remote_of(&path, &gitlab_host)?)).await?
+}
+
+#[tauri::command]
+async fn list_issues(path: String, gitlab_host: String) -> Result<Vec<hosting::Issue>, String> {
+    blocking(move || hosting::issues(&remote_of(&path, &gitlab_host)?)).await?
+}
+
+#[tauri::command]
+async fn pr_comments(path: String, gitlab_host: String, number: u64) -> Result<Vec<hosting::Comment>, String> {
+    blocking(move || hosting::comments(&remote_of(&path, &gitlab_host)?, number)).await?
+}
+
+#[tauri::command]
+async fn pr_comment(path: String, gitlab_host: String, number: u64, body: String) -> Result<(), String> {
+    blocking(move || hosting::add_comment(&remote_of(&path, &gitlab_host)?, number, &body)).await?
+}
+
+#[tauri::command]
+async fn create_pr(path: String, gitlab_host: String, source: String, target: String, title: String, body: String, draft: bool) -> Result<hosting::PullRequest, String> {
+    blocking(move || hosting::create_pr(&remote_of(&path, &gitlab_host)?, &source, &target, &title, &body, draft)).await?
+}
+
+#[tauri::command]
+async fn merge_pr(path: String, gitlab_host: String, number: u64, method: String) -> Result<(), String> {
+    blocking(move || hosting::merge_pr(&remote_of(&path, &gitlab_host)?, number, &method)).await?
+}
+
+#[tauri::command]
+async fn launchpad(gitlab_host: String) -> Result<hosting::Launchpad, String> {
+    blocking(move || hosting::launchpad(&gitlab_host)).await
+}
+
+#[tauri::command]
+fn issue_branch_name(number: u64, title: String) -> String {
+    hosting::branch_for_issue(number, &title)
+}
+
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("Only web links can be opened".into());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", &url]).creation_flags(0x0800_0000).spawn().map_err(err)?;
+    }
+    #[cfg(target_os = "macos")]
+    std::process::Command::new("open").arg(&url).spawn().map_err(err)?;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    std::process::Command::new("xdg-open").arg(&url).spawn().map_err(err)?;
+    Ok(())
+}
+
 /// Open the repository in VS Code (File > Open Repo in VS Code).
 #[tauri::command]
 fn open_in_editor(path: String) -> Result<(), String> {
@@ -195,6 +400,11 @@ async fn sample_repo() -> Result<String, String> {
 }
 
 #[tauri::command]
+async fn conflict_sample() -> Result<String, String> {
+    blocking(|| sample::ensure_conflict_sample().map(|p| p.to_string_lossy().into_owned())).await?
+}
+
+#[tauri::command]
 async fn last_commit_message(path: String) -> Result<(String, String), String> {
     blocking(move || git::last_commit_message(Path::new(&path))).await
 }
@@ -205,13 +415,19 @@ async fn pick_folder(title: String) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-async fn init_repo(parent: String, name: String, state: State<'_, AppState>) -> Result<String, String> {
+async fn init_repo(parent: String, name: String, options: Option<manage::InitOptions>, state: State<'_, AppState>) -> Result<String, String> {
     let engine = state.engine.clone();
     blocking(move || {
         let dir = PathBuf::from(&parent).join(name.trim());
         std::fs::create_dir_all(&dir).map_err(err)?;
-        let o = engine.git(&dir, &["init", "-b", "main"]);
+        let opts = options.unwrap_or_default();
+        let branch = if opts.branch.trim().is_empty() { "main".to_string() } else { opts.branch.trim().to_string() };
+        let o = engine.git(&dir, &["init", "-b", &branch]);
         if o.ok {
+            let f = manage::init_files(&dir, name.trim(), &opts, &|a: &[&str]| engine.git(&dir, a));
+            if !f.ok {
+                return Err(f.message());
+            }
             Ok(dir.to_string_lossy().into_owned())
         } else {
             Err(o.message())
@@ -221,14 +437,23 @@ async fn init_repo(parent: String, name: String, state: State<'_, AppState>) -> 
 }
 
 #[tauri::command]
-async fn clone_repo(url: String, parent: String, state: State<'_, AppState>) -> Result<String, String> {
+async fn clone_repo(url: String, parent: String, depth: Option<u32>, state: State<'_, AppState>) -> Result<String, String> {
     let engine = state.engine.clone();
     blocking(move || {
         let name = url.trim_end_matches('/').rsplit(['/', '\\', ':']).next().unwrap_or("repo").trim_end_matches(".git").to_string();
         let parent = PathBuf::from(&parent);
         std::fs::create_dir_all(&parent).map_err(err)?;
         let dest = parent.join(&name);
-        let o = engine.git(&parent, &["clone", "--progress", url.trim(), dest.to_string_lossy().as_ref()]);
+        // Shallow clone: only the newest `depth` commits.
+        let depth_arg = depth.filter(|d| *d > 0).map(|d| format!("--depth={d}"));
+        let mut args = vec!["clone", "--progress"];
+        if let Some(a) = depth_arg.as_deref() {
+            args.push(a);
+        }
+        let dest_s = dest.to_string_lossy().into_owned();
+        args.push(url.trim());
+        args.push(&dest_s);
+        let o = engine.job("clone", "clone", &parent, &args);
         if o.ok {
             Ok(dest.to_string_lossy().into_owned())
         } else {
@@ -347,8 +572,14 @@ fn main() {
     });
 
     tauri::Builder::default()
-        .manage(AppState { engine: Arc::new(Engine::default()), screenshot: screenshot.clone(), shot_view, watchers: Mutex::new(HashMap::new()) })
+        .manage(AppState { engine: Arc::new(Engine::default()), screenshot: screenshot.clone(), shot_view, watchers: Mutex::new(HashMap::new()), terminals: terminal::Terminals::default() })
         .setup(move |app| {
+            // Long jobs report progress to the window ("job-progress" events).
+            let handle = app.handle().clone();
+            let engine = app.state::<AppState>().engine.clone();
+            engine.jobs.set_listener(std::sync::Arc::new(move |id: &str, text: &str, pct: Option<u32>| {
+                let _ = handle.emit("job-progress", serde_json::json!({ "id": id, "text": text, "percent": pct }));
+            }));
             if let Some(out) = screenshot.clone() {
                 // Safety net: take the picture anyway if the page never reports ready.
                 let handle = app.handle().clone();
@@ -376,6 +607,34 @@ fn main() {
             tracked_files,
             open_in_editor,
             rebase_commits,
+            gitflow_config,
+            hosting_status,
+            set_secret,
+            repo_remote,
+            list_prs,
+            list_issues,
+            pr_comments,
+            pr_comment,
+            create_pr,
+            merge_pr,
+            launchpad,
+            issue_branch_name,
+            open_url,
+            term_open,
+            term_write,
+            term_resize,
+            term_close,
+            account_info,
+            set_git_config,
+            generate_ssh_key,
+            cancel_job,
+            lfs_info,
+            sparse_info,
+            gitignore_templates,
+            cleanup_list,
+            remotes_list,
+            submodules_list,
+            conflict_sample,
             conflict_info,
             run_action,
             activity_log,

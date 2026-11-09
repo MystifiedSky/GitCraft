@@ -61,6 +61,7 @@ pub struct WorkStatus {
 pub struct Worktree {
     pub path: String,
     pub branch: String,
+    pub locked: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -162,6 +163,9 @@ pub struct RefView {
     pub hidden: Vec<String>,
     #[serde(default)]
     pub solo: Vec<String>,
+    /// "Pin to Left": full ref name whose line is drawn in lane 0.
+    #[serde(default)]
+    pub pinned: Option<String>,
 }
 
 /// Arguments for `git log` that select the commits the graph should show.
@@ -281,10 +285,14 @@ pub fn load_view(dir: &Path, max_commits: usize, view: &RefView) -> RepoData {
             if let Some(w) = cur.take() {
                 d.worktrees.push(w);
             }
-            cur = Some(Worktree { path: p.to_string(), branch: String::new() });
+            cur = Some(Worktree { path: p.to_string(), branch: String::new(), locked: false });
         } else if let Some(b) = line.strip_prefix("branch refs/heads/") {
             if let Some(w) = cur.as_mut() {
                 w.branch = b.to_string();
+            }
+        } else if line == "locked" || line.starts_with("locked ") {
+            if let Some(w) = cur.as_mut() {
+                w.locked = true;
             }
         } else if line == "detached" {
             if let Some(w) = cur.as_mut() {

@@ -12,6 +12,33 @@ pub fn data_dir() -> PathBuf {
     base.join("GitCraft")
 }
 
+/// A small repository stopped in a merge conflict (used to picture and try the merge tool).
+pub fn ensure_conflict_sample() -> Result<PathBuf, String> {
+    let repo = data_dir().join("sample-conflict");
+    if repo.join(".git").join("MERGE_HEAD").exists() {
+        return Ok(repo);
+    }
+    let _ = fs::remove_dir_all(&repo);
+    fs::create_dir_all(&repo).map_err(|e| e.to_string())?;
+    let ok = |o: crate::git::GitOut| if o.ok { Ok(()) } else { Err(o.message()) };
+    ok(run(&repo, &["init", "-q", "-b", "main"]))?;
+    for (k, v) in [("user.name", "Sam Rivera"), ("user.email", "sam@example.com"), ("commit.gpgsign", "false")] {
+        ok(run(&repo, &["config", k, v]))?;
+    }
+    let write = |text: &str| fs::write(repo.join("settings.txt"), text).map_err(|e| e.to_string());
+    write("name = sample\ncolour = blue\nsize = 10\nlanguage = en\n")?;
+    ok(run(&repo, &["add", "-A"]))?;
+    ok(run(&repo, &["commit", "-q", "-m", "Add settings"]))?;
+    ok(run(&repo, &["checkout", "-q", "-b", "feature/theme"]))?;
+    write("name = sample\ncolour = green\nsize = 12\nlanguage = en\n")?;
+    ok(run(&repo, &["commit", "-q", "-am", "Use a green theme"]))?;
+    ok(run(&repo, &["checkout", "-q", "main"]))?;
+    write("name = sample\ncolour = red\nsize = 10\nlanguage = fr\n")?;
+    ok(run(&repo, &["commit", "-q", "-am", "Switch to red and French"]))?;
+    let _ = run(&repo, &["merge", "feature/theme"]); // stops with a conflict on purpose
+    Ok(repo)
+}
+
 /// Returns the path of the sample repository, creating it the first time.
 pub fn ensure_sample() -> Result<PathBuf, String> {
     let root = data_dir();

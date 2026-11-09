@@ -3,6 +3,7 @@ import { useStore } from "@/lib/store";
 import { DropMenu, type MenuEntry } from "./ui/menu";
 import { CtxMenu } from "./ui/menu";
 import { ProfileMark } from "./Icons";
+import { switchProfile } from "@/lib/prefs";
 import { cn, MOD } from "@/lib/utils";
 
 /** Repository tabs, like the original's tab strip. */
@@ -36,6 +37,18 @@ export function TabsBar() {
                   { label: "Close other tabs", onSelect: () => s.tabs.filter((o) => o.id !== t.id).forEach((o) => s.closeTab(o.id)) },
                   { label: "Close tabs to the right", onSelect: () => s.tabs.slice(s.tabs.findIndex((o) => o.id === t.id) + 1).forEach((o) => s.closeTab(o.id)) },
                   { separator: true },
+                  {
+                    label: "Rename tab",
+                    onSelect: () =>
+                      s.setDialog({
+                        kind: "prompt",
+                        title: "Rename tab",
+                        label: t.kind === "repo" ? "Repository alias (empty = clear alias)" : "Tab alias",
+                        value: t.title,
+                        confirm: "Save alias",
+                        onSubmit: (v) => s.renameTab(t.id, v),
+                      }),
+                  },
                   { label: "Reopen Closed Tab", disabled: s.closed.length === 0, onSelect: s.reopenTab },
                 ]}
               >
@@ -92,16 +105,17 @@ export function TabsBar() {
       <DropMenu
         align="end"
         items={[
-          { heading: "Profile" },
-          { label: "Default Profile ✓", disabled: true },
+          { heading: "Profiles" },
+          ...s.profiles.map((p) => ({ label: (p.id === s.activeProfile ? "✓ " : "   ") + p.name, onSelect: () => switchProfile(p.id) })),
           { separator: true },
+          { label: "Manage profiles...", onSelect: () => s.setDialog({ kind: "profiles" }) },
+          { label: "Accounts...", onSelect: () => s.setDialog({ kind: "accounts" }) },
           { label: "Preferences...", onSelect: () => s.setDialog({ kind: "prefs" }) },
-          { label: "Profiles and sign-in come in Stage 4", disabled: true },
         ]}
         trigger={
           <button className="flex items-center gap-1.5 pl-2 pr-2 text-[13px] text-white/90 hover:bg-white/5 outline-none">
             <ProfileMark />
-            <span className="font-semibold">Default Profile</span>
+            <span className="font-semibold">{s.profiles.find((p) => p.id === s.activeProfile)?.name ?? "Default Profile"}</span>
             <ChevronDown size={13} />
           </button>
         }

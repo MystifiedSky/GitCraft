@@ -18,6 +18,7 @@ import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
 import { act, openRepoPath, promptBranch } from "@/lib/repo";
 import { DropMenu, type MenuEntry } from "./ui/menu";
+import { addSubmodule, addWorktree, initGitflow, openCleanup } from "@/lib/manage";
 import { cn, MOD } from "@/lib/utils";
 
 const PULL_LABELS: Record<string, string> = {
@@ -34,6 +35,8 @@ export function Toolbar({ repo, tabId }: { repo: RepoView | undefined; tabId: st
   const labels = s.settings.toolbarLabels;
   const locals = repo?.refs.filter((r) => r.kind === "Local") ?? [];
   const detached = !!repo && !repo.head_branch;
+  // Commits to pull / push for the checked-out branch (shown as small counts like the original).
+  const head = repo?.refs.find((r) => r.kind === "Local" && r.name === repo.head_branch);
   const hasChanges = !!repo && repo.status.unstaged.length + repo.status.staged.length > 0;
 
   const repoMenu: MenuEntry[] = [
@@ -68,7 +71,15 @@ export function Toolbar({ repo, tabId }: { repo: RepoView | undefined; tabId: st
     { label: "Add remote...", onSelect: () => path && promptRemote(path) },
     { label: "Activity log", onSelect: () => s.setDialog({ kind: "log" }) },
     { separator: true },
-    { label: "Gitflow, LFS and submodules come in Stage 4", disabled: true },
+    { label: "Initialize / edit Gitflow...", onSelect: () => path && initGitflow(path) },
+    { label: "Add Submodule...", onSelect: () => path && addSubmodule(path) },
+    { label: "Add a new worktree...", onSelect: () => repo && addWorktree(repo) },
+    { label: "Clean Up Local Branches...", onSelect: openCleanup },
+    { label: "Sparse Checkout...", onSelect: () => s.setDialog({ kind: "sparse" }) },
+    { separator: true },
+    { label: "Git LFS: enable for this repository", onSelect: () => path && act(path, { type: "lfsInstall" }) },
+    { label: "Git LFS: track a pattern...", onSelect: () => path && promptLfsTrack(path) },
+    { label: "Git LFS: pull LFS files", onSelect: () => path && act(path, { type: "lfsPull" }) },
   ];
 
   return (
@@ -111,6 +122,7 @@ export function Toolbar({ repo, tabId }: { repo: RepoView | undefined; tabId: st
           disabled={!repo || (detached && s.settings.pullMode !== "fetch")}
           onClick={() => path && act(path, { type: "pull", mode: s.settings.pullMode })}
           className="pr-0 w-[44px]"
+          badge={head?.behind}
         >
           <ArrowDownToLine size={19} />
         </TB>
@@ -123,7 +135,7 @@ export function Toolbar({ repo, tabId }: { repo: RepoView | undefined; tabId: st
           }
         />
       </div>
-      <TB label="Push" labels={labels} title={detached ? "Push is not available when in a detached HEAD state" : "Push"} disabled={!repo || detached} onClick={() => path && act(path, { type: "push", force: false })}>
+      <TB label="Push" labels={labels} title={detached ? "Push is not available when in a detached HEAD state" : "Push"} disabled={!repo || detached} onClick={() => path && act(path, { type: "push", force: false })} badge={head?.ahead}>
         <ArrowUpFromLine size={19} />
       </TB>
       <TB label="Branch" labels={labels} title={`Create branch (${MOD}+B)`} disabled={!repo} onClick={() => path && promptBranch(path, null)}>
@@ -136,7 +148,7 @@ export function Toolbar({ repo, tabId }: { repo: RepoView | undefined; tabId: st
         <Upload size={19} />
       </TB>
       <div className="w-px h-[34px] bg-white/20 mx-1" />
-      <TB label="Terminal" labels={labels} title="Open a terminal in this repository" disabled={!repo} onClick={() => path && api.openTerminal(path)}>
+      <TB label="Terminal" labels={labels} title="Toggle the terminal panel (Ctrl+`)" disabled={!repo} onClick={() => s.setSettings({ showTerminal: !s.settings.showTerminal })}>
         <SquareTerminal size={19} />
       </TB>
       <DropMenu
@@ -164,6 +176,7 @@ function TB({
   onClick,
   disabled,
   className,
+  badge,
 }: {
   children: ReactNode;
   label: string;
@@ -172,6 +185,7 @@ function TB({
   onClick: () => void;
   disabled?: boolean;
   className?: string;
+  badge?: number;
 }) {
   return (
     <button
@@ -181,7 +195,14 @@ function TB({
       className={cn("flex flex-col items-center justify-center w-[52px] h-full hover:bg-white/5 disabled:opacity-35 outline-none", className)}
     >
       {labels && <span className="text-[11px] text-white/75 leading-none mb-[5px]">{label}</span>}
-      {children}
+      <span className="relative">
+        {children}
+        {!!badge && badge > 0 && (
+          <span className="absolute -top-[5px] -right-[11px] min-w-[15px] h-[14px] px-[3px] rounded-full bg-accent text-white text-[9.5px] font-bold leading-[14px] text-center">
+            {badge}
+          </span>
+        )}
+      </span>
     </button>
   );
 }
@@ -195,5 +216,16 @@ export function promptRemote(path: string) {
     confirm: "Add Remote",
     extraLabel: "Remote URL",
     onSubmit: (name, url) => act(path, { type: "addRemote", name, url: url ?? "" }),
+  });
+}
+
+function promptLfsTrack(path: string) {
+  useStore.getState().setDialog({
+    kind: "prompt",
+    title: "Track with Git LFS",
+    label: "Pattern (for example *.psd or assets/**)",
+    value: "*.psd",
+    confirm: "Track",
+    onSubmit: (pattern) => act(path, { type: "lfsTrack", pattern }),
   });
 }

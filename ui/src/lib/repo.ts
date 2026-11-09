@@ -18,7 +18,8 @@ export function useRepo(path: string | undefined, tabId: string) {
   const limit = useStore((s) => s.ui[tabId]?.limit ?? 0);
   const hidden = useStore((s) => (path ? s.settings.hidden[path] : undefined));
   const solo = useStore((s) => (path ? s.settings.solo[path] : undefined));
-  const view: RefView = { hidden: hidden ?? [], solo: solo ?? [] };
+  const pinned = useStore((s) => (path ? s.settings.pinned?.[path] : undefined));
+  const view: RefView = { hidden: hidden ?? [], solo: solo ?? [], pinned: pinned ?? null };
   return useQuery({
     queryKey: ["repo", path, limit, view],
     queryFn: async () => {
@@ -57,7 +58,11 @@ export async function act(path: string, action: Action, quiet = false): Promise<
   st.setBusy(BUSY_LABEL[action.type] ?? "Working…");
   try {
     const r = await api.run(path, action);
-    if (!r.ok || !quiet) st.toast(r.ok, r.message);
+    if (!r.ok && action.type === "push" && !action.force && /rejected|non-fast-forward|fetch first/i.test(r.message)) {
+      offerForcePush(path);
+      return false;
+    }
+    if (!r.ok || (!quiet && st.settings.notifySuccess)) st.toast(r.ok, r.message);
     return r.ok;
   } catch (e) {
     st.toast(false, String(e));
@@ -66,6 +71,23 @@ export async function act(path: string, action: Action, quiet = false): Promise<
     st.setBusy(null);
     await refresh(path);
   }
+}
+
+/** The remote has commits we don't: pull first, or force push (with lease, or without as a last resort). */
+function offerForcePush(path: string) {
+  const st = useStore.getState();
+  const repo = latest.get(path);
+  const b = repo?.refs.find((r) => r.kind === "Local" && r.name === repo.head_branch);
+  st.setDialog({
+    kind: "choice",
+    title: "Push was rejected",
+    text: `'${b?.name ?? "This branch"}' is behind '${b?.upstream || "the remote"}'. Update your branch by doing a Pull.\n\nForce push is a destructive action and cannot be undone: it replaces the remote branch with yours.`,
+    choices: [
+      { label: "Pull", variant: "primary", onSelect: () => act(path, { type: "pull", mode: st.settings.pullMode === "fetch" ? "ff" : st.settings.pullMode }) },
+      { label: "Force Push", variant: "danger", onSelect: () => act(path, { type: "push", force: true, lease: true }) },
+      { label: "Force Push Anyway", variant: "danger", onSelect: () => act(path, { type: "push", force: true, lease: false }) },
+    ],
+  });
 }
 
 export function currentBranch(repo: RepoView | undefined): GitRef | undefined {
@@ -127,6 +149,15 @@ export function confirmThen(title: string, text: string, confirm: string, onConf
 export function openHistory(file: string, mode: "history" | "blame" = "history") {
   const st = useStore.getState();
   st.setUi(st.activeId, { history: { file, mode, sha: null }, diff: null });
+}
+
+/** "Pin to Left" / "Unpin from Left". */
+export function togglePinned(path: string, full: string) {
+  const st = useStore.getState();
+  const pinned = { ...(st.settings.pinned ?? {}) };
+  if (pinned[path] === full) delete pinned[path];
+  else pinned[path] = full;
+  st.setSettings({ pinned });
 }
 
 /** Hide a branch or tag from the graph (or show it again). */

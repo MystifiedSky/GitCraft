@@ -55,10 +55,67 @@ textarea {
   font-family: var(--font-mono);
 }
 
+/* Other themes override the same variables (values from the original's theme files).
+   text-white / bg-white/x use --color-white, so on light themes they turn dark. */
+:root {
+  --menu-bg: #2b2e35;
+}
+[data-theme="light"],
+[data-theme="light-hc"] {
+  --color-app: #fcfcfc;
+  --color-panel: #f3f3f3;
+  --color-panel2: #ececec;
+  --color-toolbar: #fafafa;
+  --color-tabs: #ebebeb;
+  --color-field: #ffffff;
+  --color-titlebar: #e8e8e8;
+  --color-menubar: #f0f0f0;
+  --color-line: #c6c6c6;
+  --color-line2: #b0b0b0;
+  --color-link: #005c95;
+  --color-fg: rgb(0 0 0 / 0.75);
+  --color-fg2: rgb(0 0 0 / 0.6);
+  --color-fg3: rgb(0 0 0 / 0.4);
+  --color-selrow: #5f8eed33;
+  --color-hoverrow: #5f8eed19;
+  --color-white: #111214;
+  --color-black: #ffffff;
+  --menu-bg: #ffffff;
+  color-scheme: light;
+}
+[data-theme="light-hc"] {
+  --color-fg: #000000e5;
+  --color-fg2: #000000b3;
+  --color-fg3: #00000099;
+  --color-line: #8a8a8a;
+}
+[data-theme="dark-hc"] {
+  --color-app: #090a0b;
+  --color-panel: #141618;
+  --color-panel2: #1d2023;
+  --color-toolbar: #191c20;
+  --color-tabs: #111316;
+  --color-field: #000000;
+  --color-titlebar: #000000;
+  --color-menubar: #050505;
+  --color-line: rgb(255 255 255 / 0.25);
+  --color-fg: rgb(255 255 255 / 0.9);
+  --color-fg2: rgb(255 255 255 / 0.75);
+  --color-fg3: rgb(255 255 255 / 0.55);
+  --color-hoverrow: rgb(77 136 255 / 0.15);
+  --menu-bg: #15171a;
+}
+html,
+body,
+#root {
+  background: var(--color-app);
+  color: var(--color-fg);
+}
+
 /* Context / dropdown menus (shadcn-style, Radix underneath) */
 .menu-content {
   min-width: 190px;
-  background: #2b2e35;
+  background: var(--menu-bg);
   border: 1px solid rgb(255 255 255 / 0.12);
   border-radius: 6px;
   padding: 4px;

@@ -32,6 +32,23 @@ monaco.editor.defineTheme("gitcraft-dark", {
   },
 });
 
+monaco.editor.defineTheme("gitcraft-light", {
+  base: "vs",
+  inherit: true,
+  rules: [],
+  colors: {
+    "editor.background": "#fcfcfc",
+    "editorGutter.background": "#fcfcfc",
+    "diffEditor.insertedLineBackground": "#5cb85c33",
+    "diffEditor.removedLineBackground": "#d9413d33",
+  },
+});
+
+/** The editor theme for GitCraft's current theme. */
+export function editorTheme(): string {
+  return (document.documentElement.dataset.theme ?? "dark").startsWith("light") ? "gitcraft-light" : "gitcraft-dark";
+}
+
 /** Monaco language id for a file name, from the languages Monaco knows. */
 export function languageFor(file: string): string {
   file = file.split("#")[0]; // views add "#<sha>" to tell versions apart

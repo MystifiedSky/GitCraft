@@ -20,10 +20,11 @@ import { api, WORKDIR } from "@/lib/api";
 import { useStore, useTabUi, type DiffTarget } from "@/lib/store";
 import { act, confirmThen, copy } from "@/lib/repo";
 import { fileMenu } from "@/lib/menus";
+import { baseFor, dropCommits, headLine, openCherryPick, openRebase, squashCommits } from "@/lib/rewrite";
 import { CtxMenu } from "./ui/menu";
 import { Button } from "./ui/button";
 import { Avatar, StatusIcon } from "./Icons";
-import { cn, fullDate, MOD } from "@/lib/utils";
+import { cn, fullDate, mix, MOD } from "@/lib/utils";
 
 /** Right panel: staging and committing (WIP) or the details of a selected commit. */
 export function RightPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
@@ -70,10 +71,10 @@ function ViewSwitch() {
       </button>
       <div className="flex-1 flex justify-center">
         <div className="flex h-[24px] rounded-[3px] overflow-hidden border border-white/10 text-[13px]">
-          <button onClick={() => s.setSettings({ fileView: "path" })} className={cn("px-3 flex items-center gap-1.5", v === "path" ? "bg-[#444] text-white" : "bg-[#313131] text-fg2 hover:text-white")}>
+          <button onClick={() => s.setSettings({ fileView: "path" })} className={cn("px-3 flex items-center gap-1.5", v === "path" ? "bg-white/15 text-white" : "bg-white/5 text-fg2 hover:text-white")}>
             <List size={14} /> Path
           </button>
-          <button onClick={() => s.setSettings({ fileView: "tree" })} className={cn("px-3 flex items-center gap-1.5", v === "tree" ? "bg-[#444] text-white" : "bg-[#313131] text-fg2 hover:text-white")}>
+          <button onClick={() => s.setSettings({ fileView: "tree" })} className={cn("px-3 flex items-center gap-1.5", v === "tree" ? "bg-white/15 text-white" : "bg-white/5 text-fg2 hover:text-white")}>
             <FolderTree size={14} /> Tree
           </button>
         </div>
@@ -218,6 +219,12 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
   const total = new Set([...repo.status.unstaged.map((f) => f.path), ...staged.map((f) => f.path)]).size;
   const merging = repo.state_note === "merging";
   const [cur, inc] = repo.conflict_labels ?? [repo.head_branch ?? "HEAD", "incoming"];
+  // Commit template (Preferences > Commit): fill an empty, untouched commit box.
+  useEffect(() => {
+    const t = s.settings;
+    if (!merging && !draft.summary && !draft.description && !draft.amend && (t.templateSummary || t.templateDescription))
+      s.setDraft(repo.path, { summary: t.templateSummary, description: t.templateDescription });
+  }, [repo.path, merging, draft.summary, draft.description]);
   // Prefill the commit box with the message git prepared for the merge (MERGE_MSG).
   useEffect(() => {
     if (merging && repo.merge_msg && !draft.summary && !draft.description) {
@@ -228,6 +235,7 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
   const branch = repo.head_branch ?? repo.head_sha.slice(0, s.metrics.sha_len);
   const left = s.metrics.summary_counter - draft.summary.length; // the original's 72-character summary counter
   const push = s.settings.pushAfterCommit;
+  const [skipHooks, setSkipHooks] = useState(s.settings.skipHooks);
 
   const openDiff = (f: FileChange, isStaged: boolean) => {
     const target: DiffTarget = { source: { kind: isStaged ? "Staged" : "Unstaged" }, file: f.path, untracked: f.status === "?", parent: null };
@@ -235,7 +243,7 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
   };
 
   const doCommit = async (stageAll: boolean) => {
-    const ok = await act(repo.path, { type: "commit", summary: draft.summary, description: draft.description, amend: draft.amend, stageAll });
+    const ok = await act(repo.path, { type: "commit", summary: draft.summary, description: draft.description, amend: draft.amend, stageAll, skipHooks });
     if (ok) {
       s.setDraft(repo.path, { summary: "", description: "", amend: false });
       s.setUi(tabId, { diff: null });
@@ -287,7 +295,7 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
           <span className="whitespace-nowrap">
             {total} file change{total === 1 ? "" : "s"} on
           </span>
-          <span className="px-1.5 rounded-[3px] bg-[#195f71] text-white truncate">{branch}</span>
+          <span className="px-1.5 rounded-[3px] text-white truncate" style={{ background: mix("#15a0bf", 0.45) }}>{branch}</span>
         </div>
         <AiButton title="AI features come in Stage 6" />
       </PanelHeader>
@@ -412,6 +420,7 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
                 <input
                   className="commit-message-input flex-1 bg-transparent outline-none text-[15px] text-white placeholder:text-white/70 min-w-0"
                   placeholder="Commit summary"
+                  spellCheck={s.settings.spellcheck}
                   value={draft.summary}
                   data-commit-summary
                   onChange={(e) => s.setDraft(repo.path, { summary: e.target.value })}
@@ -429,6 +438,7 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
               <textarea
                 className="commit-message-input bg-transparent outline-none resize-none text-[13.5px] text-white/90 placeholder:text-white/70 px-[10px] py-[6px] h-[84px]"
                 placeholder="Description"
+                spellCheck={s.settings.spellcheck}
                 value={draft.description}
                 onChange={(e) => s.setDraft(repo.path, { description: e.target.value })}
                 onKeyDown={(e) => {
@@ -455,6 +465,12 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
                 Push after committing
               </label>
             )}
+            {optionsOpen && (
+              <label className="flex items-center gap-2 text-[12.5px] text-white/80 pl-5 cursor-pointer">
+                <input type="checkbox" checked={skipHooks} onChange={(e) => setSkipHooks(e.target.checked)} className="accent-[#80B1EA]" />
+                Skip Git hooks
+              </label>
+            )}
           </>
         ) : (
           <div className="bg-field rounded-[3px] border border-white/10 flex flex-col">
@@ -472,7 +488,7 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
           onClick={() => (tab === "stash" ? act(repo.path, { type: "stash", message: stashMsg }).then(() => setStashMsg("")) : doCommit(false))}
           className={cn(
             "h-[40px] rounded-[3px] border text-[13.5px] flex items-center justify-center gap-2 font-semibold",
-            commitEnabled ? "bg-good/25 border-good text-white hover:bg-good/35" : "bg-[#2c3935] border-[#3b4a44] text-white/45",
+            commitEnabled ? "bg-good/25 border-good text-white hover:bg-good/35" : "bg-good/10 border-good/25 text-white/45",
           )}
         >
           <GitCommitHorizontal size={15} />
@@ -613,6 +629,8 @@ function MultiPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
   const ui = useTabUi(tabId);
   const picked = repo.commits.filter((c) => ui.multi.includes(c.sha));
   const oldestFirst = [...picked].reverse().map((c) => c.sha);
+  const line = headLine(repo);
+  const onLine = !!repo.head_branch && ui.multi.every((x) => line.includes(x));
   return (
     <div className="h-full flex flex-col bg-panel min-w-0">
       <PanelHeader>
@@ -622,11 +640,28 @@ function MultiPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
         </button>
       </PanelHeader>
       <div className="p-3 text-[12px] text-fg3 leading-relaxed">A combined diff is not shown for this selection. Select exactly 2 commits to compare them.</div>
-      <div className="px-3 pb-3">
+      <div className="px-3 pb-3 flex flex-wrap gap-2">
         <Button size="sm" variant="primary" onClick={() => act(repo.path, { type: "cherryPickMany", shas: oldestFirst })}>
           Cherry pick {picked.length} commits
         </Button>
+        <Button size="sm" onClick={() => openCherryPick(tabId, repo, ui.multi)}>
+          Interactive Cherry Pick
+        </Button>
+        {onLine && (
+          <>
+            <Button size="sm" onClick={() => squashCommits(repo, ui.multi)}>
+              Squash {picked.length} commits
+            </Button>
+            <Button size="sm" variant="danger" onClick={() => dropCommits(repo, ui.multi)}>
+              Drop {picked.length} commits
+            </Button>
+            <Button size="sm" onClick={() => openRebase(tabId, repo.path, baseFor(repo, oldestFirst[0]), repo.head_branch ?? "HEAD")}>
+              Interactive Rebase
+            </Button>
+          </>
+        )}
       </div>
+      {!onLine && <div className="px-3 pb-3 text-[11.5px] text-fg3">Squash, drop and interactive rebase work on commits of the checked-out branch.</div>}
       <div className="flex-1 overflow-y-auto border-t border-white/5">
         {picked.map((c) => (
           <div key={c.sha} className="flex items-center gap-2 px-3 h-[30px] text-[12.5px] border-b border-white/5">

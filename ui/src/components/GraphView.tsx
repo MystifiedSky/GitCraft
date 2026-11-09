@@ -39,6 +39,18 @@ export function GraphView({ repo, tabId }: Props) {
   const [viewH, setViewH] = useState(400);
   const [paneW, setPaneW] = useState(300);
   const [hoverRef, setHoverRef] = useState<number | null>(null);
+  const [hoverRow, setHoverRow] = useState<number | null>(null);
+  const ghostOn = useStore((s) => s.settings.ghostRefs);
+  /** Nearest label above a commit in the same lane (the branch it belongs to). */
+  const ghostFor = (i: number): GitRef | undefined => {
+    const lane = repo.graph.rows[i]?.col;
+    for (let j = i - 1; j >= 0; j--) {
+      if (repo.graph.rows[j]?.col !== lane) continue;
+      const r = refsBySha.get(repo.commits[j].sha);
+      if (r?.length) return r[0];
+    }
+    return undefined;
+  };
 
   const wipFiles = useMemo(() => {
     const all = new Map<string, string>();
@@ -375,6 +387,8 @@ export function GraphView({ repo, tabId }: Props) {
         match={matchSet.has(i)}
         dim={q.length > 0 && !matchSet.has(i)}
         refs={refsBySha.get(c.sha)}
+        ghost={ghostOn && !refsBySha.get(c.sha) && (hoverRow === i || sel) ? ghostFor(i) : undefined}
+        onHoverRow={setHoverRow}
         rowH={ROW}
         showDesc={cols.description}
         stats={stats.get(c.sha)}
@@ -522,6 +536,8 @@ function CommitRow({
   match,
   dim,
   refs,
+  ghost,
+  onHoverRow,
   rowH,
   showDesc,
   stats,
@@ -542,6 +558,8 @@ function CommitRow({
   match: boolean;
   dim: boolean;
   refs: GitRef[] | undefined;
+  ghost: GitRef | undefined;
+  onHoverRow: (i: number | null) => void;
   rowH: number;
   showDesc: boolean;
   stats: Stats | undefined;
@@ -562,11 +580,26 @@ function CommitRow({
         className="absolute left-0 right-0 flex items-center"
         style={{ top, height: rowH, background: bg, opacity: dim ? m.min_alpha / 100 : undefined }}
         onClick={(e) => onClick(c, index, e)}
-        onMouseEnter={(e) => !bg && (e.currentTarget.style.background = "rgba(77,136,255,0.10)")}
-        onMouseLeave={(e) => !bg && (e.currentTarget.style.background = "")}
+        onMouseEnter={(e) => {
+          onHoverRow(index);
+          if (!bg) e.currentTarget.style.background = "rgba(77,136,255,0.10)";
+        }}
+        onMouseLeave={(e) => {
+          onHoverRow(null);
+          if (!bg) e.currentTarget.style.background = "";
+        }}
       >
         {refW > 0 && (
           <div style={{ width: refW, paddingLeft: m.ref_margin_left, paddingRight: m.ref_margin_right }} className="shrink-0 h-full flex items-center min-w-0">
+            {!first && ghost && (
+              <div
+                className="flex items-center gap-[4px] px-[5px] rounded-[3px] min-w-0 max-w-full text-[12.5px] text-white border border-dashed opacity-60"
+                style={{ borderColor: color, height: m.row_inner }}
+                title={`On ${ghost.name}`}
+              >
+                <span className="truncate">{ghost.name}</span>
+              </div>
+            )}
             {first && (
               <CtxMenu items={() => branchMenu(repo, first)}>
                 <div
@@ -587,6 +620,12 @@ function CommitRow({
                   {roomy && first.kind === "Local" && <Laptop size={13} className="shrink-0 opacity-90" />}
                   {(first.kind === "Remote" || remoteSame) && <Cloud size={13} className={cn("shrink-0 opacity-90", !roomy && "w-[11px]")} />}
                   {roomy && more > 0 && <span className="shrink-0 text-[11px] opacity-80">+{more}</span>}
+                  {first.kind === "Local" && (first.ahead > 0 || first.behind > 0) && (
+                    <span className="shrink-0 text-[10.5px] font-semibold opacity-90" title={`${first.ahead} ahead, ${first.behind} behind ${first.upstream}`}>
+                      {first.ahead > 0 && `↑${first.ahead}`}
+                      {first.behind > 0 && `↓${first.behind}`}
+                    </span>
+                  )}
                 </div>
               </CtxMenu>
             )}
@@ -645,9 +684,24 @@ function StateBanner({ repo }: { repo: RepoView }) {
   return (
     <div className="flex items-center gap-2 px-3 h-[34px] bg-warn/25 border-b border-warn/50 text-[12.5px] shrink-0">
       <span className="flex-1 truncate">
-        {merging ? "Merge in progress" : rebasing ? "Rebase in progress" : `${repo.state_note} in progress`}
+        {repo.conflict_labels
+          ? merging
+            ? `Merging ${repo.conflict_labels[1]} into ${repo.conflict_labels[0]}`
+            : rebasing
+              ? `Rebasing ${repo.conflict_labels[1]} onto ${repo.conflict_labels[0]}`
+              : `${repo.state_note} in progress`
+          : merging
+            ? "Merge in progress"
+            : rebasing
+              ? "Rebase in progress"
+              : `${repo.state_note} in progress`}
         {repo.status.conflicted ? " — merge conflicts detected" : ""}
       </span>
+      {rebasing && (
+        <Button size="sm" onClick={() => act(repo.path, { type: "skipRebase" })}>
+          Skip Commit
+        </Button>
+      )}
       {rebasing && (
         <Button size="sm" variant="success" onClick={() => act(repo.path, { type: "continueRebase" })}>
           Continue Rebase

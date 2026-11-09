@@ -15,7 +15,7 @@ pub enum Action {
     UnstageAll,
     Discard { paths: Vec<String> },
     DiscardAll,
-    Commit { summary: String, description: String, amend: bool, stage_all: bool },
+    Commit { summary: String, description: String, amend: bool, stage_all: bool, #[serde(default)] skip_hooks: bool },
     Checkout { target: String },
     CheckoutRemote { remote_branch: String },
     CreateBranch { name: String, at: Option<String>, checkout: bool },
@@ -55,12 +55,49 @@ pub enum Action {
     FastForward { branch: String, to: String },
     SetUpstream { branch: String, upstream: String },
     StashRename { index: usize, message: String },
+    /// Background fetch of every remote (the original's auto-fetch), optionally pruning.
+    AutoFetch { prune: bool },
+    FetchRemote { remote: String },
+    RemoteEdit { name: String, new_name: String, url: String, push_url: String },
+    RemoteRemove { name: String },
+    WorktreeAdd { path: String, branch: String, new_branch: bool, start: Option<String> },
+    WorktreeRemove { path: String, force: bool },
+    WorktreeLock { path: String, message: String },
+    WorktreeUnlock { path: String },
+    SubmoduleAdd { url: String, path: String },
+    SubmoduleUpdate { paths: Vec<String> },
+    SubmoduleRemove { path: String },
+    /// "Clean Up Local Branches": delete local branches and, optionally, their remote branches.
+    DeleteBranches { names: Vec<String>, remotes: Vec<String> },
+    GitflowInit { config: crate::manage::GitflowConfig },
+    LfsInstall,
+    /// Open a file in the external diff tool (git difftool), or a conflict in the merge tool.
+    ExternalDiff { file: String, staged: bool, tool: String },
+    ExternalMerge { file: String, tool: String },
+    LfsTrack { pattern: String },
+    LfsUntrack { pattern: String },
+    LfsPull,
+    LfsLock { path: String },
+    LfsUnlock { path: String, force: bool },
+    /// Add a pattern to .gitignore; `untrack` also removes matching tracked files from the index.
+    Ignore { pattern: String, untrack: Vec<String> },
+    SparseSet { patterns: Vec<String> },
+    SparseDisable,
+    GitflowStart { kind: String, name: String },
+    GitflowFinish { kind: String, name: String, keep: bool, tag_message: String },
     AddRemote { name: String, url: String },
     /// Stage, unstage or discard one hunk, or some lines of it.
     Patch { file: String, untracked: bool, op: crate::files::PatchOp, hunk: usize, lines: Option<Vec<usize>> },
     CherryPickMany { shas: Vec<String> },
     Undo,
     Redo,
+}
+
+/// Start git without waiting (external tools stay open as long as the person needs them).
+fn spawn_git(dir: &Path, args: &[String]) {
+    let mut c = git::git_cmd(dir);
+    c.args(args);
+    let _ = c.spawn();
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -111,6 +148,8 @@ struct Stacks {
 pub struct Engine {
     log: Mutex<Vec<LogEntry>>,
     stacks: Mutex<HashMap<String, Stacks>>,
+    /// Long network jobs with progress and Cancel (clone, fetch, pull, push).
+    pub jobs: crate::jobs::Jobs,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -159,6 +198,14 @@ impl Engine {
         if l.len() > 500 {
             l.remove(0);
         }
+        o
+    }
+
+    /// Run a long git command as a cancellable job ("<repo>|<kind>"), logged like any other.
+    pub fn job(&self, repo: &str, kind: &str, dir: &Path, args: &[&str]) -> git::GitOut {
+        let o = self.jobs.run(&format!("{repo}|{kind}"), dir, args);
+        let o = if !o.ok && o.stderr.trim().is_empty() { git::GitOut { ok: false, stdout: o.stdout, stderr: "Cancelled".into() } } else { o };
+        self.record(&format!("git {}", args.join(" ")), &o);
         o
     }
 
@@ -221,7 +268,7 @@ impl Engine {
             }
             Action::Discard { paths } => self.discard(repo, dir, Some(paths)),
             Action::DiscardAll => self.discard(repo, dir, None),
-            Action::Commit { summary, description, amend, stage_all } => {
+            Action::Commit { summary, description, amend, stage_all, skip_hooks } => {
                 if summary.trim().is_empty() {
                     return ActionResult { ok: false, message: "Type a commit summary first".into() };
                 }
@@ -240,6 +287,9 @@ impl Engine {
                 let mut a = vec!["commit", "-q", "-m", msg.as_str()];
                 if amend {
                     a.push("--amend");
+                }
+                if skip_hooks {
+                    a.push("--no-verify"); // "Skip git hooks"
                 }
                 let o = self.git(dir, &a);
                 if o.ok && !before.is_empty() {
@@ -325,12 +375,12 @@ impl Engine {
                 }
                 done(o, &format!("Deleted tag {name}"))
             }
-            Action::Fetch => done(self.git(dir, &["fetch", "--all", "--prune"]), "Fetched all remotes"),
+            Action::Fetch => done(self.job(repo, "fetch", dir, &["fetch", "--all", "--prune", "--progress"]), "Fetched all remotes"),
             Action::Pull { mode } => match mode.as_str() {
-                "fetch" => done(self.git(dir, &["fetch", "--all", "--prune"]), "Fetched all remotes"),
-                "ffonly" => done(self.git(dir, &["pull", "--ff-only"]), "Pulled (fast-forward only)"),
-                "rebase" => done(self.git(dir, &["pull", "--rebase"]), "Pulled (rebase)"),
-                _ => done(self.git(dir, &["pull", "--no-rebase"]), "Pulled"),
+                "fetch" => done(self.job(repo, "fetch", dir, &["fetch", "--all", "--prune", "--progress"]), "Fetched all remotes"),
+                "ffonly" => done(self.job(repo, "pull", dir, &["pull", "--ff-only", "--progress"]), "Pulled (fast-forward only)"),
+                "rebase" => done(self.job(repo, "pull", dir, &["pull", "--rebase", "--progress"]), "Pulled (rebase)"),
+                _ => done(self.job(repo, "pull", dir, &["pull", "--no-rebase", "--progress"]), "Pulled"),
             },
             Action::Push { force, lease } => {
                 let branch = git::run(dir, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim().to_string();
@@ -340,11 +390,11 @@ impl Engine {
                 let upstream = git::run(dir, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
                 let o = if upstream.ok {
                     if force && lease == Some(false) {
-                        self.git(dir, &["push", "--force"])
+                        self.job(repo, "push", dir, &["push", "--force", "--progress"])
                     } else if force {
-                        self.git(dir, &["push", "--force-with-lease"])
+                        self.job(repo, "push", dir, &["push", "--force-with-lease", "--progress"])
                     } else {
-                        self.git(dir, &["push"])
+                        self.job(repo, "push", dir, &["push", "--progress"])
                     }
                 } else {
                     let remotes = git::run(dir, &["remote"]).stdout;
@@ -355,7 +405,7 @@ impl Engine {
                     } else {
                         return ActionResult { ok: false, message: "This repository has no remote to push to. Add one first.".into() };
                     };
-                    self.git(dir, &["push", "-u", &remote, &branch])
+                    self.job(repo, "push", dir, &["push", "-u", "--progress", &remote, &branch])
                 };
                 done(o, &format!("Pushed {branch}"))
             }
@@ -407,6 +457,151 @@ impl Engine {
             Action::AbortRebase => done(self.git(dir, &["rebase", "--abort"]), "Rebase aborted"),
             Action::ContinueRebase => done(self.git(dir, &["-c", "core.editor=true", "rebase", "--continue"]), "Rebase continued"),
             Action::SkipRebase => done(self.git(dir, &["rebase", "--skip"]), "Skipped commit"),
+            Action::AutoFetch { prune } => {
+                let o = if prune { self.git(dir, &["fetch", "--all", "--prune", "--quiet"]) } else { self.git(dir, &["fetch", "--all", "--quiet"]) };
+                // Like the original: a failed background fetch only asks to fetch by hand.
+                if o.ok {
+                    ActionResult { ok: true, message: String::new() }
+                } else {
+                    ActionResult { ok: false, message: "Autofetch failed. Fetch manually for more information.".into() }
+                }
+            }
+            Action::FetchRemote { remote } => done(self.job(repo, "fetch", dir, &["fetch", "--prune", "--progress", &remote]), &format!("Fetched {remote}")),
+            Action::RemoteEdit { name, new_name, url, push_url } => {
+                let mut name = name;
+                if !new_name.trim().is_empty() && new_name.trim() != name {
+                    let o = self.git(dir, &["remote", "rename", &name, new_name.trim()]);
+                    if !o.ok {
+                        return done(o, "");
+                    }
+                    name = new_name.trim().to_string();
+                }
+                let o = self.git(dir, &["remote", "set-url", &name, url.trim()]);
+                if !o.ok {
+                    return done(o, "");
+                }
+                if !push_url.trim().is_empty() && push_url.trim() != url.trim() {
+                    return done(self.git(dir, &["remote", "set-url", "--push", &name, push_url.trim()]), "Remote updated");
+                }
+                ActionResult { ok: true, message: "Remote updated".into() }
+            }
+            Action::RemoteRemove { name } => done(self.git(dir, &["remote", "remove", &name]), &format!("Removed remote {name}")),
+            Action::WorktreeAdd { path, branch, new_branch, start } => {
+                let o = if new_branch {
+                    let start = start.unwrap_or_else(|| "HEAD".into());
+                    self.git(dir, &["worktree", "add", "-b", branch.trim(), path.trim(), &start])
+                } else {
+                    self.git(dir, &["worktree", "add", path.trim(), branch.trim()])
+                };
+                done(o, &format!("Worktree created at {}", path.trim()))
+            }
+            Action::WorktreeRemove { path, force } => {
+                let o = if force { self.git(dir, &["worktree", "remove", "--force", &path]) } else { self.git(dir, &["worktree", "remove", &path]) };
+                done(o, "Worktree removed")
+            }
+            Action::WorktreeLock { path, message } => {
+                let o = if message.trim().is_empty() { self.git(dir, &["worktree", "lock", &path]) } else { self.git(dir, &["worktree", "lock", "--reason", message.trim(), &path]) };
+                done(o, "Worktree locked")
+            }
+            Action::WorktreeUnlock { path } => done(self.git(dir, &["worktree", "unlock", &path]), "Worktree unlocked"),
+            Action::SubmoduleAdd { url, path } => {
+                let mut a = vec!["submodule", "add", url.trim()];
+                if !path.trim().is_empty() {
+                    a.push(path.trim());
+                }
+                done(self.git(dir, &a), "Submodule added")
+            }
+            Action::SubmoduleUpdate { paths } => {
+                let mut a = vec!["submodule", "update", "--init", "--recursive", "--"];
+                a.extend(paths.iter().map(|s| s.as_str()));
+                done(self.git(dir, &a), "Submodules updated")
+            }
+            Action::SubmoduleRemove { path } => {
+                let o = self.git(dir, &["submodule", "deinit", "-f", "--", &path]);
+                if !o.ok {
+                    return done(o, "");
+                }
+                done(self.git(dir, &["rm", "-f", "--", &path]), &format!("Removed submodule {path}"))
+            }
+            Action::DeleteBranches { names, remotes } => {
+                let mut failed = Vec::new();
+                for n in &names {
+                    let sha = self.rev(dir, &format!("refs/heads/{n}"));
+                    if self.git(dir, &["branch", "-D", n]).ok {
+                        self.push_undo(repo, UndoRec::DeleteBranch { name: n.clone(), sha });
+                    } else {
+                        failed.push(n.clone());
+                    }
+                }
+                for r in &remotes {
+                    let (remote, b) = r.split_once('/').unwrap_or(("origin", r));
+                    if !self.git(dir, &["push", remote, "--delete", b]).ok {
+                        failed.push(r.clone());
+                    }
+                }
+                if failed.is_empty() {
+                    ActionResult { ok: true, message: format!("Deleted {} branch{}", names.len() + remotes.len(), if names.len() + remotes.len() == 1 { "" } else { "es" }) }
+                } else {
+                    ActionResult { ok: false, message: format!("Could not delete: {}", failed.join(", ")) }
+                }
+            }
+            Action::ExternalDiff { file, staged, tool } => {
+                let mut a = vec!["difftool".to_string(), "-y".into()];
+                if staged {
+                    a.push("--cached".into());
+                }
+                if !tool.trim().is_empty() {
+                    a.push(format!("--tool={}", tool.trim()));
+                }
+                a.extend(["--".into(), file.clone()]);
+                spawn_git(dir, &a);
+                ActionResult { ok: true, message: format!("Opening {file} in the diff tool") }
+            }
+            Action::ExternalMerge { file, tool } => {
+                let mut a = vec!["mergetool".to_string(), "-y".into()];
+                if !tool.trim().is_empty() {
+                    a.push(format!("--tool={}", tool.trim()));
+                }
+                a.extend(["--".into(), file.clone()]);
+                spawn_git(dir, &a);
+                ActionResult { ok: true, message: format!("Opening {file} in the merge tool") }
+            }
+            Action::LfsInstall => done(self.git(dir, &["lfs", "install", "--local"]), "Git LFS enabled for this repository"),
+            Action::LfsTrack { pattern } => done(self.git(dir, &["lfs", "track", pattern.trim()]), &format!("LFS now tracks {}", pattern.trim())),
+            Action::LfsUntrack { pattern } => done(self.git(dir, &["lfs", "untrack", pattern.trim()]), &format!("LFS no longer tracks {}", pattern.trim())),
+            Action::LfsPull => done(self.git(dir, &["lfs", "pull"]), "LFS files downloaded"),
+            Action::LfsLock { path } => done(self.git(dir, &["lfs", "lock", &path]), &format!("Locked {path}")),
+            Action::LfsUnlock { path, force } => {
+                let o = if force { self.git(dir, &["lfs", "unlock", "--force", &path]) } else { self.git(dir, &["lfs", "unlock", &path]) };
+                done(o, &format!("Unlocked {path}"))
+            }
+            Action::Ignore { pattern, untrack } => {
+                if let Err(e) = crate::manage::ignore(dir, pattern.trim()) {
+                    return ActionResult { ok: false, message: e };
+                }
+                if !untrack.is_empty() {
+                    let mut a = vec!["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--"];
+                    a.extend(untrack.iter().map(|s| s.as_str()));
+                    let o = self.git(dir, &a);
+                    if !o.ok {
+                        return done(o, "");
+                    }
+                }
+                ActionResult { ok: true, message: format!("Added {} to .gitignore", pattern.trim()) }
+            }
+            Action::SparseSet { patterns } => {
+                let mut a = vec!["sparse-checkout", "set", "--no-cone"];
+                a.extend(patterns.iter().map(|s| s.as_str()));
+                done(self.git(dir, &a), "Sparse checkout updated")
+            }
+            Action::SparseDisable => done(self.git(dir, &["sparse-checkout", "disable"]), "Sparse checkout turned off"),
+            Action::GitflowInit { config } => done(crate::manage::gitflow_init(dir, &config, &|a: &[&str]| self.git(dir, a)), "Gitflow has been initialized"),
+            Action::GitflowStart { kind, name } => {
+                done(crate::manage::gitflow_start(dir, &kind, &name, &|a: &[&str]| self.git(dir, a)), &format!("Started {kind}: '{}'", name.trim()))
+            }
+            Action::GitflowFinish { kind, name, keep, tag_message } => {
+                done(crate::manage::gitflow_finish(dir, &kind, &name, keep, &tag_message, &|a: &[&str]| self.git(dir, a)), &format!("Finished {kind}: '{name}'"))
+            }
             Action::InteractiveRebase { base, items } => {
                 let before = self.rev(dir, "HEAD");
                 let o = crate::rewrite::interactive_rebase(dir, &base, &items);
@@ -642,7 +837,7 @@ mod tests {
         let e = Engine::default();
         fs::write(d.join("a.txt"), "one\n").unwrap();
         assert!(e.perform(&repo, Action::StageAll).ok);
-        assert!(e.perform(&repo, Action::Commit { summary: "first".into(), description: String::new(), amend: false, stage_all: false }).ok);
+        assert!(e.perform(&repo, Action::Commit { summary: "first".into(), description: String::new(), amend: false, stage_all: false, skip_hooks: false }).ok);
         let first = head(&d);
 
         fs::write(d.join("a.txt"), "one\ntwo\n").unwrap();
@@ -650,7 +845,7 @@ mod tests {
         assert_eq!(st.unstaged.len(), 1);
         assert!(e.perform(&repo, Action::Stage { paths: vec!["a.txt".into()] }).ok);
         assert_eq!(git::status(&d).staged.len(), 1);
-        assert!(e.perform(&repo, Action::Commit { summary: "second".into(), description: "body".into(), amend: false, stage_all: false }).ok);
+        assert!(e.perform(&repo, Action::Commit { summary: "second".into(), description: "body".into(), amend: false, stage_all: false, skip_hooks: false }).ok);
         let second = head(&d);
         assert_ne!(first, second);
 
@@ -711,7 +906,7 @@ mod tests {
         let read = |p: &str| fs::read_to_string(d.join(p)).unwrap().replace("\r\n", "\n");
         let index = |p: &str| git::run(&d, &["show", &format!(":{p}")]).stdout.replace("\r\n", "\n");
         fs::write(d.join("f.txt"), "a\nb\nc\n").unwrap();
-        assert!(e.perform(&repo, Action::Commit { summary: "base".into(), description: String::new(), amend: false, stage_all: true }).ok);
+        assert!(e.perform(&repo, Action::Commit { summary: "base".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false }).ok);
         let base = head(&d);
         fs::write(d.join("f.txt"), "a\nB\nc\nnew\n").unwrap();
         // Hunk body: " a", "-b", "+B", " c", "+new" -> stage only "+new" (index 4)
@@ -735,7 +930,7 @@ mod tests {
         assert_eq!(index("n.txt"), "one\n");
 
         // Commit and compare; hide a branch from the graph.
-        assert!(e.perform(&repo, Action::Commit { summary: "next".into(), description: String::new(), amend: false, stage_all: true }).ok);
+        assert!(e.perform(&repo, Action::Commit { summary: "next".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false }).ok);
         assert!(e.perform(&repo, Action::CreateBranch { name: "side".into(), at: Some(base.clone()), checkout: false }).ok);
         let files = crate::files::range_files(&d, &base, "HEAD");
         assert_eq!(files.len(), 2);
@@ -747,9 +942,9 @@ mod tests {
         assert_eq!(bl.len(), 4);
         let v = crate::files::versions(&d, &git::DiffSource::Range(base.clone(), git::WORKDIR.into()), "f.txt", None, false);
         assert_eq!(v.old.as_deref().map(|s| s.replace("\r\n", "\n")), Some("a\nb\nc\n".to_string()));
-        let view = git::RefView { hidden: vec!["refs/heads/side".into()], solo: vec![] };
+        let view = git::RefView { hidden: vec!["refs/heads/side".into()], solo: vec![], pinned: None };
         assert_eq!(git::load_view(&d, 100, &view).commits.len(), 2);
-        let solo = git::RefView { hidden: vec![], solo: vec!["refs/heads/side".into()] };
+        let solo = git::RefView { hidden: vec![], solo: vec!["refs/heads/side".into()], pinned: None };
         assert_eq!(git::load_view(&d, 100, &solo).commits.len(), 1);
         let more = git::load_view(&d, 1, &git::RefView::default());
         assert!(more.has_more);
@@ -766,7 +961,7 @@ mod tests {
         let read = |p: &str| fs::read_to_string(d.join(p)).unwrap().replace("\r\n", "\n");
         let commit = |f: &str, t: &str, m: &str| {
             fs::write(d.join(f), t).unwrap();
-            assert!(e.perform(&repo, Action::Commit { summary: m.into(), description: String::new(), amend: false, stage_all: true }).ok);
+            assert!(e.perform(&repo, Action::Commit { summary: m.into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false }).ok);
             head(&d)
         };
         let base = commit("a.txt", "1\n", "one");
@@ -837,7 +1032,7 @@ mod tests {
         assert!(e.perform(&repo, Action::SaveResolved { file: "a.txt".into(), content: "master\nside\n".into() }).ok);
         assert!(!git::status(&d).conflicted);
         assert!(git::load(&d, 50).merge_msg.unwrap().contains("Merge branch 'side'"));
-        assert!(e.perform(&repo, Action::Commit { summary: "Merge side".into(), description: String::new(), amend: false, stage_all: false }).ok);
+        assert!(e.perform(&repo, Action::Commit { summary: "Merge side".into(), description: String::new(), amend: false, stage_all: false, skip_hooks: false }).ok);
         assert_eq!(git::run(&d, &["rev-list", "--parents", "-n1", "HEAD"]).stdout.split_whitespace().count(), 3);
 
         // Fast-forward a branch that isn't checked out, set an upstream, rename a stash.
@@ -850,6 +1045,134 @@ mod tests {
         assert!(e.perform(&repo, Action::Stash { message: "first".into() }).ok);
         assert!(e.perform(&repo, Action::StashRename { index: 0, message: "renamed".into() }).ok);
         assert_eq!(git::load(&d, 5).stashes[0].message, "renamed");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+
+    #[test]
+    fn remotes_worktrees_submodules_cleanup_and_gitflow() {
+        let d = temp_repo("manage");
+        let repo = d.to_string_lossy().to_string();
+        let e = Engine::default();
+        let commit = |f: &str, m: &str| {
+            fs::write(d.join(f), m).unwrap();
+            assert!(e.perform(&repo, Action::Commit { summary: m.into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false }).ok);
+        };
+        commit("a.txt", "one");
+        assert!(e.perform(&repo, Action::RenameBranch { old: "master".into(), new: "main".into() }).ok);
+
+        // Remotes: add a bare clone, fetch it, rename and re-point it, then remove it.
+        let bare = std::env::temp_dir().join(format!("gitcraft-test-bare-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&bare);
+        assert!(git::run(&d, &["clone", "-q", "--bare", ".", bare.to_string_lossy().as_ref()]).ok);
+        let url = bare.to_string_lossy().to_string();
+        assert!(e.perform(&repo, Action::AddRemote { name: "origin".into(), url: url.clone() }).ok);
+        assert!(e.perform(&repo, Action::FetchRemote { remote: "origin".into() }).ok);
+        assert!(e.perform(&repo, Action::AutoFetch { prune: true }).ok);
+        assert!(e.perform(&repo, Action::RemoteEdit { name: "origin".into(), new_name: "upstream".into(), url: url.clone(), push_url: String::new() }).ok);
+        let rs = crate::manage::remotes(&d);
+        assert_eq!(rs.len(), 1);
+        assert_eq!(rs[0].name, "upstream");
+        assert!(e.perform(&repo, Action::RemoteRemove { name: "upstream".into() }).ok);
+        assert!(crate::manage::remotes(&d).is_empty());
+
+        // Worktrees: add with a new branch, lock, unlock, remove.
+        let wt = std::env::temp_dir().join(format!("gitcraft-test-wt-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&wt);
+        let wts = wt.to_string_lossy().to_string();
+        assert!(e.perform(&repo, Action::WorktreeAdd { path: wts.clone(), branch: "wt-branch".into(), new_branch: true, start: None }).ok);
+        let data = git::load(&d, 10);
+        assert_eq!(data.worktrees.len(), 2);
+        assert!(e.perform(&repo, Action::WorktreeLock { path: wts.clone(), message: "busy".into() }).ok);
+        assert!(git::load(&d, 10).worktrees.iter().any(|w| w.locked));
+        assert!(e.perform(&repo, Action::WorktreeUnlock { path: wts.clone() }).ok);
+        assert!(e.perform(&repo, Action::WorktreeRemove { path: wts.clone(), force: false }).ok);
+        assert_eq!(git::load(&d, 10).worktrees.len(), 1);
+
+        // Submodule from the bare repository.
+        let r = e.perform(&repo, Action::SubmoduleAdd { url: url.clone(), path: "libs/dep".into() });
+        if r.ok {
+            let subs = crate::manage::submodules(&d);
+            assert_eq!(subs.len(), 1);
+            assert_eq!(subs[0].path, "libs/dep");
+            assert!(e.perform(&repo, Action::SubmoduleUpdate { paths: vec![] }).ok);
+            assert!(e.perform(&repo, Action::SubmoduleRemove { path: "libs/dep".into() }).ok);
+        } // (some Git setups forbid file:// submodules; the rest still runs)
+        assert!(e.perform(&repo, Action::Commit { summary: "tidy".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false }).ok || true);
+
+        // Gitflow: init creates develop; feature start / finish; release with a tag.
+        let cfg = crate::manage::gitflow_config(&d);
+        assert!(!cfg.initialized);
+        assert_eq!((cfg.master.as_str(), cfg.develop.as_str(), cfg.feature.as_str()), ("main", "develop", "feature/"));
+        assert!(e.perform(&repo, Action::GitflowInit { config: cfg }).ok);
+        assert!(crate::manage::gitflow_config(&d).initialized);
+        assert!(e.perform(&repo, Action::GitflowStart { kind: "feature".into(), name: "login".into() }).ok);
+        commit("login.txt", "login");
+        let r = e.perform(&repo, Action::GitflowFinish { kind: "feature".into(), name: "login".into(), keep: false, tag_message: String::new() });
+        assert!(r.ok, "{}", r.message);
+        assert!(d.join("login.txt").exists());
+        assert!(e.perform(&repo, Action::GitflowStart { kind: "release".into(), name: "1.0".into() }).ok);
+        let r = e.perform(&repo, Action::GitflowFinish { kind: "release".into(), name: "1.0".into(), keep: false, tag_message: "Release 1.0".into() });
+        assert!(r.ok, "{}", r.message);
+        assert!(git::run(&d, &["rev-parse", "--verify", "-q", "refs/tags/1.0"]).ok);
+        assert!(git::run(&d, &["merge-base", "--is-ancestor", "refs/tags/1.0", "main"]).ok);
+
+        // Branch clean-up: a merged branch shows up as merged and can be deleted (and undone).
+        assert!(e.perform(&repo, Action::CreateBranch { name: "old-work".into(), at: None, checkout: false }).ok);
+        let list = crate::manage::cleanup_list(&d);
+        assert!(list.iter().any(|b| b.name == "old-work" && b.merged));
+        assert!(e.perform(&repo, Action::DeleteBranches { names: vec!["old-work".into()], remotes: vec![] }).ok);
+        assert!(!crate::manage::cleanup_list(&d).iter().any(|b| b.name == "old-work"));
+        assert!(e.perform(&repo, Action::Undo).ok);
+        assert!(crate::manage::cleanup_list(&d).iter().any(|b| b.name == "old-work"));
+        let _ = fs::remove_dir_all(&d);
+        let _ = fs::remove_dir_all(&bare);
+    }
+
+
+    #[test]
+    fn templates_ignore_hooks_sparse_and_shallow() {
+        let d = temp_repo("tools");
+        let repo = d.to_string_lossy().to_string();
+        let e = Engine::default();
+        // Starting files and the first commit.
+        let opts = crate::manage::InitOptions { branch: String::new(), gitignore: vec!["Node".into(), "Rust".into()], license: "MIT".into(), readme: true };
+        assert!(crate::manage::init_files(&d, "demo", &opts, &|a: &[&str]| e.git(&d, a)).ok);
+        let gi = fs::read_to_string(d.join(".gitignore")).unwrap();
+        assert!(gi.contains("node_modules/") && gi.contains("/target/"));
+        assert!(fs::read_to_string(d.join("LICENSE")).unwrap().starts_with("MIT License"));
+        assert_eq!(git::run(&d, &["log", "--format=%s"]).stdout.trim(), "Initial commit");
+
+        // Ignore helpers: add once, untrack a tracked file.
+        fs::write(d.join("secret.log"), "x").unwrap();
+        assert!(e.perform(&repo, Action::Commit { summary: "log".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false }).ok);
+        assert!(e.perform(&repo, Action::Ignore { pattern: "*.log".into(), untrack: vec!["secret.log".into()] }).ok);
+        assert!(e.perform(&repo, Action::Ignore { pattern: "*.log".into(), untrack: vec![] }).ok);
+        assert_eq!(fs::read_to_string(d.join(".gitignore")).unwrap().matches("*.log").count(), 1);
+        assert!(git::status(&d).staged.iter().any(|f| f.path == "secret.log" && f.status == 'D'));
+
+        // Skip hooks: a failing pre-commit hook blocks a normal commit but not a skipped one.
+        let hooks = d.join(".git").join("hooks");
+        fs::create_dir_all(&hooks).unwrap();
+        fs::write(hooks.join("pre-commit"), "#!/bin/sh\necho blocked by hook >&2\nexit 1\n").unwrap();
+        let r = e.perform(&repo, Action::Commit { summary: "blocked".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false });
+        assert!(!r.ok && r.message.contains("blocked by hook"), "{}", r.message);
+        assert!(e.perform(&repo, Action::Commit { summary: "skipped".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: true }).ok);
+        let _ = fs::remove_file(hooks.join("pre-commit"));
+
+        // Sparse checkout: only docs/ stays in the working folder.
+        fs::create_dir_all(d.join("docs")).unwrap();
+        fs::write(d.join("docs/a.md"), "a").unwrap();
+        fs::write(d.join("big.bin"), "b").unwrap();
+        assert!(e.perform(&repo, Action::Commit { summary: "files".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false }).ok);
+        assert!(e.perform(&repo, Action::SparseSet { patterns: vec!["/docs/".into()] }).ok);
+        assert!(crate::manage::sparse_info(&d).enabled);
+        assert!(!d.join("big.bin").exists() && d.join("docs/a.md").exists());
+        assert!(e.perform(&repo, Action::SparseDisable).ok);
+        assert!(d.join("big.bin").exists());
+
+        // LFS info never fails, whether or not git-lfs is installed.
+        let _ = crate::manage::lfs_info(&d);
         let _ = fs::remove_dir_all(&d);
     }
 

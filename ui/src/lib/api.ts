@@ -53,7 +53,7 @@ export interface RepoView {
   commits: Commit[];
   refs: GitRef[];
   stashes: Stash[];
-  worktrees: { path: string; branch: string }[];
+  worktrees: { path: string; branch: string; locked: boolean }[];
   submodules: string[];
   remotes: string[];
   head_branch: string | null;
@@ -110,6 +110,7 @@ export interface Stats {
 export interface RefView {
   hidden: string[];
   solo: string[];
+  pinned?: string | null;
 }
 
 export type PatchOp = "stage" | "unstage" | "discard";
@@ -121,6 +122,74 @@ export interface TodoItem {
   action: Step;
   sha: string;
   message: string | null;
+}
+
+export interface AccountInfo {
+  name: string;
+  email: string;
+  repo_name: string;
+  repo_email: string;
+  credential_helper: string;
+  gcm: boolean;
+  ssh_dir: string;
+  ssh_keys: { path: string; kind: string; public: string }[];
+  ssh_keygen: boolean;
+  gpg: boolean;
+  gpg_keys: { id: string; uid: string }[];
+  signing_key: string;
+  sign_commits: boolean;
+  signing_format: string;
+}
+
+export interface JobProgress {
+  id: string;
+  text: string;
+  percent: number | null;
+}
+
+export interface LfsInfo {
+  available: boolean;
+  version: string;
+  enabled: boolean;
+  patterns: string[];
+  locks: { id: string; path: string; owner: string }[];
+}
+
+export interface InitOptions {
+  branch: string;
+  gitignore: string[];
+  license: string;
+  readme: boolean;
+}
+
+export interface GitflowConfig {
+  master: string;
+  develop: string;
+  feature: string;
+  release: string;
+  hotfix: string;
+  versiontag: string;
+  initialized: boolean;
+}
+
+export interface CleanupBranch {
+  name: string;
+  time: number;
+  upstream: string;
+  merged: boolean;
+}
+
+export interface RemoteInfo {
+  name: string;
+  fetch_url: string;
+  push_url: string;
+}
+
+export interface SubmoduleInfo {
+  path: string;
+  sha: string;
+  state: "in-sync" | "out-of-sync" | "uninitialized" | "conflict";
+  url: string;
 }
 
 export interface ConflictInfo {
@@ -154,7 +223,7 @@ export type Action =
   | { type: "unstageAll" }
   | { type: "discard"; paths: string[] }
   | { type: "discardAll" }
-  | { type: "commit"; summary: string; description: string; amend: boolean; stageAll: boolean }
+  | { type: "commit"; summary: string; description: string; amend: boolean; stageAll: boolean; skipHooks?: boolean }
   | { type: "checkout"; target: string }
   | { type: "checkoutRemote"; remoteBranch: string }
   | { type: "createBranch"; name: string; at: string | null; checkout: boolean }
@@ -176,6 +245,32 @@ export type Action =
   | { type: "fastForward"; branch: string; to: string }
   | { type: "setUpstream"; branch: string; upstream: string }
   | { type: "stashRename"; index: number; message: string }
+  | { type: "autoFetch"; prune: boolean }
+  | { type: "fetchRemote"; remote: string }
+  | { type: "remoteEdit"; name: string; newName: string; url: string; pushUrl: string }
+  | { type: "remoteRemove"; name: string }
+  | { type: "worktreeAdd"; path: string; branch: string; newBranch: boolean; start: string | null }
+  | { type: "worktreeRemove"; path: string; force: boolean }
+  | { type: "worktreeLock"; path: string; message: string }
+  | { type: "worktreeUnlock"; path: string }
+  | { type: "submoduleAdd"; url: string; path: string }
+  | { type: "submoduleUpdate"; paths: string[] }
+  | { type: "submoduleRemove"; path: string }
+  | { type: "deleteBranches"; names: string[]; remotes: string[] }
+  | { type: "gitflowInit"; config: GitflowConfig }
+  | { type: "lfsInstall" }
+  | { type: "externalDiff"; file: string; staged: boolean; tool: string }
+  | { type: "externalMerge"; file: string; tool: string }
+  | { type: "lfsTrack"; pattern: string }
+  | { type: "lfsUntrack"; pattern: string }
+  | { type: "lfsPull" }
+  | { type: "lfsLock"; path: string }
+  | { type: "lfsUnlock"; path: string; force: boolean }
+  | { type: "ignore"; pattern: string; untrack: string[] }
+  | { type: "sparseSet"; patterns: string[] }
+  | { type: "sparseDisable" }
+  | { type: "gitflowStart"; kind: string; name: string }
+  | { type: "gitflowFinish"; kind: string; name: string; keep: boolean; tagMessage: string }
   | { type: "stash"; message: string }
   | { type: "stashPop"; index: number }
   | { type: "stashApply"; index: number }
@@ -254,6 +349,17 @@ export const api = {
   rangeFiles: (path: string, from: string, to: string) => invoke<FileChange[]>("range_files", { path, from, to }),
   trackedFiles: (path: string) => invoke<string[]>("tracked_files", { path }),
   openInEditor: (path: string) => invoke<void>("open_in_editor", { path }),
+  accountInfo: (path: string | null) => invoke<AccountInfo>("account_info", { path }),
+  setGitConfig: (path: string | null, scope: "global" | "local", key: string, value: string) => invoke<void>("set_git_config", { path, scope, key, value }),
+  generateSshKey: (email: string, name: string) => invoke<string>("generate_ssh_key", { email, name }),
+  cancelJob: (id: string) => invoke<boolean>("cancel_job", { id }),
+  lfsInfo: (path: string) => invoke<LfsInfo>("lfs_info", { path }),
+  sparseInfo: (path: string) => invoke<{ enabled: boolean; patterns: string[] }>("sparse_info", { path }),
+  gitignoreTemplates: () => invoke<string[]>("gitignore_templates"),
+  gitflowConfig: (path: string) => invoke<GitflowConfig>("gitflow_config", { path }),
+  cleanupList: (path: string) => invoke<CleanupBranch[]>("cleanup_list", { path }),
+  remotesList: (path: string) => invoke<RemoteInfo[]>("remotes_list", { path }),
+  submodulesList: (path: string) => invoke<SubmoduleInfo[]>("submodules_list", { path }),
   rebaseCommits: (path: string, base: string) => invoke<Commit[]>("rebase_commits", { path, base }),
   conflictInfo: (path: string, file: string) => invoke<ConflictInfo>("conflict_info", { path, file }),
   fileDiff: (path: string, source: DiffSource, file: string, untracked: boolean, parent: string | null, ignoreWs = false) =>
@@ -261,10 +367,11 @@ export const api = {
   run: (path: string, action: Action) => invoke<ActionResult>("run_action", { path, action }),
   activityLog: () => invoke<LogEntry[]>("activity_log"),
   sampleRepo: () => invoke<string>("sample_repo"),
+  conflictSample: () => invoke<string>("conflict_sample"),
   lastCommitMessage: (path: string) => invoke<[string, string]>("last_commit_message", { path }),
   pickFolder: (title: string) => invoke<string | null>("pick_folder", { title }),
-  initRepo: (parent: string, name: string) => invoke<string>("init_repo", { parent, name }),
-  cloneRepo: (url: string, parent: string) => invoke<string>("clone_repo", { url, parent }),
+  initRepo: (parent: string, name: string, options?: InitOptions) => invoke<string>("init_repo", { parent, name, options: options ?? null }),
+  cloneRepo: (url: string, parent: string, depth?: number) => invoke<string>("clone_repo", { url, parent, depth: depth ?? null }),
   openTerminal: (path: string) => invoke<void>("open_terminal", { path }),
   openFileManager: (path: string) => invoke<void>("open_file_manager", { path }),
   loadSettings: () => invoke<unknown>("load_settings"),

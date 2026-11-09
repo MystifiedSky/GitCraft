@@ -36,6 +36,9 @@ export interface TabUi {
   rebase: RebasePlan | null;
   /** File open in the merge conflict tool. */
   conflict: string | null;
+  /** Pull request / issue open in the centre. */
+  pr: number | null;
+  issue: number | null;
 }
 
 export interface RebaseItem {
@@ -83,6 +86,12 @@ export type DialogState =
   | { kind: "plan" }
   | { kind: "prefs" }
   | { kind: "fileFinder" }
+  | { kind: "form"; title: string; fields: FormField[]; confirm: string; help?: string; onSubmit: (v: Record<string, string | boolean>) => void }
+  | { kind: "cleanup" }
+  | { kind: "sparse" }
+  | { kind: "accounts" }
+  | { kind: "profiles" }
+  | { kind: "workspaces" }
   | { kind: "choice"; title: string; text: string; choices: { label: string; variant?: "primary" | "danger" | "default"; onSelect: () => void }[] }
   | { kind: "message"; title: string; label: string; value: string; confirm: string; help?: string; onSubmit: (v: string) => void };
 
@@ -108,6 +117,60 @@ export interface Settings {
   hidden: Record<string, string[]>;
   solo: Record<string, string[]>;
   lazyLoad: boolean;
+  /** Minutes between background fetches (0 = off); the original's default is 1. */
+  autoFetchMin: number;
+  autoPrune: boolean;
+  /** "Default Branch Name" for new repositories. */
+  defaultBranch: string;
+  /** "Skip git hooks by default when committing". */
+  skipHooks: boolean;
+  /** Custom keyboard shortcuts: command id -> keys ("" = no shortcut). */
+  keybindings: Record<string, string>;
+  showTerminal: boolean;
+  terminalHeight: number;
+  theme: string;
+  workspaces: Workspace[];
+  /** Tab / repository aliases (path -> name). */
+  aliases: Record<string, string>;
+  spellcheck: boolean;
+  /** Commit template: prefilled summary / description. */
+  templateSummary: string;
+  templateDescription: string;
+  /** External diff / merge tools (git difftool / mergetool names). */
+  diffTool: string;
+  mergeTool: string;
+  /** Show a notice after every successful action (errors always show). */
+  notifySuccess: boolean;
+  /** "Pin to Left": per repository, the full ref name drawn in lane 0. */
+  pinned: Record<string, string>;
+  /** "Show ghost branch/tag when hovering over or selecting a commit". */
+  ghostRefs: boolean;
+  /** Self-managed GitLab host (empty = gitlab.com only). */
+  gitlabHost: string;
+}
+
+export interface Workspace {
+  id: string;
+  name: string;
+  repos: string[];
+}
+
+export interface Profile {
+  id: string;
+  name: string;
+  gitName: string;
+  gitEmail: string;
+  settings: Partial<Settings> | null;
+}
+
+export interface FormField {
+  key: string;
+  label: string;
+  value: string | boolean;
+  type?: "text" | "checkbox";
+  placeholder?: string;
+  /** Show a Browse button that picks a folder. */
+  browse?: boolean;
 }
 
 export interface GraphColumns {
@@ -143,6 +206,25 @@ export const DEFAULT_SETTINGS: Settings = {
   hidden: {},
   solo: {},
   lazyLoad: true,
+  autoFetchMin: 1,
+  autoPrune: true,
+  defaultBranch: "main",
+  skipHooks: false,
+  keybindings: {},
+  showTerminal: false,
+  terminalHeight: 220,
+  theme: "dark",
+  workspaces: [],
+  aliases: {},
+  spellcheck: true,
+  templateSummary: "",
+  templateDescription: "",
+  diffTool: "",
+  mergeTool: "",
+  notifySuccess: true,
+  pinned: {},
+  ghostRefs: true,
+  gitlabHost: "",
 };
 
 /** Same numbers as src/metrics.rs; replaced by the Rust values at start-up. */
@@ -197,7 +279,7 @@ export const DEFAULT_METRICS: Metrics = {
 let nextId = 1;
 export const newId = () => `t${Date.now().toString(36)}${nextId++}`;
 
-const defaultUi = (): TabUi => ({ selection: { type: "wip" }, diff: null, search: "", searchOpen: false, multi: [], compareWorkdir: null, history: null, limit: 0, rebase: null, conflict: null });
+const defaultUi = (): TabUi => ({ selection: { type: "wip" }, diff: null, search: "", searchOpen: false, multi: [], compareWorkdir: null, history: null, limit: 0, rebase: null, conflict: null, pr: null, issue: null });
 
 interface Store {
   tabs: Tab[];
@@ -209,6 +291,14 @@ interface Store {
   toasts: Toast[];
   dialog: DialogState;
   busy: string | null;
+  /** Running clone / fetch / pull / push with its latest progress line. */
+  job: import("./api").JobProgress | null;
+  /** Command palette: closed, the command list, or one of its pickers. */
+  palette: string | null;
+  setPalette: (p: string | null) => void;
+  profiles: Profile[];
+  activeProfile: string;
+  renameTab: (id: string, title: string) => void;
   screenshot: boolean;
   version: string;
   metrics: Metrics;
@@ -241,6 +331,25 @@ export const useStore = create<Store>((set, get) => {
     toasts: [],
     dialog: null,
     busy: null,
+    job: null,
+    palette: null,
+    setPalette: (palette) => set({ palette }),
+    profiles: [{ id: "default", name: "Default Profile", gitName: "", gitEmail: "", settings: null }],
+    activeProfile: "default",
+    renameTab: (id, title) => {
+      const s = get();
+      const t = s.tabs.find((x) => x.id === id);
+      if (!t) return;
+      const aliases = { ...s.settings.aliases };
+      if (t.path) {
+        if (title.trim()) aliases[t.path] = title.trim();
+        else delete aliases[t.path];
+      }
+      set({
+        tabs: s.tabs.map((x) => (x.id === id ? { ...x, title: title.trim() || (x.path ? x.path.split(/[\\/]/).pop()! : x.title) } : x)),
+        settings: { ...s.settings, aliases },
+      });
+    },
     screenshot: false,
     version: "0.1.0",
     metrics: DEFAULT_METRICS,
@@ -254,7 +363,7 @@ export const useStore = create<Store>((set, get) => {
         return;
       }
       const active = s.tabs.find((t) => t.id === s.activeId);
-      const tab: Tab = { id: newId(), kind: "repo", path, title: name };
+      const tab: Tab = { id: newId(), kind: "repo", path, title: s.settings.aliases?.[path] || name };
       // Opening from a "New Tab" replaces it, like the original.
       if (active && active.kind === "start") {
         set({

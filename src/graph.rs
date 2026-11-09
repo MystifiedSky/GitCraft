@@ -31,10 +31,30 @@ pub struct GraphLayout {
     pub width: u16, // most lanes used at once
 }
 
+#[allow(dead_code)] // the simple form, used by tests
 pub fn layout(commits: &[Commit]) -> GraphLayout {
+    layout_pinned(commits, None)
+}
+
+/// Layout with an optional pinned branch ("Pin to Left"): the pinned branch's first-parent line
+/// always uses lane 0, and every other line starts from lane 1.
+pub fn layout_pinned(commits: &[Commit], pinned: Option<&str>) -> GraphLayout {
     // lanes[i] = sha this lane is waiting for (the next commit to arrive in it)
     let mut lanes: Vec<Option<String>> = Vec::new();
     let mut out = GraphLayout::default();
+    let mut pinned_line = std::collections::HashSet::new();
+    if let Some(tip) = pinned {
+        let by_sha: std::collections::HashMap<&str, &Commit> = commits.iter().map(|c| (c.sha.as_str(), c)).collect();
+        let mut cur = by_sha.get(tip).copied();
+        while let Some(c) = cur {
+            pinned_line.insert(c.sha.clone());
+            cur = c.parents.first().and_then(|p| by_sha.get(p.as_str()).copied());
+        }
+    }
+    let first_free = if pinned_line.is_empty() { 0 } else { 1 };
+    if first_free == 1 {
+        lanes.push(None); // lane 0 is kept for the pinned branch
+    }
 
     for c in commits {
         // Which lanes are waiting for this commit?
@@ -44,9 +64,13 @@ pub fn layout(commits: &[Commit]) -> GraphLayout {
             .filter(|(_, l)| l.as_deref() == Some(c.sha.as_str()))
             .map(|(i, _)| i)
             .collect();
-        let col = match waiting.first() {
-            Some(&i) => i,
-            None => alloc(&mut lanes),
+        let col = if pinned_line.contains(&c.sha) {
+            0
+        } else {
+            match waiting.first() {
+                Some(&i) => i,
+                None => alloc(&mut lanes, first_free),
+            }
         };
 
         let mut up = Vec::new();
@@ -89,7 +113,7 @@ pub fn layout(commits: &[Commit]) -> GraphLayout {
             } else if let Some(j) = lanes.iter().position(|l| l.as_deref() == Some(p.as_str())) {
                 down.push(Seg { from: col as u16, to: j as u16, color: (j % GRAPH_COLORS) as u8 });
             } else {
-                let j = alloc(&mut lanes);
+                let j = alloc(&mut lanes, first_free);
                 lanes[j] = Some(p.clone());
                 down.push(Seg { from: col as u16, to: j as u16, color: (j % GRAPH_COLORS) as u8 });
             }
@@ -104,7 +128,7 @@ pub fn layout(commits: &[Commit]) -> GraphLayout {
             down.push(Seg { from: j as u16, to: col as u16, color: (j % GRAPH_COLORS) as u8 });
         }
         // Drop trailing empty lanes so the graph doesn't keep growing.
-        while matches!(lanes.last(), Some(None)) {
+        while lanes.len() > first_free && matches!(lanes.last(), Some(None)) {
             lanes.pop();
         }
 
@@ -121,9 +145,12 @@ pub fn layout(commits: &[Commit]) -> GraphLayout {
     out
 }
 
-fn alloc(lanes: &mut Vec<Option<String>>) -> usize {
-    if let Some(i) = lanes.iter().position(|l| l.is_none()) {
-        i
+fn alloc(lanes: &mut Vec<Option<String>>, from: usize) -> usize {
+    while lanes.len() < from {
+        lanes.push(None);
+    }
+    if let Some(i) = lanes.iter().skip(from).position(|l| l.is_none()) {
+        i + from
     } else {
         lanes.push(None);
         lanes.len() - 1
@@ -157,4 +184,16 @@ mod tests {
         assert_eq!(g.width, 2);
         assert!(g.rows[0].merge);
     }
+
+    #[test]
+    fn pinned_branch_stays_in_lane_zero() {
+        // m merges b into a; pinning b moves b's line to lane 0 and a's to lane 1.
+        let commits = vec![c("m", &["a", "b"]), c("b", &["r"]), c("a", &["r"]), c("r", &[])];
+        let g = layout_pinned(&commits, Some("b"));
+        assert_eq!(g.rows[1].col, 0, "b is pinned");
+        assert_eq!(g.rows[3].col, 0, "its parent r too");
+        assert_eq!(g.rows[0].col, 1);
+        assert_eq!(g.rows[2].col, 1);
+    }
+
 }

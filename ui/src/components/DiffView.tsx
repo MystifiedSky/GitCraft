@@ -341,7 +341,7 @@ function HunkView({
         const n = picked.length;
         return (
           <div key={hi} data-hunk className="mb-2">
-            <div className="sticky top-0 z-10 flex items-center gap-2 h-[28px] px-3 bg-[#262a33] border-y border-white/5 font-sans">
+            <div className="sticky top-0 z-10 flex items-center gap-2 h-[28px] px-3 bg-panel2 border-y border-white/5 font-sans">
               <span className="text-[11.5px] text-fg2 truncate flex-1 mono">{h.header}</span>
               {actions && !staged && (
                 <>

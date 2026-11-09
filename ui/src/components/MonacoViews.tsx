@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { EDITOR_FONT, languageFor, monaco } from "@/lib/monaco";
+import { EDITOR_FONT, editorTheme, languageFor, monaco } from "@/lib/monaco";
 
 const baseOptions: monaco.editor.IEditorOptions = {
   fontFamily: EDITOR_FONT,
@@ -51,7 +51,7 @@ export function MonacoDiff({
   useEffect(() => {
     const e = monaco.editor.createDiffEditor(host.current!, {
       ...baseOptions,
-      theme: "gitcraft-dark",
+      theme: editorTheme(),
       readOnly: true,
       originalEditable: false,
       renderOverviewRuler: true,
@@ -117,7 +117,7 @@ export function MonacoFile({
   useEffect(() => {
     const e = monaco.editor.create(host.current!, {
       ...baseOptions,
-      theme: "gitcraft-dark",
+      theme: editorTheme(),
       model: monaco.editor.createModel(value, languageFor(file)),
       readOnly,
     });

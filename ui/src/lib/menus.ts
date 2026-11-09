@@ -1,8 +1,10 @@
 import type { MenuEntry } from "@/components/ui/menu";
 import type { Commit, GitRef, RepoView, Stash } from "./api";
 import { api } from "./api";
-import { act, clearSolo, confirmThen, copy, openHistory, promptBranch, promptTag, toggleHidden, toggleSolo } from "./repo";
+import { act, clearSolo, confirmThen, copy, openHistory, promptBranch, promptTag, toggleHidden, togglePinned, toggleSolo } from "./repo";
 import { useStore } from "./store";
+import { addWorktree } from "./manage";
+import { startPullRequest } from "./hosting";
 import { baseFor, dropCommits, headLine, moveCommit, openRebase, rewordCommit, squashCommits } from "./rewrite";
 
 const activeTab = () => useStore.getState().activeId;
@@ -43,10 +45,12 @@ export function branchMenu(repo: RepoView, ref: GitRef): MenuEntry[] {
   }
   items.push({ separator: true });
   if (isHead) items.push({ label: `Push ${ref.name}`, onSelect: () => act(path, { type: "push", force: false }) });
+  if (ref.kind === "Local") items.push({ label: `Start a pull request from ${ref.name}`, onSelect: () => startPullRequest(path, ref.name) });
   if (ref.kind === "Local" && !isHead && ref.upstream && ref.behind > 0 && ref.ahead === 0)
     items.push({ label: `Fast-forward ${ref.name} to ${ref.upstream}`, onSelect: () => act(path, { type: "fastForward", branch: ref.name, to: ref.upstream }) });
   if (ref.kind === "Local") items.push({ label: ref.upstream ? `Set Upstream (now ${ref.upstream})` : "Set Upstream", onSelect: () => promptUpstream(repo, ref) });
   items.push({ label: "Create branch here", onSelect: () => promptBranch(path, ref.sha) });
+  if (ref.kind === "Local" && !isHead) items.push({ label: `Create worktree from ${ref.name}`, onSelect: () => addWorktree(repo, ref.name) });
   items.push({ label: "Create tag here", onSelect: () => promptTag(path, ref.sha) });
   items.push({ separator: true });
   if (ref.kind === "Local") {
@@ -84,6 +88,7 @@ export function branchMenu(repo: RepoView, ref: GitRef): MenuEntry[] {
   const soloed = (st.solo[path] ?? []).includes(ref.full);
   items.push({ label: hidden ? "Show in the graph" : "Hide in the graph", disabled: isHead && !hidden, onSelect: () => toggleHidden(path, ref.full) });
   items.push({ label: soloed ? "Stop soloing this branch" : "Solo", onSelect: () => toggleSolo(path, ref.full) });
+  items.push({ label: st.pinned?.[path] === ref.full ? "Unpin from Left" : "Pin to Left", onSelect: () => togglePinned(path, ref.full) });
   if ((st.solo[path] ?? []).length > 0) items.push({ label: "Stop soloing all branches", onSelect: () => clearSolo(path) });
   items.push({ separator: true });
   items.push({ label: "Copy branch name", onSelect: () => copy(ref.name) });
@@ -210,6 +215,28 @@ export function fileMenu(repo: RepoView, file: string, staged: boolean, inCommit
     }
     items.push({ separator: true });
   }
+  const dir = file.includes("/") ? file.slice(0, file.lastIndexOf("/") + 1) : "";
+  const ext = /\.[^./]+$/.exec(file)?.[0];
+  const tracked = staged || inCommit || repo.status.unstaged.some((f) => f.path === file && f.status !== "?");
+  const ign = (pattern: string, untrack: string[]) => act(path, { type: "ignore", pattern, untrack: tracked ? untrack : [] });
+  items.push({
+    label: tracked ? "Ignore and stop tracking" : "Ignore",
+    children: [
+      { label: "Ignore this file", onSelect: () => ign("/" + file, [file]) },
+      ...(dir ? [{ label: `Ignore all files in "${dir}"`, onSelect: () => ign("/" + dir, [dir]) }] : []),
+      ...(ext ? [{ label: `Ignore all files with extension ${ext}`, onSelect: () => ign("*" + ext, [file]) }] : []),
+    ],
+  });
+  if (ext) items.push({ label: `Track ${ext} files with Git LFS`, onSelect: () => act(path, { type: "lfsTrack", pattern: "*" + ext }) });
+  if (!inCommit)
+    items.push({
+      label: "Open in External Diff Tool",
+      shortcut: "Ctrl+D",
+      onSelect: () => act(path, { type: "externalDiff", file, staged, tool: useStore.getState().settings.diffTool }),
+    });
+  if (repo.status.unstaged.some((f) => f.path === file && f.status === "U"))
+    items.push({ label: "Open in External Merge Tool", onSelect: () => act(path, { type: "externalMerge", file, tool: useStore.getState().settings.mergeTool }) });
+  items.push({ separator: true });
   items.push({ label: "Copy file path", onSelect: () => copy(file) });
   items.push({ label: "Open in File Manager", onSelect: () => api.openFileManager(`${path}\\${file.replace(/\/[^/]*$/, "").replace(/\//g, "\\")}`) });
   items.push({ separator: true });

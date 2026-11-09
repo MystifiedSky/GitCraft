@@ -22,6 +22,9 @@ notify-debouncer-mini = "0.6"
 image = { version = "0.25", default-features = false, features = ["png"] }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+portable-pty = "0.9"
+ureq = { version = "2", features = ["json"] }
+keyring = { version = "3", features = ["windows-native", "apple-native", "linux-native"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

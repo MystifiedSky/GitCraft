@@ -23,8 +23,14 @@ export function laneColor(i: number) {
   return GRAPH_COLORS[((i % 10) + 10) % 10];
 }
 
+/** The app background of the current theme (for tints). */
+export function themeBg() {
+  const t = typeof document !== "undefined" ? document.documentElement.dataset.theme ?? "dark" : "dark";
+  return t.startsWith("light") ? "#fcfcfc" : t === "dark-hc" ? "#090a0b" : "#1c1e23";
+}
+
 /** Mix a #rrggbb colour with the app background. */
-export function mix(hex: string, amount: number, bg = "#1c1e23") {
+export function mix(hex: string, amount: number, bg = themeBg()) {
   const p = (h: string, i: number) => parseInt(h.slice(i, i + 2), 16);
   const r = Math.round(p(hex, 1) * amount + p(bg, 1) * (1 - amount));
   const g = Math.round(p(hex, 3) * amount + p(bg, 3) * (1 - amount));

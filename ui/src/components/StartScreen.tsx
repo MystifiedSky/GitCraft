@@ -1,8 +1,12 @@
-import { CloudDownload, ExternalLink, FolderOpen, Rocket, Search, SquarePlus } from "lucide-react";
+import { CircleDot, CloudDownload, ExternalLink, FolderOpen, GitPullRequest, Rocket, Search, SquarePlus } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { hosting } from "@/lib/hosting";
+import { timeSince } from "@/lib/utils";
 import { useState } from "react";
 import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
 import { openRepoPath } from "@/lib/repo";
+import { openWorkspace } from "@/lib/prefs";
 import { MOD } from "@/lib/utils";
 
 /** "New Tab" screen, laid out like the original: Repositories (Open / Clone / Create, search, Recent)
@@ -61,14 +65,25 @@ export function StartScreen() {
         <div className="flex-[1.15] min-w-[200px] pl-3">
           <div className="text-[15px] text-white/90 mb-[12px]">Connect More Integrations</div>
           <p className="text-[12px] text-fg leading-[16px] mb-[10px]">
-            Pull requests, issues and CI/CD from GitHub, GitLab, Bitbucket and Azure DevOps come to GitCraft in Stage 6 of the plan.
+            Connect GitHub or GitLab to see pull requests and issues in the left panel and on the Launchpad.
           </p>
           <button
-            onClick={() => s.setDialog({ kind: "plan" })}
+            onClick={() => s.setDialog({ kind: "accounts" })}
             className="inline-flex items-center gap-2 h-[34px] px-2.5 rounded-[3px] bg-white/[0.06] border border-white/10 text-[13px] text-white/90 hover:bg-white/10 mb-[20px]"
           >
-            See the Feature Plan <ExternalLink size={13} />
+            Connect Integrations <ExternalLink size={13} />
           </button>
+          <div className="text-[12px] text-fg mb-1">Workspaces</div>
+          <div className="flex flex-col items-start text-[12px] leading-[17px] mb-[20px]">
+            {s.settings.workspaces.map((w) => (
+              <button key={w.id} className="text-link hover:underline" onClick={() => openWorkspace(w.id)} title={w.repos.join("\n")}>
+                {w.name} ({w.repos.length})
+              </button>
+            ))}
+            <button className="text-link hover:underline" onClick={() => s.setDialog({ kind: "workspaces" })}>
+              {s.settings.workspaces.length ? "Manage workspaces" : "Create a workspace"}
+            </button>
+          </div>
           <div className="text-[12px] text-fg mb-1">Resources</div>
           <div className="flex flex-col items-start text-[12px] leading-[17px]">
             <button className="text-link hover:underline" onClick={openSample}>
@@ -99,14 +114,66 @@ function BigButton({ icon, label, title, onClick }: { icon: React.ReactNode; lab
   );
 }
 
+/** Launchpad: open pull requests and issues that involve you, across connected services. */
 export function LaunchpadScreen() {
+  const s = useStore();
+  const units = s.metrics.time_units;
+  const q = useQuery({ queryKey: ["launchpad", s.settings.gitlabHost], queryFn: hosting.launchpad, refetchInterval: 5 * 60_000 });
+  const status = useQuery({ queryKey: ["hostingStatus", s.settings.gitlabHost], queryFn: hosting.status });
+  const connected = !!(status.data?.github || status.data?.gitlab);
+  const since = (iso: string) => {
+    const t = timeSince(Date.parse(iso) / 1000, units);
+    return <span style={{ color: t.color }}>{t.text}</span>;
+  };
   return (
-    <div className="h-full flex items-center justify-center bg-app">
-      <div className="text-center max-w-[420px]">
-        <Rocket size={40} className="mx-auto mb-3 text-link" />
-        <div className="text-[18px] text-white font-semibold mb-2">Launchpad</div>
-        <div className="text-[13px] text-fg2 leading-relaxed">
-          One place for your pull requests, issues and work in progress across every repository. It needs connections to GitHub, GitLab and other services, which arrive in Stage 6 of the plan.
+    <div className="h-full overflow-auto bg-app">
+      <div className="max-w-[900px] mx-auto px-8 py-6">
+        <div className="flex items-center gap-3 mb-4">
+          <Rocket size={22} className="text-link" />
+          <div className="text-[18px] text-white font-semibold flex-1">Launchpad</div>
+          <button className="text-[12.5px] text-link hover:underline" onClick={() => q.refetch()}>
+            {q.isFetching ? "Refreshing…" : "Refresh"}
+          </button>
+        </div>
+        {!connected && !status.isLoading && (
+          <div className="rounded border border-white/10 bg-panel p-4 text-[13px] text-fg2 mb-4">
+            Connect GitHub or GitLab to see your pull requests and issues here.{" "}
+            <button className="text-link hover:underline" onClick={() => s.setDialog({ kind: "accounts" })}>
+              Open Accounts
+            </button>
+          </div>
+        )}
+        {q.data?.errors.map((e) => (
+          <div key={e} className="text-[12px] text-[#ef7a76] mb-1">
+            {e}
+          </div>
+        ))}
+        <div className="text-[12px] font-semibold tracking-wider text-fg2 mt-3 mb-1">PULL REQUESTS ({q.data?.pull_requests.length ?? 0})</div>
+        <div className="rounded border border-white/8 bg-panel mb-5">
+          {q.data?.pull_requests.length === 0 && <div className="px-3 py-3 text-fg3 text-[12.5px]">Nothing needs you right now.</div>}
+          {q.data?.pull_requests.map((p) => (
+            <button key={p.url} onClick={() => hosting.openUrl(p.url)} className="w-full flex items-center gap-2 px-3 h-[34px] text-left text-[13px] border-b border-white/5 last:border-0 hover:bg-hoverrow">
+              <GitPullRequest size={14} className={p.draft ? "text-fg3" : "text-good"} />
+              <span className="text-fg3 text-[12px] w-[160px] truncate shrink-0">{p.repo}</span>
+              <span className="text-fg3 text-[12px]">#{p.number}</span>
+              <span className="truncate flex-1 text-white/90">{p.title}</span>
+              <span className="text-[12px] text-fg2">{p.author}</span>
+              <span className="text-[12px] w-[34px] text-right">{since(p.updated)}</span>
+            </button>
+          ))}
+        </div>
+        <div className="text-[12px] font-semibold tracking-wider text-fg2 mb-1">ISSUES ASSIGNED TO YOU ({q.data?.issues.length ?? 0})</div>
+        <div className="rounded border border-white/8 bg-panel">
+          {q.data?.issues.length === 0 && <div className="px-3 py-3 text-fg3 text-[12.5px]">No open issues assigned to you.</div>}
+          {q.data?.issues.map((i) => (
+            <button key={i.url} onClick={() => hosting.openUrl(i.url)} className="w-full flex items-center gap-2 px-3 h-[34px] text-left text-[13px] border-b border-white/5 last:border-0 hover:bg-hoverrow">
+              <CircleDot size={14} className="text-good" />
+              <span className="text-fg3 text-[12px] w-[160px] truncate shrink-0">{i.repo}</span>
+              <span className="text-fg3 text-[12px]">#{i.number}</span>
+              <span className="truncate flex-1 text-white/90">{i.title}</span>
+              <span className="text-[12px] w-[34px] text-right">{since(i.updated)}</span>
+            </button>
+          ))}
         </div>
       </div>
     </div>
