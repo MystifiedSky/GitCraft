@@ -3,7 +3,8 @@ import {
   ArrowDownAZ,
   ChevronDown,
   ChevronRight,
-  CloudUpload,
+  FileDown,
+  FileUp,
   Copy,
   Download,
   FolderTree,
@@ -25,6 +26,7 @@ import { CtxMenu } from "./ui/menu";
 import { Button } from "./ui/button";
 import { Avatar, StatusIcon } from "./Icons";
 import { cn, fullDate, mix, MOD } from "@/lib/utils";
+import { applyPatch, composeCommits, explainCommit, generateCommitMessage, generateStashTitle, patchName, savePatch } from "@/lib/ai";
 
 /** Right panel: staging and committing (WIP) or the details of a selected commit. */
 export function RightPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
@@ -49,9 +51,9 @@ function PanelHeader({ children }: { children: ReactNode }) {
   return <div className="flex items-center h-[30px] px-[8px] gap-2 shrink-0 bg-panel border-b border-black/20">{children}</div>;
 }
 
-function AiButton({ title }: { title: string }) {
+function AiButton({ title, onClick }: { title: string; onClick: () => void }) {
   return (
-    <button title={title} className="w-[26px] h-[24px] rounded-[3px] border border-ai/80 bg-ai/15 text-white/80 flex items-center justify-center hover:bg-ai/25 shrink-0">
+    <button title={title} onClick={onClick} className="w-[26px] h-[24px] rounded-[3px] border border-ai/80 bg-ai/15 text-white/80 flex items-center justify-center hover:bg-ai/25 shrink-0">
       <Sparkles size={13} />
     </button>
   );
@@ -208,7 +210,7 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
   const s = useStore();
   const ui = useTabUi(tabId);
   const draft = s.drafts[repo.path] ?? { summary: "", description: "", amend: false };
-  const [tab, setTab] = useState<"commit" | "stash">("commit");
+  const [tab, setTab] = useState<"commit" | "stash" | "patch">("commit");
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [unstagedOpen, setUnstagedOpen] = useState(true);
   const [stagedOpen, setStagedOpen] = useState(true);
@@ -260,7 +262,10 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
 
   let commitLabel: string;
   let commitEnabled = true;
-  if (tab === "stash") {
+  if (tab === "patch") {
+    commitLabel = total === 0 ? "No Changes for a Patch" : `Save ${total} File Change${total === 1 ? "" : "s"} as a Patch`;
+    commitEnabled = total > 0;
+  } else if (tab === "stash") {
     commitLabel = total === 0 ? "No Changes to Stash" : `Stash Changes to ${total} File${total === 1 ? "" : "s"}`;
     commitEnabled = total > 0;
   } else if (conflicted.length > 0) {
@@ -297,7 +302,7 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
           </span>
           <span className="px-1.5 rounded-[3px] text-white truncate" style={{ background: mix("#15a0bf", 0.45) }}>{branch}</span>
         </div>
-        <AiButton title="AI features come in Stage 6" />
+        <AiButton title="Compose commits with AI" onClick={() => composeCommits(repo.path)} />
       </PanelHeader>
       <ViewSwitch />
       <div className="flex-1 overflow-y-auto min-h-[60px]">
@@ -404,8 +409,9 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
           <Download size={15} />
           {tab === "stash" && " Stash"}
         </TabBtn>
-        <TabBtn active={false} onClick={() => s.toast(true, "Cloud Patches come in Stage 6")} title="Cloud Patch (Stage 6)">
-          <CloudUpload size={15} />
+        <TabBtn active={tab === "patch"} onClick={() => setTab("patch")} title="Patch">
+          <FileDown size={15} />
+          {tab === "patch" && " Patch"}
         </TabBtn>
       </div>
       <div className="px-[8px] pt-[10px] pb-[8px] shrink-0 flex flex-col gap-[8px]">
@@ -433,7 +439,7 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
                   }}
                 />
                 <span className={cn("text-[14px] mx-2 tabular-nums", left < 0 ? "text-[#ef7a76]" : "text-white/60")}>{left}</span>
-                <AiButton title="Generate a commit message with AI (Stage 6)" />
+                <AiButton title="Generate a commit message with AI" onClick={() => generateCommitMessage(repo.path)} />
               </div>
               <textarea
                 className="commit-message-input bg-transparent outline-none resize-none text-[13.5px] text-white/90 placeholder:text-white/70 px-[10px] py-[6px] h-[84px]"
@@ -455,7 +461,7 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
                 {optionsOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />} Commit options
               </button>
               <div className="flex-1" />
-              <Button size="sm" variant="ai" className="h-[24px] font-semibold" title="AI features come in Stage 6" onClick={() => s.toast(true, "Composing commits with AI comes in Stage 6")}>
+              <Button size="sm" variant="ai" className="h-[24px] font-semibold" title="Split your changes into focused commits with AI" onClick={() => composeCommits(repo.path)}>
                 <Sparkles size={12} /> Compose with AI
               </Button>
             </div>
@@ -472,20 +478,45 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
               </label>
             )}
           </>
+        ) : tab === "patch" ? (
+          <div className="bg-field rounded-[3px] border border-white/10 flex flex-col px-[10px] py-[8px] gap-2">
+            <div className="text-[12.5px] text-fg2 leading-snug">
+              Share your uncommitted changes as a .patch file, without pushing a branch. Untracked files must be staged first. Anyone can apply it with
+              GitCraft or <span className="mono">git apply</span>.
+            </div>
+            <button className="self-start flex items-center gap-1.5 text-[12.5px] text-link hover:underline" onClick={() => applyPatch(repo.path)}>
+              <FileUp size={13} /> Apply a patch file…
+            </button>
+          </div>
         ) : (
           <div className="bg-field rounded-[3px] border border-white/10 flex flex-col">
-            <input
-              className="bg-transparent outline-none text-[15px] text-white placeholder:text-white/70 px-[10px] pt-[8px] pb-[6px]"
-              placeholder="Stash title"
-              value={stashMsg}
-              onChange={(e) => setStashMsg(e.target.value)}
-            />
+            <div className="flex items-center pr-[6px]">
+              <input
+                className="flex-1 min-w-0 bg-transparent outline-none text-[15px] text-white placeholder:text-white/70 px-[10px] pt-[8px] pb-[6px]"
+                placeholder="Stash title"
+                value={stashMsg}
+                onChange={(e) => setStashMsg(e.target.value)}
+              />
+              <AiButton
+                title="Name the stash with AI"
+                onClick={async () => {
+                  const t = await generateStashTitle(repo.path);
+                  if (t) setStashMsg(t);
+                }}
+              />
+            </div>
             <div className="text-[12px] text-fg3 px-[10px] pb-[8px]">Staged and unstaged changes, including new files, are stashed.</div>
           </div>
         )}
         <button
           disabled={!commitEnabled}
-          onClick={() => (tab === "stash" ? act(repo.path, { type: "stash", message: stashMsg }).then(() => setStashMsg("")) : doCommit(false))}
+          onClick={() =>
+            tab === "patch"
+              ? savePatch(repo.path, [], patchName(draft.summary || branch))
+              : tab === "stash"
+                ? act(repo.path, { type: "stash", message: stashMsg }).then(() => setStashMsg(""))
+                : doCommit(false)
+          }
           className={cn(
             "h-[40px] rounded-[3px] border text-[13.5px] flex items-center justify-center gap-2 font-semibold",
             commitEnabled ? "bg-good/25 border-good text-white hover:bg-good/35" : "bg-good/10 border-good/25 text-white/45",
@@ -543,7 +574,7 @@ function CommitDetails({ repo, tabId, commit: c }: { repo: RepoView; tabId: stri
           <Copy size={12} />
         </button>
         <div className="flex-1" />
-        <AiButton title="Explain this commit with AI (Stage 6)" />
+        <AiButton title="Explain this commit with AI" onClick={() => explainCommit(repo.path, c.sha, c.summary)} />
         <button className="text-fg2 hover:text-white" title="Close (Esc)" onClick={() => s.setUi(tabId, { selection: { type: "wip" }, diff: null })}>
           <X size={15} />
         </button>

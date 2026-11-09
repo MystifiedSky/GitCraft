@@ -71,6 +71,10 @@ pub enum Action {
     DeleteBranches { names: Vec<String>, remotes: Vec<String> },
     GitflowInit { config: crate::manage::GitflowConfig },
     LfsInstall,
+    /// "Compose commits with AI": commit the given groups of files one after another.
+    ComposeCommits { commits: Vec<crate::ai::ComposedCommit> },
+    /// Apply a .patch file (mailbox patches become commits).
+    ApplyPatchFile { file: String },
     /// Open a file in the external diff tool (git difftool), or a conflict in the merge tool.
     ExternalDiff { file: String, staged: bool, tool: String },
     ExternalMerge { file: String, tool: String },
@@ -565,6 +569,35 @@ impl Engine {
                 a.extend(["--".into(), file.clone()]);
                 spawn_git(dir, &a);
                 ActionResult { ok: true, message: format!("Opening {file} in the merge tool") }
+            }
+            Action::ComposeCommits { commits } => {
+                let before = self.rev(dir, "HEAD");
+                let o = self.git(dir, &["reset", "-q"]);
+                if !o.ok && !before.is_empty() {
+                    return done(o, "");
+                }
+                for (i, c) in commits.iter().enumerate() {
+                    let mut add = vec!["add", "-A", "--"];
+                    add.extend(c.files.iter().map(|s| s.as_str()));
+                    let o = self.git(dir, &add);
+                    if !o.ok {
+                        return ActionResult { ok: false, message: format!("Commit {} of {}: {}", i + 1, commits.len(), o.message()) };
+                    }
+                    let msg = if c.description.trim().is_empty() { c.summary.trim().to_string() } else { format!("{}\n\n{}", c.summary.trim(), c.description.trim()) };
+                    let o = self.git(dir, &["commit", "-q", "-m", &msg]);
+                    if !o.ok {
+                        return ActionResult { ok: false, message: format!("Commit {} of {}: {}", i + 1, commits.len(), o.message()) };
+                    }
+                }
+                if !before.is_empty() {
+                    let after = self.rev(dir, "HEAD");
+                    self.push_undo(repo, UndoRec::Commit { before, after, label: format!("{} composed commits", commits.len()) });
+                }
+                ActionResult { ok: true, message: format!("Created {} commits", commits.len()) }
+            }
+            Action::ApplyPatchFile { file } => {
+                let o = crate::extras::apply_patch_file(dir, Path::new(&file), &|a: &[&str]| self.git(dir, a));
+                done(o, "Patch applied")
             }
             Action::LfsInstall => done(self.git(dir, &["lfs", "install", "--local"]), "Git LFS enabled for this repository"),
             Action::LfsTrack { pattern } => done(self.git(dir, &["lfs", "track", pattern.trim()]), &format!("LFS now tracks {}", pattern.trim())),

@@ -61,7 +61,7 @@ export function Dialogs() {
           <div className="flex flex-col items-center gap-2 py-2">
             <AppMark size={48} />
             <div className="text-[18px] font-bold text-white">GitCraft</div>
-            <div className="text-fg2 text-[12.5px]">Version {useStore.getState().version} · Stage 1</div>
+            <div className="text-fg2 text-[12.5px]">Version {useStore.getState().version} · Stage 6</div>
             <div className="text-fg3 text-[12px] text-center mt-2">A graphical Git client built with Tauri, Rust and React. Every action runs the real Git command line.</div>
           </div>
         </Dialog>
@@ -95,6 +95,13 @@ export function Dialogs() {
           }
         >
           <p className="text-[13px] text-fg leading-relaxed whitespace-pre-wrap">{d.text}</p>
+        </Dialog>
+      );
+    case "info":
+      return (
+        <Dialog open onClose={close} title={d.title} width={560} footer={<Button variant="primary" onClick={close}>Close</Button>}>
+          <div className="text-[13px] text-fg leading-relaxed whitespace-pre-wrap select-text max-h-[60vh] overflow-auto">{d.text}</div>
+          <div className="text-[11.5px] text-fg3 mt-3">Written by Claude using your Anthropic API key. Check anything important.</div>
         </Dialog>
       );
     case "message":

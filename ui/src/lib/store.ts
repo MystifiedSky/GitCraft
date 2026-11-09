@@ -93,6 +93,7 @@ export type DialogState =
   | { kind: "profiles" }
   | { kind: "workspaces" }
   | { kind: "choice"; title: string; text: string; choices: { label: string; variant?: "primary" | "danger" | "default"; onSelect: () => void }[] }
+  | { kind: "info"; title: string; text: string }
   | { kind: "message"; title: string; label: string; value: string; confirm: string; help?: string; onSubmit: (v: string) => void };
 
 export interface Settings {

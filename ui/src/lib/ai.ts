@@ -1,0 +1,103 @@
+// Stage 6: AI helpers (your own Anthropic API key), local patch files, conflict prevention and the Agents view.
+import { invoke } from "@tauri-apps/api/core";
+import { act } from "./repo";
+import { useStore } from "./store";
+
+export interface ComposedCommit {
+  summary: string;
+  description: string;
+  files: string[];
+}
+
+export interface ConflictCheck {
+  target: string;
+  files: string[];
+  note: string | null;
+}
+
+export interface AgentSession {
+  id: string;
+  title: string;
+  modified: number;
+  messages: number;
+  status: "active" | "idle";
+}
+
+export const ai = {
+  commitMessage: (path: string) => invoke<[string, string]>("ai_commit_message", { path }),
+  stashMessage: (path: string) => invoke<string>("ai_stash_message", { path }),
+  explainCommit: (path: string, sha: string) => invoke<string>("ai_explain_commit", { path, sha }),
+  explainBranch: (path: string, branch: string, base?: string) => invoke<string>("ai_explain_branch", { path, branch, base: base ?? null }),
+  compose: (path: string) => invoke<ComposedCommit[]>("ai_compose", { path }),
+  savePatch: (path: string, shas: string[], name: string) => invoke<string | null>("save_patch", { path, shas, name }),
+  pickPatch: () => invoke<string | null>("pick_patch_file"),
+  conflictCheck: (path: string, target?: string) => invoke<ConflictCheck>("conflict_check", { path, target: target ?? null }),
+  agents: (path: string) => invoke<AgentSession[]>("agent_sessions", { path }),
+};
+
+/** Run one AI request with a busy note; a missing key opens Accounts. */
+async function withAi<T>(label: string, f: () => Promise<T>): Promise<T | null> {
+  const s = useStore.getState();
+  s.setBusy(label);
+  try {
+    return await f();
+  } catch (e) {
+    const msg = String(e);
+    s.toast(false, msg);
+    if (msg.includes("Add your Anthropic API key")) s.setDialog({ kind: "accounts" });
+    return null;
+  } finally {
+    s.setBusy(null);
+  }
+}
+
+export async function generateCommitMessage(path: string) {
+  const r = await withAi("Writing a commit message…", () => ai.commitMessage(path));
+  if (r) useStore.getState().setDraft(path, { summary: r[0], description: r[1] });
+}
+
+export async function generateStashTitle(path: string): Promise<string | null> {
+  return withAi("Naming the stash…", () => ai.stashMessage(path));
+}
+
+export async function explainCommit(path: string, sha: string, summary: string) {
+  const text = await withAi("Explaining the commit…", () => ai.explainCommit(path, sha));
+  if (text) useStore.getState().setDialog({ kind: "info", title: `Explain: ${summary}`, text });
+}
+
+export async function explainBranch(path: string, branch: string) {
+  const text = await withAi(`Explaining ${branch}…`, () => ai.explainBranch(path, branch));
+  if (text) useStore.getState().setDialog({ kind: "info", title: `What ${branch} changes`, text });
+}
+
+/** "Compose with AI": suggest focused commits for the uncommitted work, then create them after a confirm. */
+export async function composeCommits(path: string) {
+  const commits = await withAi("Grouping your changes into commits…", () => ai.compose(path));
+  if (!commits) return;
+  const text = commits.map((c, i) => `${i + 1}. ${c.summary}\n${c.files.map((f) => `     ${f}`).join("\n")}`).join("\n\n");
+  useStore.getState().setDialog({
+    kind: "choice",
+    title: `Create ${commits.length} commit${commits.length === 1 ? "" : "s"}?`,
+    text: `${text}\n\nYou can undo this with Undo.`,
+    choices: [{ label: `Create ${commits.length} Commit${commits.length === 1 ? "" : "s"}`, variant: "primary", onSelect: () => void act(path, { type: "composeCommits", commits }) }],
+  });
+}
+
+/** Save uncommitted changes (no shas) or commits as a .patch file. */
+export async function savePatch(path: string, shas: string[], name: string) {
+  const s = useStore.getState();
+  try {
+    const file = await ai.savePatch(path, shas, name);
+    if (file) s.toast(true, `Patch saved to ${file}`);
+  } catch (e) {
+    s.toast(false, String(e));
+  }
+}
+
+export async function applyPatch(path: string) {
+  const file = await ai.pickPatch();
+  if (file) await act(path, { type: "applyPatchFile", file });
+}
+
+export const patchName = (summary: string) =>
+  (summary.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 52) || "changes") + ".patch";

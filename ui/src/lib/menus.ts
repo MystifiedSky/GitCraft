@@ -5,6 +5,7 @@ import { act, clearSolo, confirmThen, copy, openHistory, promptBranch, promptTag
 import { useStore } from "./store";
 import { addWorktree } from "./manage";
 import { startPullRequest } from "./hosting";
+import { explainBranch, patchName, savePatch } from "./ai";
 import { baseFor, dropCommits, headLine, moveCommit, openRebase, rewordCommit, squashCommits } from "./rewrite";
 
 const activeTab = () => useStore.getState().activeId;
@@ -46,6 +47,7 @@ export function branchMenu(repo: RepoView, ref: GitRef): MenuEntry[] {
   items.push({ separator: true });
   if (isHead) items.push({ label: `Push ${ref.name}`, onSelect: () => act(path, { type: "push", force: false }) });
   if (ref.kind === "Local") items.push({ label: `Start a pull request from ${ref.name}`, onSelect: () => startPullRequest(path, ref.name) });
+  items.push({ label: "Explain Branch Changes (Preview)", onSelect: () => explainBranch(path, ref.name) });
   if (ref.kind === "Local" && !isHead && ref.upstream && ref.behind > 0 && ref.ahead === 0)
     items.push({ label: `Fast-forward ${ref.name} to ${ref.upstream}`, onSelect: () => act(path, { type: "fastForward", branch: ref.name, to: ref.upstream }) });
   if (ref.kind === "Local") items.push({ label: ref.upstream ? `Set Upstream (now ${ref.upstream})` : "Set Upstream", onSelect: () => promptUpstream(repo, ref) });
@@ -135,6 +137,7 @@ export function commitMenu(repo: RepoView, c: Commit): MenuEntry[] {
       ],
     },
     { label: "Revert commit", onSelect: () => act(path, { type: "revert", sha: c.sha }) },
+    { label: "Save commit as a patch file", onSelect: () => savePatch(path, [c.sha], patchName(c.summary)) },
     { separator: true },
     {
       label: "Compare commit against working directory",

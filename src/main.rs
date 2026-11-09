@@ -6,6 +6,8 @@ mod jobs;
 mod files;
 mod git;
 mod graph;
+mod ai;
+mod extras;
 mod hosting;
 mod manage;
 mod rewrite;
@@ -365,6 +367,64 @@ fn open_url(url: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn ai_commit_message(path: String) -> Result<(String, String), String> {
+    blocking(move || ai::commit_message(Path::new(&path))).await?
+}
+
+#[tauri::command]
+async fn ai_stash_message(path: String) -> Result<String, String> {
+    blocking(move || ai::stash_message(Path::new(&path))).await?
+}
+
+#[tauri::command]
+async fn ai_explain_commit(path: String, sha: String) -> Result<String, String> {
+    blocking(move || ai::explain_commit(Path::new(&path), &sha)).await?
+}
+
+#[tauri::command]
+async fn ai_explain_branch(path: String, branch: String, base: Option<String>) -> Result<String, String> {
+    blocking(move || {
+        let base = base.or_else(|| extras::default_target(Path::new(&path))).ok_or("No branch to compare with")?;
+        ai::explain_branch(Path::new(&path), &branch, &base)
+    })
+    .await?
+}
+
+#[tauri::command]
+async fn ai_compose(path: String) -> Result<Vec<ai::ComposedCommit>, String> {
+    blocking(move || ai::compose(Path::new(&path))).await?
+}
+
+/// Save a patch (uncommitted changes when `shas` is empty, else those commits) to a file the person picks.
+#[tauri::command]
+async fn save_patch(path: String, shas: Vec<String>, name: String) -> Result<Option<String>, String> {
+    blocking(move || {
+        let text = extras::make_patch(Path::new(&path), &shas)?;
+        let Some(file) = rfd::FileDialog::new().set_title("Save patch").set_file_name(&name).add_filter("Patch", &["patch", "diff"]).save_file() else {
+            return Ok(None);
+        };
+        std::fs::write(&file, text).map_err(err)?;
+        Ok(Some(file.to_string_lossy().into_owned()))
+    })
+    .await?
+}
+
+#[tauri::command]
+async fn pick_patch_file() -> Result<Option<String>, String> {
+    blocking(|| rfd::FileDialog::new().set_title("Apply a patch").add_filter("Patch", &["patch", "diff"]).pick_file().map(|p| p.to_string_lossy().into_owned())).await
+}
+
+#[tauri::command]
+async fn conflict_check(path: String, target: Option<String>) -> Result<extras::ConflictCheck, String> {
+    blocking(move || extras::conflict_check(Path::new(&path), target.as_deref())).await
+}
+
+#[tauri::command]
+async fn agent_sessions(path: String) -> Result<Vec<extras::AgentSession>, String> {
+    blocking(move || extras::agent_sessions(Path::new(&path))).await
+}
+
 /// Open the repository in VS Code (File > Open Repo in VS Code).
 #[tauri::command]
 fn open_in_editor(path: String) -> Result<(), String> {
@@ -608,6 +668,15 @@ fn main() {
             open_in_editor,
             rebase_commits,
             gitflow_config,
+            ai_commit_message,
+            ai_stash_message,
+            ai_explain_commit,
+            ai_explain_branch,
+            ai_compose,
+            save_patch,
+            pick_patch_file,
+            conflict_check,
+            agent_sessions,
             hosting_status,
             set_secret,
             repo_remote,

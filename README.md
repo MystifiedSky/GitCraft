@@ -13,6 +13,11 @@ GitCraft is a desktop Git client for exploring repository history and managing e
 - **Manage branches, tags, and stashes.** Create or switch branches, merge or rebase, and use stashes to set work aside. GitCraft can undo and redo selected local operations.
 - **Work across repositories.** Open, clone, or initialize a repository, keep several repositories open in tabs, and see changes reflected as files are edited.
 - **Use your existing Git setup.** Fetch, pull, and push through the installed Git CLI and its configured credentials. The activity log shows the Git commands GitCraft runs.
+- **Rewrite and resolve.** Interactive rebase (pick, reword, squash, drop, reorder), cherry pick, and a three-pane merge tool for conflicts.
+- **Power tools.** Remotes, worktrees, submodules, Gitflow, Git LFS, sparse checkout, a command palette, a built-in terminal, workspaces, profiles, and four themes.
+- **Pull requests and issues.** Connect GitHub or GitLab with a personal access token to list, view, create, comment on, and merge pull requests, work with issues, and see everything on the Launchpad.
+- **AI helpers (optional).** With your own Anthropic API key, generate commit and stash messages, explain a commit or branch, or split your changes into focused commits. Nothing is sent unless you press an AI button.
+- **Share and stay ahead of conflicts.** Save or apply .patch files, see early whether your branch would conflict with the main branch, and list the Claude Code sessions that worked in a repository.
 
 ## Under the hood
 
@@ -45,7 +50,13 @@ npm --prefix ui run build
 cargo build --release --locked
 ```
 
-On Windows, the executable is `target/release/gitcraft.exe`. These commands build an executable; they do not package an installer.
+On Windows, the executable is `target/release/gitcraft.exe`. To package an installer (NSIS and MSI on Windows; deb, rpm, AppImage, or dmg on those systems):
+
+```powershell
+npm --prefix ui run installer
+```
+
+Installers are written to `target/release/bundle/`. Signed automatic updates are not set up yet; they need a download server and a private signing key.
 
 ## Testing
 
@@ -53,10 +64,11 @@ After installing the frontend dependencies, run these checks from the same direc
 
 ```powershell
 npm --prefix ui run typecheck
+npm --prefix ui test
 cargo test --locked
 ```
 
-The Rust suite covers commit graph lanes, file watcher behavior, partial (hunk and line) patches, and common Git operations in a temporary repository, including line staging, discard with undo, history, blame, comparisons, and hidden or soloed branches. For changes to the UI, launch the app and try the affected flow in a disposable repository.
+The Rust suite covers commit graph lanes, interactive rebase and conflicts, remotes, worktrees, Gitflow, the terminal, hosting API parsing, patches and the conflict check, file watcher behavior, partial (hunk and line) patches, and common Git operations in a temporary repository, including line staging, discard with undo, history, blame, comparisons, and hidden or soloed branches. For changes to the UI, launch the app and try the affected flow in a disposable repository.
 
 ## Project structure
 

@@ -259,6 +259,8 @@ export type Action =
   | { type: "deleteBranches"; names: string[]; remotes: string[] }
   | { type: "gitflowInit"; config: GitflowConfig }
   | { type: "lfsInstall" }
+  | { type: "composeCommits"; commits: { summary: string; description: string; files: string[] }[] }
+  | { type: "applyPatchFile"; file: string }
   | { type: "externalDiff"; file: string; staged: boolean; tool: string }
   | { type: "externalMerge"; file: string; tool: string }
   | { type: "lfsTrack"; pattern: string }

@@ -45,6 +45,7 @@ import { branchFromIssue, hosting, startPullRequest } from "@/lib/hosting";
 import { branchMenu, stashMenu } from "@/lib/menus";
 import { CtxMenu } from "./ui/menu";
 import { cn } from "@/lib/utils";
+import { AgentsView, ConflictCheckRows, PatchRows, useConflictCheck } from "./Stage6Panels";
 
 type SectionKey = "lfs" | "gitflow" | "local" | "remote" | "worktrees" | "stashes" | "tags" | "submodules" | "cloud" | "prs" | "issues" | "teams";
 
@@ -69,14 +70,12 @@ export function LeftPanel({ repo, tabId, onSelectSha }: { repo: RepoView | undef
   const viewing = soloList.length || (repo?.refs ?? []).filter((r) => r.kind !== "Tag" && !hiddenList.includes(r.full)).length;
   const isOpen = (k: SectionKey) => (f ? true : !!open[k]);
   const toggle = (k: SectionKey) => setOpen((o) => ({ ...o, [k]: !o[k] }));
+  const conflicts = useConflictCheck(repo).data;
 
   if (s.settings.leftView === "agents") {
     return (
       <Shell tabId={tabId}>
-        <div className="px-4 py-6 text-fg2 text-[13px] leading-relaxed">
-          <Bot size={28} className="mb-2 opacity-70" />
-          The Agents view watches AI coding sessions running in your repositories. It is planned for Stage 6.
-        </div>
+        <AgentsView repo={repo} />
       </Shell>
     );
   }
@@ -245,8 +244,8 @@ export function LeftPanel({ repo, tabId, onSelectSha }: { repo: RepoView | undef
             ))}
           </Section>
         )}
-        <Section title="CLOUD PATCHES" icon={<CloudCog size={14} />} count={0} open={isOpen("cloud")} onToggle={() => toggle("cloud")}>
-          <Note>Share changes as a patch without pushing a branch. Planned for Stage 6.</Note>
+        <Section title="PATCHES" icon={<CloudCog size={14} />} open={isOpen("cloud")} onToggle={() => toggle("cloud")}>
+          {repo ? <PatchRows repo={repo} /> : <Note>Open a repository to save or apply patch files.</Note>}
         </Section>
         {repo ? (
           <HostedLists repo={repo} tabId={tabId} prsOpen={isOpen("prs")} issuesOpen={isOpen("issues")} toggle={toggle} />
@@ -256,8 +255,14 @@ export function LeftPanel({ repo, tabId, onSelectSha }: { repo: RepoView | undef
             <Section title="ISSUES" icon={<CircleDot size={14} />} open={false} onToggle={() => toggle("issues")} />
           </>
         )}
-        <Section title="TEAMS" icon={<Users size={14} />} open={isOpen("teams")} onToggle={() => toggle("teams")}>
-          <Note>See what teammates are working on and avoid conflicts. Planned for Stage 6.</Note>
+        <Section
+          title="TEAMS"
+          icon={<Users size={14} />}
+          count={conflicts && conflicts.files.length > 0 ? conflicts.files.length : undefined}
+          open={isOpen("teams") || (!!conflicts && conflicts.files.length > 0 && open.teams === undefined)}
+          onToggle={() => toggle("teams")}
+        >
+          {repo ? <ConflictCheckRows repo={repo} /> : <Note>Open a repository to check it for conflicts with its main branch.</Note>}
         </Section>
         {tags.length > 0 && (
           <Section title="TAGS" icon={<Tag size={14} />} count={tags.length} open={isOpen("tags")} onToggle={() => toggle("tags")}>
