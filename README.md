@@ -33,6 +33,8 @@ Tauri 2 hosts the desktop window. Rust runs Git commands, watches repository fil
 
 ## Get started
 
+Download the [latest GitCraft installers](https://github.com/MystifiedSky/GitCraft/releases/latest). GitCraft needs Git available on `PATH`.
+
 On Windows, have these tools available before building:
 
 - Git for Windows on `PATH`. GitCraft also needs `git` at runtime.
@@ -62,7 +64,7 @@ On Windows, the executable is `target/release/gitcraft.exe`. To package an insta
 npm --prefix ui run installer
 ```
 
-Installers are written to `target/release/bundle/`. Published releases are built by GitHub Actions and delivered to installed copies as signed updates; [RELEASING.md](RELEASING.md) covers the one-time key setup and each release.
+Installers are written to `target/release/bundle/`. Pushes to `main` build and publish signed updates through GitHub Actions; see [RELEASING.md](RELEASING.md).
 
 ## Testing
 

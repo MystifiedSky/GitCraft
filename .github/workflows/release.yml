@@ -1,62 +1,82 @@
-# Builds GitCraft for Windows, macOS and Linux when a version tag (v1.2.3) is pushed, signs the update
-# files with the private key kept in the repository's secrets, and attaches everything (installers and
-# latest.json, which installed copies read to find updates) to a draft GitHub Release.
-# Publish the draft and every installed copy offers the update. See RELEASING.md.
 name: Release
 
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+# Keep publication ordered and let pushes wait for their turn.
+concurrency:
+  group: gitcraft-release
+  queue: max
 
 jobs:
+  version:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    outputs:
+      number: ${{ steps.version.outputs.number }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Assign the build version
+        id: version
+        shell: bash
+        run: |
+          number=$(node --input-type=module - <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const config = JSON.parse(readFileSync('tauri.conf.json', 'utf8'));
+          const base = /^(\d+)\.(\d+)\.(\d+)$/.exec(config.version);
+          if (!base || !config.plugins.updater.pubkey) {
+            throw new Error('Set a stable base version and the updater public key in tauri.conf.json.');
+          }
+          const patch = Number(base[3]) + Number(process.env.GITHUB_RUN_NUMBER);
+          if (!Number.isInteger(patch) || patch > 65535 || Number(base[1]) > 255 || Number(base[2]) > 255) {
+            throw new Error('Release version exceeds Windows MSI version limits.');
+          }
+          console.log(`${base[1]}.${base[2]}.${patch}`);
+          NODE
+          )
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: version
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: windows-latest
-            args: ""
-          - platform: macos-latest
-            args: "--target universal-apple-darwin"
-          - platform: ubuntu-22.04
-            args: ""
-    runs-on: ${{ matrix.platform }}
+          - runner: windows-2022
+            platform: windows
+            target: x86_64-pc-windows-msvc
+            rust-targets: x86_64-pc-windows-msvc
+            bundles: nsis,msi
+          - runner: macos-latest
+            platform: macos
+            target: universal-apple-darwin
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+            bundles: app,dmg
+          - runner: ubuntu-22.04
+            platform: linux
+            target: x86_64-unknown-linux-gnu
+            rust-targets: x86_64-unknown-linux-gnu
+            bundles: deb,rpm,appimage
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-
-      - name: Check the tag matches the app version
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: bash
-        run: |
-          v=$(node -p "require('./tauri.conf.json').version")
-          if [ "v$v" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match version $v in tauri.conf.json (run: npm --prefix ui run version:set -- <version>)"
-            exit 1
-          fi
-
-      - name: Check the update signing key is set up
-        shell: bash
-        env:
-          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-        run: |
-          if [ -z "$KEY" ]; then
-            echo "::error::The TAURI_SIGNING_PRIVATE_KEY secret is missing. Run scripts/setup-updates.ps1 once (see RELEASING.md)."
-            exit 1
-          fi
-          if [ -z "$(node -p "require('./tauri.conf.json').plugins.updater.pubkey")" ]; then
-            echo "::error::plugins.updater.pubkey in tauri.conf.json is empty. Run scripts/setup-updates.ps1 once and commit the change."
-            exit 1
-          fi
+        with:
+          persist-credentials: false
 
       - name: Install Linux build packages
-        if: matrix.platform == 'ubuntu-22.04'
+        if: matrix.platform == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
       - uses: actions/setup-node@v4
         with:
@@ -66,26 +86,99 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: ${{ matrix.rust-targets }}
 
       - uses: swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
-      - name: Install front-end packages
-        run: npm ci --prefix ui
-
-      - uses: tauri-apps/tauri-action@v0
+      - name: Stamp and build the front end
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.version.outputs.number }}
+        shell: bash
+        run: |
+          node ui/scripts/set-version.mjs "$VERSION"
+          npm --prefix ui ci
+          npm --prefix ui run build
+
+      - name: Build installers and sign updates
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          BUNDLES: ${{ matrix.bundles }}
+          APPIMAGE_EXTRACT_AND_RUN: '1'
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [[ -z "$TAURI_SIGNING_PRIVATE_KEY" ]]; then
+            echo "::error::Missing TAURI_SIGNING_PRIVATE_KEY. See RELEASING.md."
+            exit 1
+          fi
+          node ui/node_modules/@tauri-apps/cli/tauri.js build --ci \
+            --config tauri.release.conf.json --target "$TARGET" --bundles "$BUNDLES" -- --locked
+
+      - uses: actions/upload-artifact@v4
         with:
-          tauriScript: node ui/node_modules/@tauri-apps/cli/tauri.js
-          args: --config tauri.release.conf.json ${{ matrix.args }}
-          tagName: v__VERSION__
-          releaseName: GitCraft v__VERSION__
-          releaseBody: |
-            Download the installer for your system below. Copies of GitCraft that are already installed will offer this update by themselves.
-          releaseDraft: true
-          prerelease: false
-          includeUpdaterJson: true
-          updaterJsonPreferNsis: true
+          name: release-${{ matrix.platform }}
+          path: |
+            target/${{ matrix.target }}/release/bundle/*/*-setup.exe
+            target/${{ matrix.target }}/release/bundle/*/*.msi
+            target/${{ matrix.target }}/release/bundle/*/*.dmg
+            target/${{ matrix.target }}/release/bundle/*/*.app.tar.gz
+            target/${{ matrix.target }}/release/bundle/*/*.AppImage
+            target/${{ matrix.target }}/release/bundle/*/*.deb
+            target/${{ matrix.target }}/release/bundle/*/*.rpm
+            target/${{ matrix.target }}/release/bundle/*/*.sig
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+          overwrite: true
+
+  publish:
+    needs: [version, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: bundles
+      - name: Prepare installers and the update manifest
+        env:
+          VERSION: ${{ needs.version.outputs.number }}
+        run: node scripts/release-assets.mjs "$VERSION" "$GITHUB_REPOSITORY"
+      - name: Publish the complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.number }}
+        shell: bash
+        run: |
+          tag="v$VERSION"
+          if release=$(gh release view "$tag" --json isDraft,targetCommitish 2>/dev/null); then
+            if [[ $(jq -r .targetCommitish <<<"$release") != "$GITHUB_SHA" ]]; then
+              echo "::error::Release $tag already belongs to a different commit."
+              exit 1
+            fi
+            if [[ $(jq -r .isDraft <<<"$release") != true ]]; then
+              echo "Release $tag is already published."
+              exit 0
+            fi
+          else
+            gh release create "$tag" --draft --target "$GITHUB_SHA" --title "GitCraft $tag" --generate-notes
+          fi
+          gh release upload "$tag" release-assets/* --clobber
+
+          # An older run retried after a newer release must never move the update feed back.
+          published=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name')
+          newest=$(printf '%s\n' "$published" "$tag" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+          latest=false
+          if [[ "$newest" == "$tag" ]]; then latest=true; fi
+          gh release edit "$tag" --draft=false --latest="$latest"

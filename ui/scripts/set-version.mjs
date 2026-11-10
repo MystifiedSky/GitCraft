@@ -1,4 +1,4 @@
-// Set the app version everywhere it is written: tauri.conf.json, Cargo.toml and ui/package.json.
+// Keep the app manifests and lockfiles on the same version for locked builds.
 // Usage (from app/):  npm --prefix ui run version:set -- 0.2.0
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -19,12 +19,20 @@ const json = (file, edit) => {
 };
 json("tauri.conf.json", (c) => (c.version = version));
 json("ui/package.json", (c) => (c.version = version));
+json("ui/package-lock.json", (c) => {
+  c.version = version;
+  c.packages[""].version = version;
+});
 
 const cargo = join(app, "Cargo.toml");
 const text = readFileSync(cargo, "utf8");
 // Only the [package] version (the first `version =` line in the file).
 writeFileSync(cargo, text.replace(/^version = ".*"$/m, `version = "${version}"`));
 
-console.log(`Version set to ${version}. Next: build once (cargo build) so Cargo.lock updates, commit, then:`);
-console.log(`  git tag v${version}`);
-console.log(`  git push origin main v${version}`);
+const lock = join(app, "Cargo.lock");
+const lockText = readFileSync(lock, "utf8");
+const rootPackage = /(^\[\[package\]\]\r?\nname = "gitcraft"\r?\nversion = ")[^"\r\n]+/m;
+if (!rootPackage.test(lockText)) throw new Error("Missing GitCraft package in Cargo.lock");
+writeFileSync(lock, lockText.replace(rootPackage, (_, start) => start + version));
+
+console.log(`Version set to ${version}.`);
