@@ -445,7 +445,8 @@ pub fn status(dir: &Path) -> WorkStatus {
     // -uall = untracked files inside untracked folders; --find-renames=50% = rename detection at libgit2's
     // default similarity, whatever status.renames says in the person's Git config. libgit2 re-reads the index
     // but only writes it back with UPDATE_INDEX (0x2000), which the original doesn't pass: --no-optional-locks.
-    let o = run(dir, &["--no-optional-locks", "status", "--porcelain=v1", "-z", "-uall", "--find-renames=50%"]);
+    let renames = format!("--find-renames={}%", crate::metrics::STATUS_RENAME_THRESHOLD);
+    let o = run(dir, &["--no-optional-locks", "status", "--porcelain=v1", "-z", "-uall", &renames]);
     let mut parts = o.stdout.split('\0').peekable();
     while let Some(entry) = parts.next() {
         if entry.len() < 4 {

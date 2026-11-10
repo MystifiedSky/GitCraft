@@ -136,6 +136,7 @@ export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: strin
         handle={handle}
       />
     );
+  else if (lines.isError) body = <Note error>{String(lines.error)}</Note>;
   else
     body = (
       <HunkView
@@ -144,7 +145,7 @@ export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: strin
         lines={lines.data ?? []}
         loading={lines.isLoading}
         wordWrap={set.wordWrap}
-        actions={(canStage || canUnstage) && !set.ignoreWhitespace}
+        actions={(canStage || canUnstage || target.source.kind === "Commit") && !set.ignoreWhitespace}
         scrollRef={hunkScroll}
       />
     );
@@ -343,7 +344,7 @@ function HunkView({
           <div key={hi} data-hunk className="mb-2">
             <div className="sticky top-0 z-10 flex items-center gap-2 h-[28px] px-3 bg-panel2 border-y border-white/5 font-sans">
               <span className="text-[11.5px] text-fg2 truncate flex-1 mono">{h.header}</span>
-              {actions && !staged && (
+              {actions && target.source.kind === "Unstaged" && (
                 <>
                   <Button size="sm" variant="danger" className="h-[20px] text-[11px]" onClick={() => run("discard", hi, n ? picked : null)}>
                     {n ? `Discard ${n} Line${n === 1 ? "" : "s"}` : "Discard Hunk"}
@@ -353,7 +354,7 @@ function HunkView({
                   </Button>
                 </>
               )}
-              {target.source.kind === "Commit" && (
+              {actions && target.source.kind === "Commit" && (
                 <Button
                   size="sm"
                   className="h-[20px] text-[11px]"

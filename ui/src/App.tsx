@@ -69,6 +69,8 @@ function RepoScreen({ tab, active }: { tab: Tab; active: boolean }) {
   const repo = q.isError ? undefined : q.data;
   const ui = s.ui[tab.id];
   const set = s.settings;
+  const leftPanelRef = useRef<HTMLDivElement>(null);
+  const rightPanelRef = useRef<HTMLDivElement>(null);
   const [terminalOpened, setTerminalOpened] = useState(false);
   useEffect(() => {
     if (active && set.showTerminal) setTerminalOpened(true);
@@ -82,16 +84,17 @@ function RepoScreen({ tab, active }: { tab: Tab; active: boolean }) {
       <div className="flex-1 flex min-h-0">
         {set.showLeft && !(viewing && !peek) ? (
           <>
-            <div style={{ width: set.leftWidth }} className="shrink-0 min-w-0">
+            <div ref={leftPanelRef} style={{ width: set.leftWidth, minWidth: 200 }} className="shrink min-w-0">
               <LeftPanel repo={repo} tabId={tab.id} onSelectSha={selectSha} />
             </div>
-            <Resizer onDrag={(dx) => s.setSettings({ leftWidth: clamp(useStore.getState().settings.leftWidth + dx, 180, 600) })} />
+            <Resizer onDrag={(dx) => s.setSettings({ leftWidth: clamp((leftPanelRef.current?.offsetWidth ?? useStore.getState().settings.leftWidth) + dx, 200, 600) })} />
           </>
         ) : (
           // Like the original: while a file is open (or the panel is hidden) the left panel shrinks to icons.
           <LeftStrip repo={repo} onExpand={() => (set.showLeft ? setPeek(true) : s.setSettings({ showLeft: true }))} />
         )}
-        <div className="flex-1 min-w-[160px] flex flex-col min-h-0">
+        {/* Reserve readable graph space; side panels yield on smaller windows. */}
+        <div style={{ minWidth: "min(440px, calc(100% - 504px))" }} className="flex-1 min-w-[160px] flex flex-col min-h-0">
           <div className="flex-1 min-h-0">
           {q.isError && (
             <div className="h-full flex flex-col items-center justify-center gap-3 text-fg2 px-6 text-center">
@@ -128,8 +131,8 @@ function RepoScreen({ tab, active }: { tab: Tab; active: boolean }) {
         </div>
         {set.showRight && repo && (
           <>
-            <Resizer onDrag={(dx) => s.setSettings({ rightWidth: clamp(useStore.getState().settings.rightWidth - dx, 260, 640) })} />
-            <div style={{ width: set.rightWidth }} className="shrink-0 min-w-0">
+            <Resizer onDrag={(dx) => s.setSettings({ rightWidth: clamp((rightPanelRef.current?.offsetWidth ?? useStore.getState().settings.rightWidth) - dx, 300, 640) })} />
+            <div ref={rightPanelRef} style={{ width: set.rightWidth, minWidth: 300 }} className="shrink min-w-0">
               <RightPanel repo={repo} tabId={tab.id} />
             </div>
           </>

@@ -6,56 +6,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { RepoView } from "@/lib/api";
 import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
-import { act } from "@/lib/repo";
+import { act, refresh } from "@/lib/repo";
 import { Button } from "./ui/button";
 import { cn } from "@/lib/utils";
 
-type Segment = { kind: "common"; lines: string[] } | { kind: "conflict"; ours: string[]; base: string[]; theirs: string[]; oursMark: string; theirsMark: string };
-
-/** Split a file with conflict markers into shared text and conflict chunks. */
-export function parseConflicts(text: string): Segment[] {
-  const lines = text.replace(/\r\n/g, "\n").split("\n");
-  if (lines[lines.length - 1] === "") lines.pop();
-  const out: Segment[] = [];
-  let common: string[] = [];
-  let i = 0;
-  while (i < lines.length) {
-    if (lines[i].startsWith("<<<<<<<")) {
-      if (common.length) out.push({ kind: "common", lines: common });
-      common = [];
-      const oursMark = lines[i];
-      const ours: string[] = [];
-      const base: string[] = [];
-      const theirs: string[] = [];
-      let part: string[] = ours;
-      i++;
-      let theirsMark = ">>>>>>>";
-      while (i < lines.length) {
-        const l = lines[i];
-        if (l.startsWith("|||||||")) part = base;
-        else if (l.startsWith("=======") && part !== theirs) part = theirs;
-        else if (l.startsWith(">>>>>>>")) {
-          theirsMark = l;
-          break;
-        } else part.push(l);
-        i++;
-      }
-      out.push({ kind: "conflict", ours, base, theirs, oursMark, theirsMark });
-      i++;
-    } else {
-      common.push(lines[i]);
-      i++;
-    }
-  }
-  if (common.length) out.push({ kind: "common", lines: common });
-  return out;
-}
-
-interface Pick {
-  a: boolean[];
-  b: boolean[];
-  touched: boolean;
-}
+import { conflictOutput, hasConflictMarkers, parseConflicts, type ConflictPick as Pick, type Segment } from "@/lib/conflict";
+export { parseConflicts } from "@/lib/conflict";
 
 /** Merge conflict tool: A (current) and B (incoming) on top, Output below, like the original. */
 export function ConflictView({ repo, tabId, file }: { repo: RepoView; tabId: string; file: string }) {
@@ -91,35 +47,27 @@ export function ConflictView({ repo, tabId, file }: { repo: RepoView; tabId: str
     setPicks(next);
   };
 
-  // Output: shared text plus, for each chunk, the taken A lines then the taken B lines.
-  // Chunks nobody has touched yet stay as conflict markers.
-  const built = useMemo(() => {
-    const out: string[] = [];
-    segments.forEach((seg, i) => {
-      if (seg.kind === "common") return out.push(...seg.lines);
-      const p = picks[i];
-      if (!p?.touched) {
-        out.push(seg.oursMark, ...seg.ours, "=======", ...seg.theirs, seg.theirsMark);
-        return;
-      }
-      seg.ours.forEach((l, k) => p.a[k] && out.push(l));
-      seg.theirs.forEach((l, k) => p.b[k] && out.push(l));
-    });
-    return out.join("\n") + "\n";
-  }, [segments, picks]);
+  const built = useMemo(() => conflictOutput(segments, picks, info?.working ?? ""), [segments, picks, info?.working]);
   const output = manual ?? built;
-  const unresolved = chunks.filter(({ i }) => !picks[i]?.touched).length;
-  const allDone = manual !== null || unresolved === 0;
+  const unresolved = manual === null
+    ? chunks.filter(({ i }) => !picks[i]?.touched).length
+    : parseConflicts(output).filter((seg) => seg.kind === "conflict").length;
+  const allDone = !hasConflictMarkers(output);
 
   const save = async () => {
-    const text = crlf ? output.replace(/\n/g, "\r\n") : output;
-    if (allDone) {
-      const ok = await act(repo.path, { type: "saveResolved", file, content: text });
-      if (ok) s.setUi(tabId, { conflict: null });
-    } else {
-      // Like "Create Conflict Chunks": keep markers for the chunks not decided yet.
-      await api.saveFile(repo.path, file, text);
-      s.toast(true, `Saved ${file}; ${unresolved} conflict${unresolved === 1 ? "" : "s"} still to resolve`);
+    const normalized = output.replace(/\r\n/g, "\n");
+    const text = crlf ? normalized.replace(/\n/g, "\r\n") : normalized;
+    try {
+      if (allDone) {
+        const ok = await act(repo.path, { type: "saveResolved", file, content: text });
+        if (ok) s.setUi(tabId, { conflict: null });
+      } else {
+        await api.saveFile(repo.path, file, text);
+        await refresh(repo.path);
+        s.toast(true, `Saved ${file}; conflict markers remain to resolve`);
+      }
+    } catch (e) {
+      s.toast(false, String(e));
     }
   };
 
@@ -134,6 +82,7 @@ export function ConflictView({ repo, tabId, file }: { repo: RepoView; tabId: str
   const close = () => s.setUi(tabId, { conflict: null });
 
   if (q.isLoading) return <div className="p-4 text-fg3 text-[13px]">Loading conflict…</div>;
+  if (q.isError) return <div className="p-4 text-[#ef7a76] text-[13px]">{String(q.error)}</div>;
   if (!info) return null;
 
   const header = (
@@ -234,7 +183,7 @@ export function ConflictView({ repo, tabId, file }: { repo: RepoView; tabId: str
           <span className="font-bold" style={{ color: m.conflict_output }}>
             Output
           </span>
-          <span className="text-fg3 flex-1">{manual !== null ? "edited by hand" : unresolved ? `${unresolved} conflict${unresolved === 1 ? "" : "s"} left` : "all conflicts decided"}</span>
+          <span className="text-fg3 flex-1">{!allDone ? (unresolved ? `${unresolved} conflict${unresolved === 1 ? "" : "s"} left` : "conflict markers remain") : manual !== null ? "edited by hand" : "all conflicts decided"}</span>
           <Button
             size="sm"
             variant="ai"

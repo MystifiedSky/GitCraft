@@ -28,3 +28,82 @@ export function conflictTarget(repo: RepoView, base: string, excluded: string, e
   return undefined;
 }
 
+
+export type Segment =
+  | { kind: "common"; lines: string[] }
+  | { kind: "conflict"; ours: string[]; base: string[]; theirs: string[]; oursMark: string; theirsMark: string; raw: string[] };
+
+export interface ConflictPick {
+  a: boolean[];
+  b: boolean[];
+  touched: boolean;
+}
+
+/** Recognize complete Git conflict blocks; incomplete or ordinary marker-like text stays intact. */
+export function parseConflicts(text: string): Segment[] {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  if (lines[lines.length - 1] === "") lines.pop();
+  const out: Segment[] = [];
+  let common: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const opening = /^(<{7,})(?: .*)?$/.exec(lines[i]);
+    if (!opening) {
+      common.push(lines[i++]);
+      continue;
+    }
+    const size = opening[1].length;
+    const marker = (line: string, char: string) => line === char.repeat(size) || line.startsWith(char.repeat(size) + " ");
+    const ours: string[] = [];
+    const base: string[] = [];
+    const theirs: string[] = [];
+    let part = ours;
+    let separator = false;
+    let baseSeen = false;
+    let end = i + 1;
+    for (; end < lines.length; end++) {
+      const line = lines[end];
+      if (marker(line, "<")) break; // malformed/nested block: never discard its contents
+      if (marker(line, ">")) break;
+      if (!separator && !baseSeen && marker(line, "|")) {
+        baseSeen = true;
+        part = base;
+      } else if (!separator && line === "=".repeat(size)) {
+        separator = true;
+        part = theirs;
+      } else part.push(line);
+    }
+    if (end >= lines.length || !separator || !marker(lines[end], ">")) {
+      common.push(lines[i++]);
+      continue;
+    }
+    if (common.length) out.push({ kind: "common", lines: common });
+    common = [];
+    out.push({ kind: "conflict", ours, base, theirs, oursMark: lines[i], theirsMark: lines[end], raw: lines.slice(i, end + 1) });
+    i = end + 1;
+  }
+  if (common.length) out.push({ kind: "common", lines: common });
+  return out;
+}
+
+/** Untouched chunks retain their exact marker labels and diff3 base; don't invent a final newline. */
+export function conflictOutput(segments: Segment[], picks: Record<number, ConflictPick>, working: string): string {
+  const out: string[] = [];
+  segments.forEach((seg, i) => {
+    if (seg.kind === "common") {
+      out.push(...seg.lines);
+    } else {
+      const p = picks[i];
+      if (!p?.touched) out.push(...seg.raw);
+      else {
+        out.push(...seg.ours.filter((_, k) => p.a[k]), ...seg.theirs.filter((_, k) => p.b[k]));
+      }
+    }
+  });
+  return out.join("\n") + (out.length && working.endsWith("\n") ? "\n" : "");
+}
+
+/** Even an incomplete marker block must not be automatically staged as resolved. */
+export function hasConflictMarkers(text: string): boolean {
+  return /^(?:<{7,}(?: .*)?|\|{7,}(?: .*)?|={7,}|>{7,}(?: .*)?)\r?$/m.test(text);
+}

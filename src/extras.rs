@@ -6,6 +6,7 @@
 //! - Agents: Claude Code sessions that worked in this repository.
 
 use crate::git;
+use crate::metrics::{MERGE_RENAME_LIMIT, MERGE_RENAME_THRESHOLD, PATCH_START_NUMBER, PATCH_SUBJECT_PREFIX};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -23,12 +24,17 @@ pub fn make_patch(dir: &Path, shas: &[String]) -> Result<String, String> {
     }
     let mut out = String::new();
     let total = shas.len();
+    // FUN_18028d000 uses PATCH, starts at 1, and has no reroll suffix by default.
+    // Override personal format.* settings before adding the series numbering ourselves.
+    let prefix = format!("--subject-prefix={PATCH_SUBJECT_PREFIX}");
+    let start = format!("--start-number={PATCH_START_NUMBER}");
     for (i, sha) in shas.iter().enumerate() {
-        let o = git::run(dir, &["format-patch", "-1", "--stdout", "--binary", sha]);
+        let o = git::run(dir, &["format-patch", "-1", "--stdout", "--binary", &prefix, "--no-numbered", "--no-cover-letter", &start, sha]);
         if !o.ok {
             return Err(o.message());
         }
-        out.push_str(&number_subject(&o.stdout, i + 1, total));
+        // Native indices are one-based: number = i_native - 1 + S, total = N - 1 + S.
+        out.push_str(&number_subject(&o.stdout, i + PATCH_START_NUMBER, total - 1 + PATCH_START_NUMBER));
     }
     Ok(out)
 }
@@ -39,14 +45,14 @@ pub fn number_subject(patch: &str, n: usize, total: usize) -> String {
     if total <= 1 {
         return patch.to_string();
     }
-    patch.replacen("Subject: [PATCH] ", &format!("Subject: [PATCH {n}/{total}] "), 1)
+    patch.replacen(
+        &format!("Subject: [{PATCH_SUBJECT_PREFIX}] "),
+        &format!("Subject: [{PATCH_SUBJECT_PREFIX} {n}/{total}] "),
+        1,
+    )
 }
 
-/// libgit2's merge defaults (nodegit.node 0x180296e60): find renames on, similarity threshold 50 %,
-/// rename limit from merge.renamelimit, else diff.renamelimit, else 1000.
-const MERGE_RENAME_THRESHOLD: u32 = 50;
-const MERGE_RENAME_LIMIT: u32 = 1000;
-
+/// nodegit.node FUN_180296e60: zero merge limit selects diff; nonpositive result selects 1000.
 fn rename_limit(dir: &Path) -> u32 {
     let read = |key: &str| -> i32 {
         let o = git::run(dir, &["config", "--int", "--get", key]);
@@ -259,9 +265,19 @@ mod tests {
         g(&["commit", "-q", "-am", "main change"]);
         assert_eq!(conflict_check(&d, Some("side")).files, vec!["a.txt".to_string()]);
 
+        // Personal email settings must not override the recovered default subject rules.
+        g(&["config", "format.subjectPrefix", "CUSTOM"]);
+        g(&["config", "format.numbered", "true"]);
+        g(&["config", "format.coverLetter", "true"]);
         // Patch of a commit, applied as a commit on another branch.
         let patch = make_patch(&d, &[side.clone()]).unwrap();
         assert!(patch.starts_with("From "));
+        assert!(patch.lines().any(|l| l == "Subject: [PATCH] side change"), "{patch}");
+        assert_eq!(patch.lines().filter(|l| l.starts_with("Subject: ")).count(), 1);
+        let series = make_patch(&d, &[side.clone(), side.clone()]).unwrap();
+        assert!(series.lines().any(|l| l == "Subject: [PATCH 1/2] side change"), "{series}");
+        assert!(series.lines().any(|l| l == "Subject: [PATCH 2/2] side change"), "{series}");
+        assert_eq!(series.lines().filter(|l| l.starts_with("Subject: ")).count(), 2);
         let pf = d.join("..").join(format!("gitcraft-extras-{}.patch", std::process::id()));
         fs::write(&pf, patch).unwrap();
         g(&["checkout", "-q", "-b", "other", "main~1"]);

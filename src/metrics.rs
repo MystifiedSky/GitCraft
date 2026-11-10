@@ -57,6 +57,16 @@ pub const BINARY_CHECK_BYTES: usize = 8000;
 /// Text test (nodegit.node 0x1802e5380): binary when (printable >> 7) < non-printable,
 /// i.e. more than one control character per 128 printable ones.
 pub const BINARY_PRINTABLE_SHIFT: u32 = 7;
+/// nodegit.node FUN_1802807a0: an unset/out-of-range rename similarity becomes 50%.
+/// Used by git_status_list_new (0x1802d7b00) through git_diff_find_similar.
+pub const STATUS_RENAME_THRESHOLD: u32 = 50;
+/// nodegit.node FUN_180296e60: merge rename similarity 50%, default candidate limit 1000.
+/// A positive configured limit replaces this default; it is not a hard maximum.
+pub const MERGE_RENAME_THRESHOLD: u32 = 50;
+pub const MERGE_RENAME_LIMIT: u32 = 1000;
+/// nodegit.node FUN_18028d000: default email prefix and first sequence number.
+pub const PATCH_SUBJECT_PREFIX: &str = "PATCH";
+pub const PATCH_START_NUMBER: usize = 1;
 /// timeSince (render.bundle.js): unit lengths in seconds, largest first, with the colour of each.
 pub const TIME_YEAR_SECS: u32 = 31556736;
 pub const TIME_MONTH_SECS: u32 = 2630016;
