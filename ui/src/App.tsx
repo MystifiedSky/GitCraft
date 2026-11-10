@@ -6,7 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import { ChevronRight } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
-import { DEFAULT_METRICS, DEFAULT_SETTINGS, newId, tabUi, useStore, type Profile, type Settings, type Tab } from "@/lib/store";
+import { DEFAULT_METRICS, DEFAULT_SETTINGS, newId, tabUi, useStore, usePanelStore, type Profile, type Settings, type Tab } from "@/lib/store";
 import { act, openRepoPath, promptBranch, queryClient, refresh, repoData, useRepo } from "@/lib/repo";
 import { resetZoom, setZoom, stepZoom } from "@/lib/zoom";
 import { MenuBar, TitleBar } from "./components/TitleBar";
@@ -31,7 +31,7 @@ import { LaunchpadScreen, StartScreen } from "./components/StartScreen";
 import { Dialogs, Toasts } from "./components/Dialogs";
 
 export default function App() {
-  const s = useStore();
+  const s = usePanelStore();
   const active = s.tabs.find((t) => t.id === s.activeId) ?? s.tabs[0];
   useStartup();
   useShortcuts();
@@ -46,7 +46,12 @@ export default function App() {
       <TitleBar />
       <MenuBar />
       <TabsBar />
-      {active.kind === "repo" ? <RepoScreen key={active.id} tab={active} /> : active.kind === "launchpad" ? <LaunchpadScreen /> : <StartScreen />}
+      {s.tabs.filter((tab) => tab.kind === "repo").map((tab) => (
+        <div key={tab.id} data-active-repository={tab.id === active.id ? "true" : undefined} className={tab.id === active.id ? "flex-1 flex flex-col min-h-0" : "hidden"}>
+          <RepoScreen tab={tab} active={tab.id === active.id} />
+        </div>
+      ))}
+      {active.kind === "launchpad" ? <LaunchpadScreen /> : active.kind === "start" ? <StartScreen /> : null}
       <StatusBar />
       <Dialogs />
       <CommandPalette />
@@ -55,15 +60,19 @@ export default function App() {
   );
 }
 
-function RepoScreen({ tab }: { tab: Tab }) {
-  const s = useStore();
+function RepoScreen({ tab, active }: { tab: Tab; active: boolean }) {
+  const s = usePanelStore();
   const q = useRepo(tab.path, tab.id);
   const viewing = !!(s.ui[tab.id]?.diff || s.ui[tab.id]?.history || s.ui[tab.id]?.conflict || s.ui[tab.id]?.rebase);
   const [peek, setPeek] = useState(false);
   useEffect(() => setPeek(false), [viewing]);
-  const repo = q.data;
+  const repo = q.isError ? undefined : q.data;
   const ui = s.ui[tab.id];
   const set = s.settings;
+  const [terminalOpened, setTerminalOpened] = useState(false);
+  useEffect(() => {
+    if (active && set.showTerminal) setTerminalOpened(true);
+  }, [active, set.showTerminal]);
 
   const selectSha = (sha: string) => s.setUi(tab.id, { selection: { type: "commit", sha }, diff: null });
 
@@ -111,7 +120,11 @@ function RepoScreen({ tab }: { tab: Tab }) {
               <GraphView repo={repo} tabId={tab.id} />
             ))}
           </div>
-          {set.showTerminal && repo && <TerminalPanel cwd={repo.path} />}
+          {terminalOpened && repo && (
+            <div className={set.showTerminal ? "shrink-0" : "hidden"}>
+              <TerminalPanel cwd={repo.path} visible={active && set.showTerminal} />
+            </div>
+          )}
         </div>
         {set.showRight && repo && (
           <>
@@ -262,9 +275,15 @@ function useAutoFetch() {
   const warned = useRef(new Set<string>());
   useEffect(() => {
     if (!minutes || screenshot) return;
+    let running = false;
+    let cancelled = false;
     const id = window.setInterval(async () => {
+      if (running || cancelled || useStore.getState().busy || useStore.getState().job) return;
+      running = true;
+      try {
       const paths = [...new Set(useStore.getState().tabs.filter((t) => t.kind === "repo" && t.path).map((t) => t.path!))];
       for (const p of paths) {
+        if (cancelled) break;
         if (!repoData(p)?.remotes.length) continue;
         const r = await api.run(p, { type: "autoFetch", prune }).catch(() => ({ ok: false, message: "Autofetch failed" }));
         if (r.ok) {
@@ -275,8 +294,14 @@ function useAutoFetch() {
           useStore.getState().toast(false, r.message);
         }
       }
+      } finally {
+        running = false;
+      }
     }, minutes * 60_000);
-    return () => clearInterval(id);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
   }, [minutes, prune, screenshot]);
 }
 
@@ -312,12 +337,13 @@ function useWatchers() {
 function useShortcuts() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.isComposing) return;
       const st = useStore.getState();
       const tab = st.tabs.find((t) => t.id === st.activeId);
       const path = tab?.kind === "repo" ? tab.path : undefined;
       const mod = e.ctrlKey || e.metaKey;
       const k = e.key.toLowerCase();
-      const typing = (e.target as HTMLElement)?.closest?.("input, textarea, select") != null;
+      const typing = (e.target as HTMLElement)?.closest?.("input, textarea, select, [contenteditable='true'], [role='textbox'], .xterm") != null;
       const run = (f: () => void) => {
         e.preventDefault();
         f();
@@ -325,7 +351,7 @@ function useShortcuts() {
 
       // Every Ctrl / Alt / F-key shortcut comes from the command list (and the person's own keys).
       if (dispatchKey(e, typing)) return;
-      if (typing || mod || e.altKey) return;
+      if (typing || mod || e.altKey || st.palette) return;
       if (e.key === "Escape" && tab) {
         const u = tabUi(tab.id);
         if (st.dialog) return;

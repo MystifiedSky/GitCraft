@@ -48,10 +48,16 @@ export function runInTerminal(command: string, title: string) {
 }
 
 /** In-app terminal under the graph, with terminal tabs (Ctrl+` toggles it). */
-export function TerminalPanel({ cwd }: { cwd: string }) {
+export function TerminalPanel({ cwd, visible }: { cwd: string; visible: boolean }) {
   const s = useStore();
   const [tabs, setTabs] = useState<Tab[]>([{ key: 1, id: null, title: "Terminal 1" }]);
   const [active, setActive] = useState(1);
+  useEffect(() => {
+    if (visible && !tabs.length) {
+      setTabs([{ key: 1, id: null, title: "Terminal 1" }]);
+      setActive(1);
+    }
+  }, [visible, tabs.length]);
   const add = () => {
     const key = Math.max(0, ...tabs.map((t) => t.key)) + 1;
     setTabs([...tabs, { key, id: null, title: `Terminal ${key}` }]);
@@ -59,6 +65,7 @@ export function TerminalPanel({ cwd }: { cwd: string }) {
   };
   useEffect(() => {
     const on = (e: Event) => {
+      if (!visible) return;
       const { command, title } = (e as CustomEvent<{ command: string; title: string }>).detail;
       setTabs((all) => {
         const key = Math.max(0, ...all.map((t) => t.key)) + 1;
@@ -68,13 +75,13 @@ export function TerminalPanel({ cwd }: { cwd: string }) {
     };
     window.addEventListener("gitcraft-terminal-run", on);
     return () => window.removeEventListener("gitcraft-terminal-run", on);
-  }, []);
+  }, [visible]);
   const close = (key: number) => {
     const t = tabs.find((x) => x.key === key);
     if (t?.id) invoke("term_close", { id: t.id });
     const rest = tabs.filter((x) => x.key !== key);
-    if (!rest.length) return s.setSettings({ showTerminal: false });
     setTabs(rest);
+    if (!rest.length) return s.setSettings({ showTerminal: false });
     if (active === key) setActive(rest[rest.length - 1].key);
   };
 
@@ -124,7 +131,7 @@ export function TerminalPanel({ cwd }: { cwd: string }) {
             key={t.key}
             cwd={cwd}
             run={t.run}
-            visible={active === t.key}
+            visible={visible && active === t.key}
             onReady={(id) => setTabs((all) => all.map((x) => (x.key === t.key ? { ...x, id } : x)))}
             onExit={() => close(t.key)}
           />
@@ -168,20 +175,34 @@ function TermView({ cwd, run, visible, onReady, onExit }: { cwd: string; run?: s
       /* not visible yet */
     }
     let disposed = false;
+    let runTimer: ReturnType<typeof setTimeout> | undefined;
+    const earlyData: { id: number; data: string }[] = [];
+    const earlyExits = new Set<number>();
     const unData = listen<{ id: number; data: string }>("term-data", (e) => {
       if (e.payload.id === idRef.current) t.write(e.payload.data);
+      else if (idRef.current === null && !disposed) earlyData.push(e.payload);
     });
     const unExit = listen<number>("term-exit", (e) => {
       if (e.payload === idRef.current) cb.current.onExit();
+      else if (idRef.current === null && !disposed) earlyExits.add(e.payload);
     });
-    invoke<number>("term_open", { cwd, cols: t.cols, rows: t.rows, shell: pref.termShell || null })
-      .then((id) => {
+    // Register listeners before starting the shell, then replay output that arrived before its id.
+    Promise.all([unData, unExit])
+      .then(async () => {
+        if (disposed) return;
+        const id = await invoke<number>("term_open", { cwd, cols: t.cols, rows: t.rows, shell: pref.termShell || null });
         if (disposed) return invoke("term_close", { id });
         idRef.current = id;
+        for (const event of earlyData) if (event.id === id) t.write(event.data);
+        earlyData.length = 0;
         cb.current.onReady(id);
-        if (run) setTimeout(() => invoke("term_write", { id, data: run + "\r" }), 700);
+        if (earlyExits.has(id)) return cb.current.onExit();
+        earlyExits.clear();
+        if (run) runTimer = setTimeout(() => {
+          if (!disposed) invoke("term_write", { id, data: run + "\r" }).catch((e) => t.write(`\r\n${e}\r\n`));
+        }, 700);
       })
-      .catch((e) => t.write(`\r\nCould not start a shell: ${e}\r\n`));
+      .catch((e) => { if (!disposed) t.write(`\r\nCould not start a shell: ${e}\r\n`); });
     const input = t.onData((d) => idRef.current && invoke("term_write", { id: idRef.current, data: d }));
     const resize = t.onResize(({ cols, rows }) => idRef.current && invoke("term_resize", { id: idRef.current, cols, rows }));
     const ro = new ResizeObserver(() => {
@@ -194,6 +215,7 @@ function TermView({ cwd, run, visible, onReady, onExit }: { cwd: string; run?: s
     ro.observe(host.current!);
     return () => {
       disposed = true;
+      clearTimeout(runTimer);
       ro.disconnect();
       input.dispose();
       resize.dispose();

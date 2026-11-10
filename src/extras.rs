@@ -48,15 +48,15 @@ const MERGE_RENAME_THRESHOLD: u32 = 50;
 const MERGE_RENAME_LIMIT: u32 = 1000;
 
 fn rename_limit(dir: &Path) -> u32 {
-    for key in ["merge.renamelimit", "diff.renamelimit"] {
-        let o = git::run(dir, &["config", "--get", key]);
-        if let Ok(n) = o.stdout.trim().parse::<u32>() {
-            if n > 0 {
-                return n;
-            }
-        }
-    }
-    MERGE_RENAME_LIMIT
+    let read = |key: &str| -> i32 {
+        let o = git::run(dir, &["config", "--int", "--get", key]);
+        if o.ok { o.stdout.trim().parse().unwrap_or(0) } else { 0 }
+    };
+    // 0x180296e60 falls back to diff only when merge is zero. A negative merge
+    // value goes straight to the default; it must not select diff.renamelimit.
+    let merge = read("merge.renamelimit");
+    let limit = if merge == 0 { read("diff.renamelimit") } else { merge };
+    if limit > 0 { limit as u32 } else { MERGE_RENAME_LIMIT }
 }
 
 /// Apply a patch file: mailbox patches become commits (`git am`), plain diffs change the working folder.
@@ -271,6 +271,28 @@ mod tests {
         fs::write(d.join("a.txt"), "wip\n").unwrap();
         assert!(make_patch(&d, &[]).unwrap().contains("+wip"));
         let _ = fs::remove_file(&pf);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn rename_limit_uses_recovered_zero_and_negative_rules() {
+        let d = std::env::temp_dir().join(format!("gitcraft-merge-limits-{}", std::process::id()));
+        fs::create_dir_all(&d).unwrap();
+        let g = |a: &[&str]| assert!(git::run(&d, a).ok, "{a:?}");
+        g(&["init", "-q", "-b", "main"]);
+        // Set both keys so inherited user configuration cannot affect the cases.
+        g(&["config", "merge.renamelimit", "0"]);
+        g(&["config", "diff.renamelimit", "77"]);
+        assert_eq!(rename_limit(&d), 77);
+        g(&["config", "merge.renamelimit", "-1"]);
+        assert_eq!(rename_limit(&d), 1000);
+        g(&["config", "merge.renamelimit", "2k"]);
+        assert_eq!(rename_limit(&d), 2048);
+        g(&["config", "merge.renamelimit", "0"]);
+        g(&["config", "diff.renamelimit", "-1"]);
+        assert_eq!(rename_limit(&d), 1000);
+        g(&["config", "diff.renamelimit", "0"]);
+        assert_eq!(rename_limit(&d), 1000);
         let _ = fs::remove_dir_all(&d);
     }
 

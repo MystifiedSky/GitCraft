@@ -25,6 +25,7 @@ export function GraphView({ repo, tabId }: Props) {
   const hidden = useStore((s) => s.settings.hidden[repo.path]) ?? [];
   const solo = useStore((s) => s.settings.solo[repo.path]) ?? [];
   const setSettings = useStore((s) => s.setSettings);
+  const commitIndex = useMemo(() => new Map(repo.commits.map((c, i) => [c.sha, i])), [repo.commits]);
   const ROW = m.row;
   const NODE = m.node;
   const LANE = m.lane;
@@ -72,7 +73,7 @@ export function GraphView({ repo, tabId }: Props) {
     return map;
   }, [repo, hidden]);
 
-  const headIdx = repo.commits.findIndex((c) => c.sha === repo.head_sha);
+  const headIdx = commitIndex.get(repo.head_sha) ?? -1;
   const headLane = headIdx >= 0 ? repo.graph.rows[headIdx]?.col ?? 0 : 0;
 
   // Search (Ctrl+F)
@@ -98,8 +99,8 @@ export function GraphView({ repo, tabId }: Props) {
       set.add(i);
       const p = repo.commits[i].parents[0];
       if (!p) break;
-      const next = repo.commits.findIndex((c, k) => k > i && c.sha === p);
-      if (next < 0) break;
+      const next = commitIndex.get(p);
+      if (next === undefined || next <= i) break;
       i = next;
     }
     return set;
@@ -157,7 +158,7 @@ export function GraphView({ repo, tabId }: Props) {
   }, [last, repo.has_more, repo.commits.length, lazyLoad]);
 
   // Keep the selected row in view.
-  const selIdx = ui.selection.type === "wip" ? (wip ? 0 : -1) : repo.commits.findIndex((c) => c.sha === (ui.selection as { sha: string }).sha) + off;
+  const selIdx = ui.selection.type === "wip" ? (wip ? 0 : -1) : (commitIndex.get((ui.selection as { sha: string }).sha) ?? -1) + off;
   useEffect(() => {
     const el = scrollRef.current;
     if (!el || selIdx < 0) return;
@@ -183,7 +184,7 @@ export function GraphView({ repo, tabId }: Props) {
           for (const s of res) n.set(s.sha, s);
           return n;
         }),
-      );
+      ).catch(() => undefined);
     }, 80);
     return () => clearTimeout(t);
   }, [first, last, extras.join(), repo.path]);

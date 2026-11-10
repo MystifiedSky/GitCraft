@@ -300,68 +300,112 @@ const KEY_PAGE: Partial<Record<AiSettings["provider"], string>> = {
 export function AiSection() {
   const { set, put, toast } = useSet();
   const ai = { ...DEFAULT_AI, ...set.ai };
-  const upd = (p: Partial<AiSettings>) => put({ ai: { ...ai, ...p } });
+  const upd = (p: Partial<AiSettings>) => {
+    const current = { ...DEFAULT_AI, ...useStore.getState().settings.ai };
+    put({ ai: { ...current, ...p } });
+  };
   const [key, setKey] = useState("");
+  const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
-  const label = { anthropic: "Anthropic", openai: "OpenAI", google: "Google", ollama: "Ollama", custom: "Custom" }[ai.provider];
+  const [result, setResult] = useState<{ config: string; ok: boolean; text: string } | null>(null);
+  const signature = JSON.stringify(ai);
+  const label = { anthropic: "Anthropic", openai: "OpenAI", google: "Google", ollama: "Ollama", custom: "compatible server" }[ai.provider];
+  const optionalKey = ai.provider === "ollama" || ai.provider === "custom";
+  const connection = (a: AiSettings) => ({ endpoint: a.endpoint, defaultModel: a.defaultModel, responseFormat: a.responseFormat, models: a.models });
+  const choose = (provider: AiSettings["provider"], preset?: string) => {
+    const current = { ...DEFAULT_AI, ...useStore.getState().settings.ai };
+    const connections = { ...current.connections, [current.provider]: connection(current) };
+    const saved = connections[provider] ?? { endpoint: "", defaultModel: "", responseFormat: "auto" as const, models: {} };
+    upd({ provider, connections, ...saved, ...(preset ? { endpoint: preset, defaultModel: "", models: {}, responseFormat: "auto" as const } : {}) });
+    setKey("");
+    setResult(null);
+  };
+  const saveKey = async (value: string) => {
+    setSaving(true);
+    setResult(null);
+    try {
+      await hosting.setSecret(KEY_NAME[ai.provider], value);
+      setKey("");
+      toast(true, value ? "Saved to the system credential store" : "Saved API key removed");
+    } catch (e) {
+      toast(false, String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
   return (
     <>
       <H>AI</H>
-      <Row label="Enable AI" help={ai.enabled ? "AI features like Commit Message Generation, Explain Commits, Compose and Conflict Resolution will be available. Uncheck to disable all AI features." : "AI features disabled. You can re-enable anytime."}>
+      <Note>Use your preferred hosted provider or a local AI server for every AI feature. Set one default model, then optionally choose different models or instructions below.</Note>
+      <Row label="Enable AI" help="Commit and stash messages, commit composition, change explanations, pull request drafts and conflict resolution all use this connection.">
         <Toggle value={ai.enabled} onChange={(v) => upd({ enabled: v })} />
       </Row>
-      <Row label="Provider" help="GitCraft makes requests directly to the selected provider with your own API key. Nothing is sent unless you press an AI button.">
+      <Row label="Provider" help="Requests go directly to this connection when you press an AI button. A local connection keeps your code on your server.">
         <Select
           value={ai.provider}
-          onChange={(v) => upd({ provider: v })}
+          onChange={(v) => choose(v)}
           options={[
             ["anthropic", "Anthropic (Claude)"],
             ["openai", "OpenAI"],
             ["google", "Google (Gemini)"],
-            ["ollama", "Ollama"],
-            ["custom", "<Custom URL> (OpenAI-compatible)"],
+            ["ollama", "Ollama (local AI)"],
+            ["custom", "Local / OpenAI-compatible API"],
           ]}
         />
       </Row>
+      <Row label="Local AI presets" help="Start your local server and load a model, select its preset here, then enter the exact model ID below. Presets reset model overrides for the new server.">
+        <div className="flex gap-2 flex-wrap">
+          <Btn onClick={() => choose("ollama", "http://localhost:11434/v1")}>Ollama</Btn>
+          <Btn onClick={() => choose("custom", "http://localhost:1234/v1")}>LM Studio</Btn>
+          <Btn onClick={() => choose("custom", "http://localhost:8080/v1")}>llama.cpp</Btn>
+        </div>
+      </Row>
       <Row
-        label={ai.provider === "ollama" ? "Authorization Key (Optional)" : "Provider API Key"}
+        label={optionalKey ? "API Key (optional)" : "Provider API Key"}
         help={
           <>
-            {ai.provider === "ollama" ? "You may need this if your Ollama server is behind an authenticated proxy." : "Your API Key used to make the API call. Kept in the system's credential store."}{" "}
+            {optionalKey ? "Leave empty for a local server without authentication, or save a key if your server requires one. Keys stay in the system credential store." : "Your API key stays in the system credential store."}{" "}
             {KEY_PAGE[ai.provider] && (
               <button className="text-link hover:underline" onClick={() => hosting.openUrl(KEY_PAGE[ai.provider]!)}>
-                Generate an API key for {label} here.
+                Get an API key for {label}.
               </button>
             )}
           </>
         }
       >
-        <input type="password" className={cn(field, "flex-1")} placeholder="paste key" value={key} onChange={(e) => setKey(e.target.value)} />
-        <Btn
-          disabled={!key.trim()}
-          onClick={async () => {
-            await hosting.setSecret(KEY_NAME[ai.provider] as "anthropic-key", key.trim()).catch((e) => toast(false, String(e)));
-            setKey("");
-            toast(true, "Saved to the system credential store");
-          }}
-        >
-          Save
-        </Btn>
+        <input type="password" autoComplete="off" aria-label="AI API key" className={cn(field, "flex-1")} placeholder={optionalKey ? "optional key" : "paste key"} value={key} onChange={(e) => setKey(e.target.value)} />
+        <Btn disabled={!key.trim() || saving} onClick={() => void saveKey(key.trim())}>Save</Btn>
+        <Btn disabled={saving} onClick={() => void saveKey("")} title="Remove this provider's key from the credential store">Remove Key</Btn>
       </Row>
       <Row
-        label={ai.provider === "ollama" ? "Ollama URL" : ai.provider === "custom" ? "API Endpoint URL" : `${label} Endpoint URL (optional)`}
-        help={ai.provider === "custom" ? "The full URL of your provider's OpenAI API compatible endpoint" : ai.provider === "ollama" ? "The full URL of your Ollama API (default http://localhost:11434/v1)" : "Most of the time, you don't need to change this."}
+        label="API Endpoint URL"
+        help={ai.provider === "anthropic" ? "Optional API base or full Messages URL. Empty uses Anthropic." : "Enter a server address, a /v1 API base, or the full /chat/completions URL. Empty uses the provider default; a compatible server needs its own URL."}
       >
-        <Text value={ai.endpoint} onSave={(v) => upd({ endpoint: v.trim() })} mono />
+        <Text key={ai.provider} value={ai.endpoint} onSave={(v) => upd({ endpoint: v.trim() })} placeholder={ai.provider === "ollama" ? "http://localhost:11434/v1" : ai.provider === "custom" ? "http://localhost:1234/v1" : "provider default"} mono />
       </Row>
-      <Row label="Test Connection">
+      <Row label="Default Model" help="Used by every feature and Test Connection. Use the model ID from your provider or local server; no fixed model list.">
+        <Text value={ai.defaultModel} placeholder={ai.provider === "anthropic" ? "claude-opus-5-5" : "model ID from your server"} onSave={(v) => upd({ defaultModel: v.trim() })} mono />
+      </Row>
+      {ai.provider !== "anthropic" && (
+        <Row label="Response Mode" help="Automatic tries structured output, then JSON mode, then a JSON prompt only if the server rejects the format. Every mode supports every feature; answers are validated before use.">
+          <Select
+            value={ai.responseFormat}
+            onChange={(v) => upd({ responseFormat: v })}
+            options={[["auto", "Automatic (recommended)"], ["json_schema", "Structured output"], ["json_object", "JSON mode"], ["text", "JSON prompt only (maximum compatibility)"]]}
+          />
+        </Row>
+      )}
+      <Row label="Test Connection" help={result?.config === signature ? result.text : "Tests the default model with the same connection and response mode used by AI features."} error={result?.config === signature && !result.ok ? "Connection test failed. Check the settings above and try again." : undefined}>
         <Btn
-          disabled={testing}
+          disabled={testing || !ai.enabled}
           onClick={async () => {
             setTesting(true);
             try {
-              toast(true, await aiApi.test());
+              const text = await aiApi.test();
+              setResult({ config: signature, ok: true, text });
+              toast(true, text);
             } catch (e) {
+              setResult({ config: signature, ok: false, text: String(e) });
               toast(false, String(e));
             } finally {
               setTesting(false);
@@ -372,17 +416,17 @@ export function AiSection() {
         </Btn>
       </Row>
       <H sub>Global Instructions</H>
-      <Row label="Custom Instructions" help="These instructions apply to all AI features unless overridden below." wide>
+      <Row label="Custom Instructions" help="Applied to every AI feature, together with any feature instructions below." wide>
         <Area value={ai.instructions} onSave={(v) => upd({ instructions: v })} rows={3} />
       </Row>
       {AI_FEATURES.map(([id, title, modelHelp]) => (
         <div key={id}>
           <H sub>{title}</H>
-          <Row label="Model" help={modelHelp + (ai.provider === "anthropic" ? " Empty uses claude-opus-5-5." : " Required for this provider.")}>
-            <Text value={ai.models[id] ?? ""} placeholder={ai.provider === "anthropic" ? "claude-opus-5-5" : "model name"} onSave={(v) => upd({ models: { ...ai.models, [id]: v.trim() } })} mono />
+          <Row label="Model Override (optional)" help={modelHelp + " Leave empty to use the Default Model."}>
+            <Text value={ai.models[id] ?? ""} placeholder={ai.defaultModel || (ai.provider === "anthropic" ? "claude-opus-5-5" : "inherit default model")} onSave={(v) => upd({ models: { ...useStore.getState().settings.ai.models, [id]: v.trim() } })} mono />
           </Row>
           <Row label="Custom Instructions" wide>
-            <Area value={ai.featureInstructions[id] ?? ""} rows={2} onSave={(v) => upd({ featureInstructions: { ...ai.featureInstructions, [id]: v } })} />
+            <Area value={ai.featureInstructions[id] ?? ""} rows={2} onSave={(v) => upd({ featureInstructions: { ...useStore.getState().settings.ai.featureInstructions, [id]: v } })} />
           </Row>
         </div>
       ))}

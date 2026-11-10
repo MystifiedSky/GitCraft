@@ -106,7 +106,7 @@ export function Dialogs() {
       return (
         <Dialog open onClose={close} title={d.title} width={560} footer={<Button variant="primary" onClick={close}>Close</Button>}>
           <div className="text-[13px] text-fg leading-relaxed whitespace-pre-wrap select-text max-h-[60vh] overflow-auto">{d.text}</div>
-          <div className="text-[11.5px] text-fg3 mt-3">Written by Claude using your Anthropic API key. Check anything important.</div>
+          <div className="text-[11.5px] text-fg3 mt-3">Generated using your selected AI connection. Review the result before using it.</div>
         </Dialog>
       );
     case "message":
@@ -1212,12 +1212,12 @@ function WorkspacesDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
-/** GitHub / GitLab tokens and the Anthropic API key, kept in the OS credential store. */
+/** GitHub / GitLab tokens, with a shortcut to shared AI connection preferences. */
 function Integrations() {
   const s = useStore();
   const q = useQuery({ queryKey: ["hostingStatus", s.settings.gitlabHost], queryFn: hostingApi.status });
   const [vals, setVals] = useState<Record<string, string>>({});
-  const save = async (name: "github-token" | "gitlab-token" | "anthropic-key", value: string) => {
+  const save = async (name: "github-token" | "gitlab-token", value: string) => {
     try {
       await hostingApi.setSecret(name, value);
       setVals({ ...vals, [name]: "" });
@@ -1227,7 +1227,7 @@ function Integrations() {
       s.toast(false, String(e));
     }
   };
-  const row = (name: "github-token" | "gitlab-token" | "anthropic-key", label: string, connected: string | null | boolean, error: string | null, help: string) => (
+  const row = (name: "github-token" | "gitlab-token", label: string, connected: string | null | boolean, error: string | null, help: string) => (
     <div className="mb-3">
       <div className="flex items-center gap-2">
         <span className="w-[150px] text-[12.5px] text-fg2 shrink-0">{label}</span>
@@ -1262,7 +1262,7 @@ function Integrations() {
         <span className="w-[150px] text-[12.5px] text-fg2 shrink-0">Self-managed GitLab</span>
         <input className={cn(inputClass, "flex-1")} placeholder="gitlab.example.com (optional)" value={s.settings.gitlabHost} onChange={(e) => s.setSettings({ gitlabHost: e.target.value.trim() })} />
       </div>
-      {row("anthropic-key", "Anthropic API key", st?.ai ?? false, null, "For the AI helpers (commit messages, explanations). Used only when you press an AI button.")}
+      <Button size="sm" onClick={() => s.setDialog({ kind: "prefs", section: "ai" })}>Configure local or hosted AI</Button>
       <div className="text-[11.5px] text-fg3 mb-2">Tokens and keys are stored in the system's credential store, not in GitCraft's settings file.</div>
     </>
   );

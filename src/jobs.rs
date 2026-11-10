@@ -24,6 +24,55 @@ pub fn percent(line: &str) -> Option<u32> {
     digits.parse().ok().filter(|p: &u32| *p <= 100)
 }
 
+/// Git uses CR for progress updates, CRLF on some platforms, and may omit the last newline.
+#[derive(Default)]
+struct ProgressOutput {
+    pending: Vec<u8>,
+    progress: Option<String>,
+    stderr: String,
+}
+
+impl ProgressOutput {
+    fn push(&mut self, bytes: &[u8]) -> Vec<String> {
+        let mut updates = Vec::new();
+        for &b in bytes {
+            if b == b'\r' || b == b'\n' {
+                if !self.pending.is_empty() {
+                    let text = String::from_utf8_lossy(&self.pending).trim().to_string();
+                    self.pending.clear();
+                    updates.push(text.clone());
+                    if b == b'\r' {
+                        self.progress = Some(text);
+                    } else {
+                        self.stderr.push_str(&text);
+                        self.stderr.push('\n');
+                        self.progress = None;
+                    }
+                } else if b == b'\n' {
+                    if let Some(text) = self.progress.take() {
+                        self.stderr.push_str(&text);
+                        self.stderr.push('\n');
+                    }
+                }
+            } else {
+                self.pending.push(b);
+            }
+        }
+        updates
+    }
+
+    fn finish(mut self) -> String {
+        if !self.pending.is_empty() {
+            self.stderr.push_str(&String::from_utf8_lossy(&self.pending));
+            self.stderr.push('\n');
+        } else if let Some(text) = self.progress.take() {
+            self.stderr.push_str(&text);
+            self.stderr.push('\n');
+        }
+        self.stderr
+    }
+}
+
 impl Jobs {
     pub fn set_listener(&self, l: Listener) {
         *self.listener.lock().unwrap() = Some(l);
@@ -47,33 +96,20 @@ impl Jobs {
             s
         });
         let listener = self.listener.lock().unwrap().clone();
-        let mut stderr = String::new();
-        let mut line = Vec::new();
+        let mut output = ProgressOutput::default();
         let mut buf = [0u8; 1024];
         loop {
             let n = match err_pipe.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => n,
             };
-            for &b in &buf[..n] {
-                if b == b'\r' || b == b'\n' {
-                    if !line.is_empty() {
-                        let text = String::from_utf8_lossy(&line).trim().to_string();
-                        if let Some(l) = &listener {
-                            l(id, &text, percent(&text));
-                        }
-                        // Keep the final state of each progress line, not every update.
-                        if b == b'\n' {
-                            stderr.push_str(&text);
-                            stderr.push('\n');
-                        }
-                        line.clear();
-                    }
-                } else {
-                    line.push(b);
+            for text in output.push(&buf[..n]) {
+                if let Some(l) = &listener {
+                    l(id, &text, percent(&text));
                 }
             }
         }
+        let stderr = output.finish();
         let status = child.lock().unwrap().wait();
         self.running.lock().unwrap().remove(id);
         let stdout = out_thread.join().unwrap_or_default();
@@ -103,6 +139,25 @@ mod tests {
         assert_eq!(percent("Receiving objects:  45% (450/1000), 1.2 MiB | 3 MiB/s"), Some(45));
         assert_eq!(percent("Resolving deltas: 100% (20/20), done."), Some(100));
         assert_eq!(percent("remote: Enumerating objects: 5, done."), None);
+    }
+
+    #[test]
+    fn preserves_crlf_and_unterminated_errors() {
+        let mut output = ProgressOutput::default();
+        output.push(b"remote: message\r");
+        output.push(b"\nfatal: authentication failed");
+        assert_eq!(output.finish(), "remote: message\nfatal: authentication failed\n");
+    }
+
+    #[test]
+    fn keeps_only_the_final_progress_update() {
+        let mut output = ProgressOutput::default();
+        assert_eq!(output.push(b"Receiving: 10%\rReceiving: 20%\r"), vec!["Receiving: 10%", "Receiving: 20%"]);
+        output.push(b"\n");
+        assert_eq!(output.finish(), "Receiving: 20%\n");
+        let mut output = ProgressOutput::default();
+        output.push(b"Resolving: 100%\r");
+        assert_eq!(output.finish(), "Resolving: 100%\n");
     }
 
     #[test]

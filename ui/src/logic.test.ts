@@ -1,13 +1,14 @@
 // Front-end logic tests (run with `npm test`): the merge tool's parser, the command palette's
 // fuzzy matching, shortcut parsing, the rebase todo order and the original's time format.
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { api } from "./lib/api";
 import { parseConflicts } from "./components/ConflictView";
-import { comboOf, fuzzy } from "./lib/commands";
+import { comboOf, dispatchKey, fuzzy } from "./lib/commands";
 import { todo } from "./lib/rewrite";
 import { timeSince, withCoauthors } from "./lib/utils";
-import { indexOnly, predictStatus, signInProblem } from "./lib/repo";
+import { indexOnly, predictStatus, queryClient, refresh, refreshStatus, signInProblem } from "./lib/repo";
 import { globMatch } from "./lib/conflict";
-import { DEFAULT_METRICS, type RebasePlan } from "./lib/store";
+import { DEFAULT_METRICS, useStore, type RebasePlan } from "./lib/store";
 
 describe("merge tool", () => {
   it("splits a file into shared text and conflict chunks", () => {
@@ -104,5 +105,72 @@ describe("conflict prevention rules", () => {
     expect(globMatch("origin/**", "origin/feature/x")).toBe(true);
     expect(globMatch("origin/feature/**", "origin/bugfix/x")).toBe(false);
     expect(globMatch("origin/*", "origin/feature/x")).toBe(false);
+  });
+});
+
+describe("repository cache refreshes", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    queryClient.clear();
+  });
+
+  it("refreshes open diffs, history and blame after a save or HEAD change", async () => {
+    const kinds = ["repo", "diff", "versions", "history", "blame", "range", "conflict"];
+    for (const kind of kinds) queryClient.setQueryData([kind, "/refresh-test"], { value: "old" });
+    await refresh("/refresh-test");
+    for (const kind of kinds) expect(queryClient.getQueryState([kind, "/refresh-test"])?.isInvalidated).toBe(true);
+  });
+
+  it("refreshes file contents even when their status still says modified", async () => {
+    const status = { unstaged: [{ path: "a.txt", status: "M" }], staged: [], conflicted: false };
+    vi.spyOn(api, "repoStatus").mockResolvedValue(status);
+    queryClient.setQueryData(["versions", "/status-test", "a.txt"], { new: "old contents" });
+    await refreshStatus("/status-test");
+    expect(queryClient.getQueryState(["versions", "/status-test", "a.txt"])?.isInvalidated).toBe(true);
+  });
+
+  it("coalesces watcher bursts and reads again after an in-flight change", async () => {
+    const status = { unstaged: [], staged: [], conflicted: false };
+    let finish!: (value: typeof status) => void;
+    const pending = new Promise<typeof status>((resolve) => { finish = resolve; });
+    const read = vi.spyOn(api, "repoStatus").mockReturnValueOnce(pending).mockResolvedValue(status);
+    const first = refreshStatus("/burst-test");
+    const second = refreshStatus("/burst-test");
+    const third = refreshStatus("/burst-test");
+    expect(read).toHaveBeenCalledTimes(1);
+    finish(status);
+    await Promise.all([first, second, third]);
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("shortcut ownership", () => {
+  const key = (value: string, target: unknown = null) => ({
+    key: value, code: "", ctrlKey: true, metaKey: false, altKey: false, shiftKey: false,
+    target, preventDefault: vi.fn(),
+  }) as unknown as KeyboardEvent;
+
+  it("leaves editor shortcuts alone while typing", () => {
+    const event = key("b");
+    expect(dispatchKey(event, true)).toBe(false);
+    expect(event.preventDefault).not.toHaveBeenCalled();
+  });
+
+  it("leaves terminal Ctrl+W with the shell instead of closing a repository", () => {
+    const event = key("w", { closest: () => ({}) });
+    expect(dispatchKey(event, true)).toBe(false);
+    expect(event.preventDefault).not.toHaveBeenCalled();
+  });
+
+  it("blocks repository commands behind a modal", () => {
+    const before = useStore.getState().dialog;
+    useStore.setState({ dialog: { kind: "info", title: "Test", text: "" } });
+    try {
+      const event = key("b");
+      expect(dispatchKey(event, false)).toBe(false);
+      expect(event.preventDefault).not.toHaveBeenCalled();
+    } finally {
+      useStore.setState({ dialog: before });
+    }
   });
 });

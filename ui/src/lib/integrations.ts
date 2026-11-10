@@ -1,6 +1,7 @@
 // Preferences back end: integrations (all services), runtime Git settings, AI configuration, Git config,
 // GPG and credential helpers. Settings that change how Git runs are pushed to Rust whenever they change.
 import { invoke } from "@tauri-apps/api/core";
+import { invokeAi } from "./ai-connection";
 import { useStore, type Settings } from "./store";
 
 export interface ServiceStatus {
@@ -171,9 +172,9 @@ export const tools = {
 };
 
 export const aiApi = {
-  test: () => invoke<string>("ai_test_connection"),
-  pullRequest: (path: string, source: string, target: string) => invoke<[string, string]>("ai_pull_request", { path, source, target }),
-  resolveConflict: (base: string, ours: string, theirs: string, file: string) => invoke<string>("ai_resolve_conflict", { base, ours, theirs, file }),
+  test: () => invokeAi<string>("ai_test_connection"),
+  pullRequest: (path: string, source: string, target: string) => invokeAi<[string, string]>("ai_pull_request", { path, source, target }),
+  resolveConflict: (base: string, ours: string, theirs: string, file: string) => invokeAi<string>("ai_resolve_conflict", { base, ours, theirs, file }),
 };
 
 /** Push the settings that change how the Rust side works (Git executable, SSH key, logging, services, AI). */

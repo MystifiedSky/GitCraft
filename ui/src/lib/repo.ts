@@ -34,8 +34,8 @@ export function useRepo(path: string | undefined, tabId: string) {
     enabled: !!path,
     // The file watcher already reports every change, so switching back to the window doesn't reload everything.
     refetchOnWindowFocus: false,
-    placeholderData: (prev) => prev,
-    initialData: () => (path && limit === 0 && view.hidden.length === 0 && view.solo.length === 0 ? latest.get(path) : undefined),
+    // Keep the graph while changing its view, but never show another repository's data.
+    placeholderData: (prev, query) => (query?.queryKey[1] === path ? prev : undefined),
   });
 }
 
@@ -43,11 +43,12 @@ export function repoData(path: string): RepoView | undefined {
   return latest.get(path);
 }
 
-/** When this window last finished its own full refresh of each repository (see `onWatcherChange`). */
-const lastOwnRefresh = new Map<string, number>();
-
-export function refresh(path: string) {
-  return queryClient.invalidateQueries({ queryKey: ["repo", path] });
+export async function refresh(path: string) {
+  // HEAD changes and file saves also change open diffs, blame and file history.
+  // Status can remain "M" while the file's contents change, so its status alone isn't a cache key.
+  await Promise.all(["repo", "diff", "versions", "history", "blame", "range", "conflict"].map((kind) =>
+    queryClient.invalidateQueries({ queryKey: [kind, path] }),
+  ));
 }
 
 /** Put new file lists into every cached view of the repository, keeping commits and graph as they are
@@ -58,26 +59,42 @@ function setStatus(path: string, status: RepoView["status"]) {
   if (l) latest.set(path, { ...l, status });
 }
 
-/** Re-read only the file lists (one `git status`, ~25 ms) instead of the whole repository. */
-export async function refreshStatus(path: string) {
-  try {
-    setStatus(path, await api.repoStatus(path));
-    // Open diffs of these files may show different lines now.
-    queryClient.invalidateQueries({ queryKey: ["diff", path] });
-    queryClient.invalidateQueries({ queryKey: ["versions", path] });
-  } catch {
-    await refresh(path);
+const statusRefreshes = new Map<string, { again: boolean; promise: Promise<void> }>();
+
+/** Coalesce watcher bursts; an event during a read requests one trailing read instead of concurrent Git processes. */
+export function refreshStatus(path: string): Promise<void> {
+  const current = statusRefreshes.get(path);
+  if (current) {
+    current.again = true;
+    return current.promise;
   }
+  const task = { again: false, promise: Promise.resolve() };
+  statusRefreshes.set(path, task);
+  task.promise = (async () => {
+    try {
+      do {
+        task.again = false;
+        setStatus(path, await api.repoStatus(path));
+        await Promise.all(["diff", "versions", "blame", "range", "conflict"].map((kind) =>
+          queryClient.invalidateQueries({ queryKey: [kind, path] }),
+        ));
+      } while (task.again);
+    } catch {
+      await refresh(path);
+    } finally {
+      statusRefreshes.delete(path);
+    }
+  })();
+  return task.promise;
 }
 
 /** File watcher: working-folder edits and index changes refresh the file lists only; anything else
- *  (commits, branches, HEAD) reloads the repository, unless this window's own action just did that. */
+ *  (commits, branches, HEAD) reloads the repository. */
 export function onWatcherChange(path: string, full: boolean) {
   if (!full) return void refreshStatus(path);
-  if (Date.now() - (lastOwnRefresh.get(path) ?? 0) < OWN_CHANGE_WINDOW_MS) return;
+  // Never suppress an external change just because our own action recently finished.
   void refresh(path);
 }
-const OWN_CHANGE_WINDOW_MS = 1000;
 
 type Status = RepoView["status"];
 const STAGE_TYPES = new Set<Action["type"]>(["stage", "unstage", "stageAll", "unstageAll"]);
@@ -177,7 +194,6 @@ export async function act(path: string, action: Action, quiet = false): Promise<
     if (light && ok) await refreshStatus(path);
     else {
       await refresh(path);
-      lastOwnRefresh.set(path, Date.now());
     }
     st.setBusy(null);
   }

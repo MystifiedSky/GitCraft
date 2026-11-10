@@ -1,5 +1,6 @@
-// Stage 6: AI helpers (your own Anthropic API key), local patch files, conflict prevention and the Agents view.
+// AI helpers use the selected local or hosted connection; patch files and agents remain local.
 import { invoke } from "@tauri-apps/api/core";
+import { invokeAi } from "./ai-connection";
 import { act } from "./repo";
 import { useStore } from "./store";
 
@@ -24,18 +25,18 @@ export interface AgentSession {
 }
 
 export const ai = {
-  commitMessage: (path: string) => invoke<[string, string]>("ai_commit_message", { path }),
-  stashMessage: (path: string) => invoke<string>("ai_stash_message", { path }),
-  explainCommit: (path: string, sha: string) => invoke<string>("ai_explain_commit", { path, sha }),
-  explainBranch: (path: string, branch: string, base?: string) => invoke<string>("ai_explain_branch", { path, branch, base: base ?? null }),
-  compose: (path: string) => invoke<ComposedCommit[]>("ai_compose", { path }),
+  commitMessage: (path: string) => invokeAi<[string, string]>("ai_commit_message", { path }),
+  stashMessage: (path: string) => invokeAi<string>("ai_stash_message", { path }),
+  explainCommit: (path: string, sha: string) => invokeAi<string>("ai_explain_commit", { path, sha }),
+  explainBranch: (path: string, branch: string, base?: string) => invokeAi<string>("ai_explain_branch", { path, branch, base: base ?? null }),
+  compose: (path: string) => invokeAi<ComposedCommit[]>("ai_compose", { path }),
   savePatch: (path: string, shas: string[], name: string) => invoke<string | null>("save_patch", { path, shas, name }),
   pickPatch: () => invoke<string | null>("pick_patch_file"),
   conflictCheck: (path: string, target?: string) => invoke<ConflictCheck>("conflict_check", { path, target: target ?? null }),
   agents: (path: string) => invoke<AgentSession[]>("agent_sessions", { path }),
 };
 
-/** Run one AI request with a busy note; a missing key opens Accounts. */
+/** Run one AI request with a busy note; setup errors open AI Preferences. */
 async function withAi<T>(label: string, f: () => Promise<T>): Promise<T | null> {
   const s = useStore.getState();
   s.setBusy(label);
@@ -44,7 +45,7 @@ async function withAi<T>(label: string, f: () => Promise<T>): Promise<T | null> 
   } catch (e) {
     const msg = String(e);
     s.toast(false, msg);
-    if (msg.includes("Add your Anthropic API key")) s.setDialog({ kind: "accounts" });
+    if (msg.includes("Preferences > AI")) s.setDialog({ kind: "prefs", section: "ai" });
     return null;
   } finally {
     s.setBusy(null);

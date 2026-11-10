@@ -295,7 +295,7 @@ async fn hosting_status(gitlab_host: String) -> Result<HostingStatus, String> {
         };
         let (github, github_error) = check(hosting::Provider::Github, "github-token");
         let (gitlab, gitlab_error) = check(hosting::Provider::Gitlab, "gitlab-token");
-        HostingStatus { github, gitlab, github_error, gitlab_error, ai: hosting::secret_get("anthropic-key").is_some() }
+        HostingStatus { github, gitlab, github_error, gitlab_error, ai: ai::configured() }
     })
     .await
 }
@@ -679,7 +679,9 @@ fn open_terminal(path: String, tool: Option<String>, exe: Option<String>, args: 
 fn open_file_manager(path: String) -> Result<(), String> {
     #[cfg(windows)]
     std::process::Command::new("explorer").arg(&path).spawn().map_err(err)?;
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    std::process::Command::new("open").arg(&path).spawn().map_err(err)?;
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     std::process::Command::new("xdg-open").arg(&path).spawn().map_err(err)?;
     Ok(())
 }
@@ -708,7 +710,11 @@ fn save_settings(settings: serde_json::Value, state: State<'_, AppState>) -> Res
     if let Some(d) = f.parent() {
         std::fs::create_dir_all(d).map_err(err)?;
     }
-    std::fs::write(f, serde_json::to_string_pretty(&settings).map_err(err)?).map_err(err)
+    // Replace the settings only after the complete JSON is written, so an interrupted save
+    // cannot truncate the last usable preferences file.
+    let pending = f.with_extension("json.tmp");
+    std::fs::write(&pending, serde_json::to_string_pretty(&settings).map_err(err)?).map_err(err)?;
+    std::fs::rename(pending, f).map_err(err)
 }
 
 /// Watch a repository and tell the window when something changed (rules in src/watch.rs).

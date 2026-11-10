@@ -236,14 +236,23 @@ export interface Settings {
   repoPrefs: Record<string, RepoPrefs>;
 }
 
-export interface AiSettings {
-  enabled: boolean;
-  provider: "anthropic" | "openai" | "google" | "ollama" | "custom";
+export type AiProvider = "anthropic" | "openai" | "google" | "ollama" | "custom";
+
+export interface AiConnection {
   endpoint: string;
-  instructions: string;
-  /** Feature (commit, compose, stash, explain, pr, conflict) -> model. */
+  defaultModel: string;
+  responseFormat: "auto" | "json_schema" | "json_object" | "text";
+  /** Empty feature models inherit the shared default. */
   models: Record<string, string>;
+}
+
+export interface AiSettings extends AiConnection {
+  enabled: boolean;
+  provider: AiProvider;
+  instructions: string;
   featureInstructions: Record<string, string>;
+  /** Remember connection details when switching providers; keys stay in the OS credential store. */
+  connections: Partial<Record<AiProvider, AiConnection>>;
 }
 
 export interface IntegrationSettings {
@@ -270,7 +279,7 @@ export interface RepoPrefs {
   encoding?: string;
 }
 
-export const DEFAULT_AI: AiSettings = { enabled: true, provider: "anthropic", endpoint: "", instructions: "", models: {}, featureInstructions: {} };
+export const DEFAULT_AI: AiSettings = { enabled: true, provider: "anthropic", endpoint: "", defaultModel: "", responseFormat: "auto", instructions: "", models: {}, featureInstructions: {}, connections: {} };
 export const DEFAULT_INTEGRATIONS: IntegrationSettings = {
   githubEnterpriseHost: "",
   gitlabHost: "",

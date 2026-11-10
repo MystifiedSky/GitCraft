@@ -6,6 +6,7 @@
 
 use crate::metrics::{GITDIR_WATCH_DEBOUNCE_MS, WATCH_DEBOUNCE_MAX_MS, WATCH_DEBOUNCE_MIN_MS, WORKDIR_WATCH_DEBOUNCE_MS};
 use notify_debouncer_mini::{new_debouncer, notify::RecommendedWatcher, notify::RecursiveMode, DebounceEventResult, Debouncer};
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -13,7 +14,7 @@ use std::time::Duration;
 
 pub struct RepoWatch {
     _workdir: Debouncer<RecommendedWatcher>,
-    _gitdir: Option<Debouncer<RecommendedWatcher>>,
+    _gitdirs: Vec<Debouncer<RecommendedWatcher>>,
 }
 
 /// Clamp a debounce to the range the original's watcher accepts.
@@ -42,20 +43,24 @@ fn not_ignored(root: &Path, paths: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut cmd = crate::git::git_cmd(root);
     cmd.args(["check-ignore", "--stdin", "-z"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
     let Ok(mut child) = cmd.spawn() else { return paths };
-    if let Some(mut si) = child.stdin.take() {
-        for p in &paths {
-            let rel = p.strip_prefix(root).unwrap_or(p);
-            let _ = si.write_all(rel.to_string_lossy().replace('\\', "/").as_bytes());
-            let _ = si.write_all(b"\0");
-        }
+    let input: Vec<u8> = paths.iter().flat_map(|p| {
+        let mut bytes = p.strip_prefix(root).unwrap_or(p).to_string_lossy().replace('\\', "/").into_bytes();
+        bytes.push(0);
+        bytes
+    }).collect();
+    // Drain stdout while writing stdin: large batches can otherwise fill both pipes and deadlock.
+    let writer = child.stdin.take().map(|mut si| std::thread::spawn(move || si.write_all(&input)));
+    let out = child.wait_with_output();
+    if let Some(writer) = writer {
+        let _ = writer.join();
     }
-    let Ok(out) = child.wait_with_output() else { return paths };
-    let ignored: Vec<String> = String::from_utf8_lossy(&out.stdout).split('\0').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
+    let Ok(out) = out else { return paths };
+    let ignored: HashSet<String> = String::from_utf8_lossy(&out.stdout).split('\0').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
     paths
         .into_iter()
         .filter(|p| {
             let rel = p.strip_prefix(root).unwrap_or(p).to_string_lossy().replace('\\', "/");
-            !ignored.iter().any(|i| *i == rel)
+            !ignored.contains(&rel)
         })
         .collect()
 }
@@ -97,8 +102,19 @@ pub fn start(root: &Path, on_change: impl Fn(bool) + Send + Sync + Clone + 'stat
     .map_err(|e| e.to_string())?;
     work.watcher().watch(root, RecursiveMode::Recursive).map_err(|e| e.to_string())?;
 
-    // .git folder: 200 ms, without LFS temp files.
-    let git = if gitdir.exists() {
+    // Linked worktrees keep HEAD/index in their own gitdir and branches/tags in the shared common dir.
+    let common = crate::git::run(root, &["rev-parse", "--git-common-dir"]);
+    let common = if common.ok { root.join(common.stdout.trim()) } else { gitdir.clone() };
+    let mut dirs = vec![gitdir.clone()];
+    if common != gitdir {
+        dirs.push(common);
+    }
+    // Git metadata: 200 ms, without LFS temp files.
+    let mut git = Vec::new();
+    for gitdir in dirs {
+        if !gitdir.exists() {
+            continue;
+        }
         let lt = lfs_tmp.clone();
         let cb = on_change.clone();
         let gd = gitdir.clone();
@@ -112,11 +128,9 @@ pub fn start(root: &Path, on_change: impl Fn(bool) + Send + Sync + Clone + 'stat
         })
         .map_err(|e| e.to_string())?;
         g.watcher().watch(&gitdir, RecursiveMode::Recursive).map_err(|e| e.to_string())?;
-        Some(g)
-    } else {
-        None
-    };
-    Ok(RepoWatch { _workdir: work, _gitdir: git })
+        git.push(g);
+    }
+    Ok(RepoWatch { _workdir: work, _gitdirs: git })
 }
 
 #[cfg(test)]

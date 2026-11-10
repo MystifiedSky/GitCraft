@@ -76,7 +76,7 @@ export const COMMANDS: Command[] = [
       const t = activeTab();
       if (!t) return;
       st().setUi(t.id, { selection: { type: "wip" }, diff: null, history: null, rebase: null, conflict: null });
-      setTimeout(() => (document.querySelector("[data-commit-summary]") as HTMLInputElement | null)?.focus(), 50);
+      setTimeout(() => (document.querySelector("[data-active-repository='true'] [data-commit-summary]") as HTMLInputElement | null)?.focus(), 50);
     },
   },
   { id: "repo:searchCommits", label: "Search Commits", group: "Repo Actions", keys: "Ctrl+F", repo: true, run: () => activeTab() && st().setUi(activeTab()!.id, { searchOpen: true }) },
@@ -147,7 +147,7 @@ export const COMMANDS: Command[] = [
   { id: "ui:shortcuts", label: "Keyboard Shortcuts", group: "UI", keys: "Ctrl+/", run: () => st().setDialog({ kind: "shortcuts" }) },
   { id: "ui:settings", label: "Settings", group: "UI", keys: "Ctrl+,", keywords: "preferences options", run: () => st().setDialog({ kind: "prefs" }) },
   { id: "ui:activityLog", label: "Activity Log", group: "UI", keywords: "logs", run: () => st().setDialog({ kind: "log" }) },
-  { id: "ui:filterLeft", label: "Filter the left panel", group: "UI", keys: "Ctrl+Alt+F", inInputs: true, run: () => (window as unknown as { focusLeftFilter?: () => void }).focusLeftFilter?.() },
+  { id: "ui:filterLeft", label: "Filter the left panel", group: "UI", keys: "Ctrl+Alt+F", inInputs: true, run: () => (document.querySelector("[data-active-repository='true'] [data-left-filter], [data-start-filter]") as HTMLInputElement | null)?.focus() },
   {
     id: "ui:fullscreen",
     label: "Toggle Full Screen",
@@ -201,7 +201,10 @@ export function dispatchKey(e: KeyboardEvent, typing: boolean): boolean {
   if (!hasMod) return false;
   for (const c of COMMANDS) {
     if (keysOf(c).toUpperCase() !== combo.toUpperCase()) continue;
-    if (typing && !c.inInputs && ["repo:undo", "repo:redo"].includes(c.id)) return false; // let text boxes undo
+    if (typing && !c.inInputs) return false; // leave editor and text-box shortcuts with their owner
+    const terminal = (e.target as HTMLElement | null)?.closest?.(".xterm");
+    if (terminal && c.id !== "ui:terminalPanel" && c.id !== "palette:toggle") return false;
+    if (st().dialog && c.repo) return false; // a modal must not change the repository behind it
     if (c.repo) {
       const t = activeTab();
       if (t?.kind !== "repo") return false;

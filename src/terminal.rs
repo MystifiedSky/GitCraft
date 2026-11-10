@@ -15,7 +15,7 @@ struct Session {
 
 #[derive(Default)]
 pub struct Terminals {
-    sessions: Mutex<HashMap<u32, Session>>,
+    sessions: Arc<Mutex<HashMap<u32, Session>>>,
     next: AtomicU32,
 }
 
@@ -92,6 +92,8 @@ impl Terminals {
         let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
         let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
         let id = self.next.fetch_add(1, Ordering::SeqCst) + 1;
+        self.sessions.lock().unwrap().insert(id, Session { writer, master: pair.master, child });
+        let sessions = self.sessions.clone();
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
             let mut pending = Vec::new();
@@ -107,9 +109,16 @@ impl Terminals {
                     }
                 }
             }
+            if !pending.is_empty() {
+                on_data(id, String::from_utf8_lossy(&pending).into_owned());
+            }
+            // EOF releases the PTY and reaps shells that exited without the user closing their tab.
+            let session = sessions.lock().unwrap().remove(&id);
+            if let Some(mut session) = session {
+                let _ = session.child.wait();
+            }
             on_exit(id);
         });
-        self.sessions.lock().unwrap().insert(id, Session { writer, master: pair.master, child });
         Ok(id)
     }
 
@@ -127,8 +136,10 @@ impl Terminals {
     }
 
     pub fn close(&self, id: u32) {
-        if let Some(mut sess) = self.sessions.lock().unwrap().remove(&id) {
+        let session = self.sessions.lock().unwrap().remove(&id);
+        if let Some(mut sess) = session {
             let _ = sess.child.kill();
+            std::thread::spawn(move || { let _ = sess.child.wait(); });
         }
     }
 }

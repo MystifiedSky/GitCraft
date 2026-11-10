@@ -31,7 +31,7 @@ export function StartScreen() {
   };
 
   return (
-    <div className="h-full overflow-auto bg-app">
+    <div className="flex-1 min-h-0 overflow-auto bg-app">
       <div className="flex min-h-full pl-[15%] pr-[8%] pt-[30px]">
         <div className="flex-[2.6] min-w-0 pr-6">
           <div className="text-[15px] text-white/90 mb-[12px]">Repositories</div>
@@ -42,7 +42,7 @@ export function StartScreen() {
           </div>
           <div className="flex items-center h-[24px] bg-field rounded-[2px] border border-white/10 focus-within:border-accent mb-[14px]">
             <Search size={12} className="ml-1.5 mr-1 text-fg3" />
-            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search repositories (Ctrl + Alt + F)" className="flex-1 bg-transparent outline-none text-[11.5px] placeholder:text-fg3" />
+            <input data-start-filter value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search repositories (Ctrl + Alt + F)" className="flex-1 bg-transparent outline-none text-[11.5px] placeholder:text-fg3" />
           </div>
           {s.settings.favorites.length > 0 && (
             <>
@@ -150,7 +150,7 @@ export function LaunchpadScreen() {
     return <span style={{ color: t.color }}>{t.text}</span>;
   };
   return (
-    <div className="h-full overflow-auto bg-app">
+    <div className="flex-1 min-h-0 overflow-auto bg-app">
       <div className="max-w-[900px] mx-auto px-8 py-6">
         <div className="flex items-center gap-3 mb-4">
           <Rocket size={22} className="text-link" />

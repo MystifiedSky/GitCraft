@@ -20,7 +20,7 @@ GitCraft is a desktop Git client for exploring repository history and managing e
 - **Power tools.** Remotes, worktrees, submodules, Gitflow, Git LFS, sparse checkout, a command palette, a built-in terminal, workspaces, profiles, and four themes.
 - **Pull requests and issues.** Connect GitHub, GitHub Enterprise, GitLab, Bitbucket, Azure DevOps, Jira or Trello (browser sign-in for GitHub, GitLab, Bitbucket and Azure DevOps, or a token) to list, view, create, comment on, and merge pull requests, work with issues, clone your repositories, and see everything on the Launchpad.
 - **Preferences like you expect.** A full Preferences screen covers Git, SSH, signing, the editor, the terminal, external tools, AI providers, and per-repository settings.
-- **AI helpers (optional).** With your own Anthropic API key, generate commit and stash messages, explain a commit or branch, or split your changes into focused commits. Nothing is sent unless you press an AI button.
+- **AI helpers (optional).** Use Anthropic, OpenAI, Google, Ollama, LM Studio, llama.cpp or another local/hosted OpenAI-compatible server for commit and stash messages, commit composition, commit/branch explanations, pull request drafts and conflict resolution. One default model serves every helper, with optional per-feature overrides. Nothing is sent unless you press an AI button.
 - **Manage many repositories.** Repository Management lists open, favorite, and recent repositories with their branch and uncommitted changes, and fetches or pulls them all at once.
 - **Stays up to date.** Installed copies check GitHub Releases, download signed updates in the background, and install them on restart. See [RELEASING.md](RELEASING.md) to publish a version.
 - **Share and stay ahead of conflicts.** Save or apply .patch files, see early whether your branch would conflict with the main branch, and list the Claude Code sessions that worked in a repository.
@@ -96,3 +96,13 @@ Describe the behavior you want to change and how to reproduce it. For a patch, i
 Copyright © 2026 the GitCraft contributors.
 
 GitCraft is licensed under the GNU General Public License, version 3 only (`GPL-3.0-only`). See [LICENSE](LICENSE) for the full terms. Third-party dependencies and bundled fonts retain their respective licenses.
+
+## Local and compatible AI
+
+Open **Preferences → AI**, choose a provider or local preset, and enter the exact model ID from that server as the **Default Model**. Start the local server and load that model first. Ollama defaults to `http://localhost:11434/v1`; LM Studio uses `http://localhost:1234/v1`; llama.cpp uses `http://localhost:8080/v1`. Addresses and models are editable. Server roots, API bases and full chat-completions URLs are accepted.
+
+Local and custom connections can run without an API key. Save a key only when the server requires authentication; **Remove Key** deletes a previously saved key. Hosted Anthropic, OpenAI and Google connections require their provider key. Keys live in the operating system credential store. Provider endpoints, default models and feature overrides are remembered when switching providers.
+
+**Test Connection** uses the default model. Every AI helper uses the same connection; feature model overrides are optional. **Automatic** response mode tries structured JSON, JSON mode, then prompt-only JSON if the selected server explicitly rejects that output format. You can select a mode directly for servers with limited compatibility. Replies are validated before use; authentication, rate-limit and missing-model errors are reported without format retries. Compatibility retries stay on the selected endpoint.
+
+Model quality and context capacity depend on the model you run. Conflict suggestions remain editable and require review before saving; composed commits are reviewed before creation. External coding-agent CLIs in the Agents view keep their own provider configuration.

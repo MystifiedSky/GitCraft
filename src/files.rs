@@ -53,7 +53,7 @@ const IMAGE_TYPES: [(&str, &str); 8] = [
 /// text test 0x1802e5380, byte-order-mark check 0x1802e5430):
 /// look at the first 8000 bytes; a UTF-16 / UTF-32 byte-order mark means binary; a UTF-8 one is
 /// skipped; a NUL byte means binary; otherwise binary when (printable >> 7) < non-printable.
-/// Tab, LF and CR count as neither; BS, FF and ESC count as printable.
+/// TAB, LF, VT and CR count as neither; BS, FF and ESC count as printable.
 pub fn is_binary(data: &[u8]) -> bool {
     use crate::metrics::{BINARY_CHECK_BYTES, BINARY_PRINTABLE_SHIFT};
     let data = &data[..data.len().min(BINARY_CHECK_BYTES)];
@@ -71,7 +71,7 @@ pub fn is_binary(data: &[u8]) -> bool {
         match b {
             0 => return true,
             8 | 12 | 27 => printable += 1,
-            9 | 10 | 13 => {}
+            9 | 10 | 11 | 13 => {} // TAB, LF, VT and CR are neutral (0x1802e5380).
             0x7f => nonprintable += 1,
             b if b < 0x20 => nonprintable += 1,
             _ => printable += 1,
@@ -144,7 +144,7 @@ fn split_diff(text: &str) -> (String, Vec<Hunk>) {
     let mut head = String::new();
     let mut hunks: Vec<Hunk> = Vec::new();
     for line in text.split_inclusive('\n') {
-        let l = line.trim_end_matches(['\n', '\r']);
+        let l = line.strip_suffix('\n').unwrap_or(line);
         if l.starts_with("@@") {
             hunks.push(Hunk { header: l.to_string(), lines: Vec::new() });
         } else if let Some(h) = hunks.last_mut() {
@@ -212,55 +212,76 @@ pub fn apply_part(dir: &Path, file: &str, untracked: bool, op: PatchOp, hunk: us
     Ok((patch, cached, reverse))
 }
 
-/// libgit2's hunk rule (nodegit.node 0x180245620): a hunk applies only at its own position - the old start
-/// line, moved by the lines earlier hunks added or removed - and every preimage line (context and removed lines)
-/// must match there exactly. Otherwise: "hunk at line N did not apply". Git's own `apply` would search nearby
-/// lines instead, so GitCraft checks this first. For a reverse patch the preimage is the context and '+' lines,
-/// starting at the new start line.
+/// Recovered from nodegit.node 0x180245620 and 0x1802453e0:
+/// match the complete preimage bytes at the hunk position, then splice the postimage
+/// before checking the next hunk. Preserve CR and the presence/absence of final LF.
+/// Reverse patches exchange old/new ranges and '+'/'-' lines.
 pub fn check_hunks_exact(text: &str, patch: &str, reverse: bool) -> Result<(), String> {
-    let file: Vec<&str> = text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)).collect();
+    fn range(value: &str) -> Option<(i64, usize)> {
+        let (start, count) = value.split_once(',').unwrap_or((value, "1"));
+        let start = start.parse::<i64>().ok()?;
+        let count = count.parse::<usize>().ok()?;
+        (start >= 0).then_some((start, count))
+    }
+    fn remove_final_lf(lines: &mut [String]) {
+        if let Some(last) = lines.last_mut() {
+            if last.ends_with('\n') {
+                last.pop();
+            }
+        }
+    }
+
+    let mut file: Vec<String> = text.split_inclusive('\n').map(str::to_owned).collect();
     let mut shift: i64 = 0;
-    let mut lines = patch.lines().peekable();
+    let mut lines = patch.split_inclusive('\n').peekable();
     while let Some(line) = lines.next() {
         let Some(rest) = line.strip_prefix("@@ -") else { continue };
-        let nums: Vec<i64> = rest
-            .split(|c: char| c == ' ' || c == ',' || c == '+')
-            .take_while(|t| *t != "@@")
-            .filter_map(|t| t.parse().ok())
-            .collect();
-        // "-a,b +c,d" (counts may be missing when they are 1).
-        let (old_start, new_start) = match nums.len() {
-            4 => (nums[0], nums[2]),
-            3 => (nums[0], if rest.split(' ').next().unwrap_or("").contains(',') { nums[2] } else { nums[1] }),
-            2 => (nums[0], nums[1]),
-            _ => continue,
-        };
-        let start = if reverse { new_start } else { old_start };
-        let (keep, gone) = if reverse { ('+', '-') } else { ('-', '+') };
-        let mut pre = Vec::new();
-        let mut post_len = 0i64;
-        while let Some(l) = lines.peek() {
-            if l.starts_with("@@") || l.starts_with("diff ") {
+        let (ranges, _) = rest.split_once(" @@").ok_or("Invalid hunk header")?;
+        let (old, new) = ranges.split_once(" +").ok_or("Invalid hunk header")?;
+        let old = range(old).ok_or("Invalid old hunk range")?;
+        let new = range(new).ok_or("Invalid new hunk range")?;
+        let (start, count) = if reverse { new } else { old };
+        let (keep, gone) = if reverse { (b'+', b'-') } else { (b'-', b'+') };
+        let mut pre: Vec<String> = Vec::new();
+        let mut post: Vec<String> = Vec::new();
+        let mut previous = b' ';
+        while let Some(line) = lines.peek() {
+            let Some(&sign) = line.as_bytes().first() else { break };
+            if !matches!(sign, b' ' | b'+' | b'-' | b'\\') {
                 break;
             }
-            let l = lines.next().unwrap_or_default();
-            if l.starts_with(' ') || l.starts_with(keep) {
-                pre.push(&l[1..]);
+            let line = lines.next().unwrap();
+            if sign == b'\\' {
+                // "\ No newline at end of file" belongs to the preceding side.
+                if previous == b' ' || previous == keep {
+                    remove_final_lf(&mut pre);
+                }
+                if previous == b' ' || previous == gone {
+                    remove_final_lf(&mut post);
+                }
+                continue;
             }
-            if l.starts_with(' ') || l.starts_with(gone) {
-                post_len += 1;
+            if sign == b' ' || sign == keep {
+                pre.push(line[1..].to_owned());
             }
+            if sign == b' ' || sign == gone {
+                post.push(line[1..].to_owned());
+            }
+            previous = sign;
         }
-        if start == 0 && pre.is_empty() {
-            shift += post_len;
-            continue;
-        }
-        let at = start - 1 + shift;
-        let ok = at >= 0 && pre.iter().enumerate().all(|(i, p)| file.get((at as usize) + i).map(|f| f == p).unwrap_or(false));
-        if !ok {
+        // A zero-length range inserts AFTER start; otherwise start is one-based.
+        let position = if count == 0 { start } else { (start - 1).max(0) } + shift;
+        if position < 0 {
             return Err(format!("hunk at line {start} did not apply"));
         }
-        shift += post_len - pre.len() as i64;
+        let at = (position as usize).min(file.len());
+        let end = at.checked_add(pre.len()).ok_or("Hunk range overflow")?;
+        if file.get(at..end) != Some(pre.as_slice()) {
+            return Err(format!("hunk at line {start} did not apply"));
+        }
+        let delta = post.len() as i64 - pre.len() as i64;
+        file.splice(at..end, post);
+        shift += delta;
     }
     Ok(())
 }
@@ -503,8 +524,10 @@ world
         // ...but not two.
         t.push(2);
         assert!(is_binary(&t));
-        // ESC, BS and FF count as printable.
+        // ESC, BS and FF count as printable; TAB, LF, VT and CR are neutral.
         assert!(!is_binary(&[27, 8, 12]));
+        assert!(!is_binary(&[9, 10, 11, 13]));
+        assert!(is_binary(&[14]));
         // Only the first 8000 bytes are looked at.
         let mut big = vec![b'a'; 8000];
         big.push(0);
@@ -518,8 +541,37 @@ world
         assert!(check_hunks_exact("a\nb\nc\nd\n", patch, false).is_ok());
         // The same text one line lower would be found by git apply, but not by libgit2.
         assert_eq!(check_hunks_exact("x\na\nb\nc\nd\n", patch, false).unwrap_err(), "hunk at line 2 did not apply");
-        // Reverse (revert): the file must hold "b", "C" at the new start line; CRLF files compare the same.
-        assert!(check_hunks_exact("a\r\nb\r\nC\r\nd\r\n", patch, true).is_ok());
+        // Reverse (revert): match the new side, including its actual line endings.
+        assert!(check_hunks_exact("a\nb\nC\nd\n", patch, true).is_ok());
+        assert!(check_hunks_exact("a\r\nb\r\nC\r\nd\r\n", patch, true).is_err());
+        let crlf_patch = "--- a/f\n+++ b/f\n@@ -2,2 +2,2 @@\n b\r\n-c\r\n+C\r\n";
+        assert!(check_hunks_exact("a\r\nb\r\nC\r\nd\r\n", crlf_patch, true).is_ok());
+    }
+
+    #[test]
+    fn exact_hunks_follow_insertions_and_deletions() {
+        let inserted = "--- a/f\n+++ b/f\n@@ -1,1 +1,2 @@\n a\n+inserted\n@@ -3,1 +4,1 @@\n-c\n+C\n";
+        assert!(check_hunks_exact("a\nb\nc\n", inserted, false).is_ok());
+        assert!(check_hunks_exact("a\ninserted\nb\nC\n", inserted, true).is_ok());
+        let deleted = "--- a/f\n+++ b/f\n@@ -1,2 +1,1 @@\n a\n-b\n@@ -4,1 +3,1 @@\n-d\n+D\n";
+        assert!(check_hunks_exact("a\nb\nc\nd\n", deleted, false).is_ok());
+        assert!(check_hunks_exact("a\nc\nD\n", deleted, true).is_ok());
+        let insert_after_first = "--- a/f\n+++ b/f\n@@ -1,0 +2,1 @@\n+inserted\n@@ -2,1 +3,1 @@\n-b\n+B\n";
+        assert!(check_hunks_exact("a\nb\n", insert_after_first, false).is_ok());
+    }
+
+    #[test]
+    fn exact_hunks_preserve_final_newline_and_patch_bytes() {
+        let patch = "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new\n";
+        assert!(check_hunks_exact("old", patch, false).is_ok());
+        assert!(check_hunks_exact("old\n", patch, false).is_err());
+        assert!(check_hunks_exact("new\n", patch, true).is_ok());
+        assert!(check_hunks_exact("new", patch, true).is_err());
+        let crlf = "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\r\n+new\r\n";
+        let partial = partial_patch(crlf, 0, None, false).unwrap();
+        assert!(partial.contains("-old\r\n+new\r\n"));
+        assert!(check_hunks_exact("old\r\n", &partial, false).is_ok());
+        assert!(check_hunks_exact("", "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-\n+x\n", false).is_err());
     }
 
     #[test]

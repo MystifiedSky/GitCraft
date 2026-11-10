@@ -55,7 +55,6 @@ export function LeftPanel({ repo, tabId, onSelectSha }: { repo: RepoView | undef
   const [open, setOpen] = useState<Record<SectionKey, boolean>>({} as Record<SectionKey, boolean>);
   const [filter, setFilter] = useState("");
   const filterRef = useRef<HTMLInputElement>(null);
-  (window as unknown as { focusLeftFilter?: () => void }).focusLeftFilter = () => filterRef.current?.focus();
   const f = filter.trim().toLowerCase();
   const match = (n: string) => !f || n.toLowerCase().includes(f);
 
@@ -130,6 +129,7 @@ export function LeftPanel({ repo, tabId, onSelectSha }: { repo: RepoView | undef
         <div className="flex items-center h-[22px] bg-field rounded-[3px] border border-white/10 focus-within:border-accent">
           <input
             ref={filterRef}
+            data-left-filter
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
             onKeyDown={(e) => e.key === "Escape" && (setFilter(""), filterRef.current?.blur())}
