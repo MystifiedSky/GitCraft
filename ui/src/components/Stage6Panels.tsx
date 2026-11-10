@@ -2,7 +2,9 @@ import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, Bot, CheckCircle2, FileDown, FileUp } from "lucide-react";
 import type { RepoView } from "@/lib/api";
 import { ai, applyPatch, patchName, savePatch } from "@/lib/ai";
-import { copy } from "@/lib/repo";
+import { act, copy } from "@/lib/repo";
+import { conflictTarget } from "@/lib/conflict";
+import { runInTerminal } from "./TerminalPanel";
 import { useStore } from "@/lib/store";
 import { cn, timeSince } from "@/lib/utils";
 import { CtxMenu } from "./ui/menu";
@@ -11,10 +13,13 @@ import { CtxMenu } from "./ui/menu";
 const refsKey = (repo: RepoView) => repo.head_sha + repo.refs.filter((r) => r.kind === "Remote").map((r) => r.sha.slice(0, 8)).join("");
 
 export function useConflictCheck(repo: RepoView | undefined) {
+  const global = useStore((s) => s.settings.conflictDetection !== false);
+  const prefs = useStore((s) => (repo ? s.settings.repoPrefs[repo.path] : undefined));
+  const target = repo ? conflictTarget(repo, prefs?.baseBranches ?? "", prefs?.excludedBranches ?? "", global && prefs?.conflictDetection !== false) : null;
   return useQuery({
-    queryKey: ["conflictCheck", repo?.path, repo ? refsKey(repo) : ""],
-    queryFn: () => ai.conflictCheck(repo!.path),
-    enabled: !!repo && !!repo.head_branch,
+    queryKey: ["conflictCheck", repo?.path, repo ? refsKey(repo) : "", target],
+    queryFn: () => ai.conflictCheck(repo!.path, target ?? undefined),
+    enabled: !!repo && !!repo.head_branch && target !== null,
     staleTime: Infinity,
   });
 }
@@ -23,6 +28,17 @@ export function useConflictCheck(repo: RepoView | undefined) {
 export function ConflictCheckRows({ repo }: { repo: RepoView }) {
   const q = useConflictCheck(repo);
   const c = q.data;
+  const s = useStore();
+  const prefs = s.settings.repoPrefs[repo.path];
+  if (repo.head_branch && conflictTarget(repo, prefs?.baseBranches ?? "", prefs?.excludedBranches ?? "", s.settings.conflictDetection !== false && prefs?.conflictDetection !== false) === null)
+    return (
+      <Note>
+        Conflict prevention is off here.{" "}
+        <button className="text-link hover:underline" onClick={() => s.setDialog({ kind: "prefs", section: "conflict" })}>
+          Preferences
+        </button>
+      </Note>
+    );
   if (!repo.head_branch) return <Note>Check out a branch to see whether it would conflict with the main branch.</Note>;
   if (q.isLoading) return <Note>Checking for conflicts…</Note>;
   if (!c || c.note) return <Note>{c?.note ?? "Could not check for conflicts."}</Note>;
@@ -72,13 +88,53 @@ export function PatchRows({ repo }: { repo: RepoView }) {
 }
 
 /** Agents view: Claude Code sessions that worked in this repository (read from ~/.claude/projects). */
+const AGENT_COMMAND: Record<string, string> = { claude: "claude", codex: "codex", copilot: "copilot", opencode: "opencode", gemini: "gemini" };
+
+/** Start the coding agent chosen in Preferences > External Tools in the in-app terminal; in a new worktree the
+ *  Agents > Setup commands run first. */
+async function startAgent(repo: RepoView, worktree: boolean) {
+  const st = useStore.getState();
+  const set = st.settings;
+  const cmd = AGENT_COMMAND[set.codingAgent];
+  if (!cmd) return st.setDialog({ kind: "prefs", section: "tools" });
+  const agent = [cmd, set.agentArgs.trim()].filter(Boolean).join(" ");
+  const sep = set.termShell === "cmd" ? " && " : "; ";
+  if (!worktree) return runInTerminal(agent, AGENT_LABEL[set.codingAgent] ?? cmd);
+  st.setDialog({
+    kind: "prompt",
+    title: "Start an agent session in a new worktree",
+    label: "New branch name",
+    value: `agent/${new Date().toISOString().slice(0, 10)}`,
+    confirm: "Start",
+    onSubmit: async (branch) => {
+      const parent = repo.path.replace(/[\\/][^\\/]+$/, "");
+      const folder = `${parent}${repo.path.includes("\\") ? "\\" : "/"}${repo.name}-${branch.replace(/[^\w.-]+/g, "-")}`;
+      const ok = await act(repo.path, { type: "worktreeAdd", path: folder, branch, newBranch: true, start: null });
+      if (!ok) return;
+      const setup = set.agentSetup.split("\n").map((l) => l.trim()).filter(Boolean);
+      runInTerminal([`cd "${folder}"`, ...setup, agent].join(sep), `${AGENT_LABEL[set.codingAgent] ?? cmd} (${branch})`);
+    },
+  });
+}
+
+const AGENT_LABEL: Record<string, string> = { claude: "Claude Code", codex: "Codex", copilot: "Copilot CLI", opencode: "OpenCode", gemini: "Gemini CLI" };
+
 export function AgentsView({ repo }: { repo: RepoView | undefined }) {
   const units = useStore((s) => s.metrics.time_units);
+  const agentName = useStore((s) => AGENT_LABEL[s.settings.codingAgent]);
   const q = useQuery({ queryKey: ["agents", repo?.path], queryFn: () => ai.agents(repo!.path), enabled: !!repo, refetchInterval: 10000 });
   if (!repo) return <Note>Open a repository to see the AI coding sessions that worked in it.</Note>;
   const list = q.data ?? [];
   return (
     <div className="flex-1 overflow-y-auto pt-2">
+      <div className="flex gap-2 px-3 pb-2">
+        <button className="flex-1 h-[26px] rounded-[3px] border border-accent/70 bg-accent/20 text-[12.5px] text-white hover:bg-accent/30" onClick={() => startAgent(repo, false)} title="In this repository, in the in-app terminal">
+          {agentName ? `Start ${agentName}` : "Choose a coding agent"}
+        </button>
+        <button className="h-[26px] px-2 rounded-[3px] border border-white/10 bg-white/5 text-[12.5px] text-fg hover:bg-white/10" onClick={() => startAgent(repo, true)} title="Create a worktree, run the setup commands, then start the agent">
+          In new worktree
+        </button>
+      </div>
       <div className="px-3 pb-1 text-[12px] font-semibold tracking-wider text-fg2">SESSIONS ({list.length})</div>
       {list.length === 0 && !q.isLoading && (
         <div className="px-4 py-4 text-fg2 text-[12.5px] leading-relaxed">

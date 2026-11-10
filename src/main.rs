@@ -8,7 +8,10 @@ mod git;
 mod graph;
 mod ai;
 mod extras;
+mod external;
+mod prefs;
 mod hosting;
+mod hosting_api;
 mod manage;
 mod rewrite;
 mod metrics;
@@ -77,7 +80,7 @@ async fn open_repo(path: String, max: Option<usize>, view: Option<git::RefView>,
         }
         let root = git::repo_root(&p).ok_or_else(|| format!("{path} is not a Git repository"))?;
         let view = view.unwrap_or_default();
-        let data = git::load_view(&root, max.unwrap_or(INITIAL_COMMITS).max(INITIAL_COMMITS), &view);
+        let data = git::load_view(&root, max.unwrap_or(INITIAL_COMMITS).max(prefs::MIN_INITIAL_COMMITS), &view);
         let pinned_sha = view.pinned.as_ref().and_then(|p| data.refs.iter().find(|r| &r.full == p)).map(|r| r.sha.clone());
         let graph = graph::layout_pinned(&data.commits, pinned_sha.as_deref());
         let root_s = root.to_string_lossy().replace('/', "\\");
@@ -225,10 +228,11 @@ fn cancel_job(id: String, state: State<'_, AppState>) -> bool {
 }
 
 #[tauri::command]
-fn term_open(cwd: String, cols: u16, rows: u16, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<u32, String> {
+fn term_open(cwd: String, cols: u16, rows: u16, shell: Option<String>, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<u32, String> {
     let a1 = app.clone();
     let a2 = app.clone();
     state.terminals.open(
+        shell.as_deref().unwrap_or(""),
         &cwd,
         cols,
         rows,
@@ -265,7 +269,7 @@ fn remote_of(path: &str, gitlab_host: &str) -> Result<hosting::RemoteRepo, Strin
             url = git::run(dir, &["remote", "get-url", first]).stdout.trim().to_string();
         }
     }
-    hosting::parse_remote(&url, gitlab_host).ok_or_else(|| "This repository's remote isn't on GitHub or GitLab.".to_string())
+    hosting::parse_remote(&url, gitlab_host).ok_or_else(|| "This repository's remote isn't on a connected service (Preferences > Integrations).".to_string())
 }
 
 #[derive(Serialize)]
@@ -299,7 +303,8 @@ async fn hosting_status(gitlab_host: String) -> Result<HostingStatus, String> {
 /// Store (or with an empty value, remove) a token or API key in the OS credential store.
 #[tauri::command]
 fn set_secret(name: String, value: String) -> Result<(), String> {
-    if !["github-token", "gitlab-token", "anthropic-key"].contains(&name.as_str()) {
+    let allowed = hosting::SERVICES.iter().any(|id| hosting::secret_name(id) == name) || ["anthropic-key", "openai-key", "google-key", "ollama-key", "custom-ai-key"].contains(&name.as_str());
+    if !allowed {
         return Err("unknown secret".into());
     }
     hosting::secret_set(&name, value.trim())
@@ -315,9 +320,66 @@ async fn list_prs(path: String, gitlab_host: String) -> Result<Vec<hosting::Pull
     blocking(move || hosting::pull_requests(&remote_of(&path, &gitlab_host)?)).await?
 }
 
+/// Issues for a repository: from its own issue tracker choice (Preferences > Issue Tracker), else its host.
 #[tauri::command]
-async fn list_issues(path: String, gitlab_host: String) -> Result<Vec<hosting::Issue>, String> {
-    blocking(move || hosting::issues(&remote_of(&path, &gitlab_host)?)).await?
+async fn list_issues(path: String, gitlab_host: String, tracker: Option<hosting::Tracker>) -> Result<Vec<hosting::Issue>, String> {
+    blocking(move || match tracker.filter(|t| !t.kind.is_empty()) {
+        Some(t) => hosting::tracker_issues(&t, false),
+        None => hosting::issues(&remote_of(&path, &gitlab_host)?),
+    })
+    .await?
+}
+
+#[tauri::command]
+async fn create_issue(path: Option<String>, gitlab_host: String, tracker: Option<hosting::Tracker>, title: String, body: String) -> Result<hosting::Issue, String> {
+    blocking(move || {
+        let r = path.as_deref().and_then(|p| remote_of(p, &gitlab_host).ok());
+        hosting::create_issue(r.as_ref(), &tracker.unwrap_or_default(), &title, &body)
+    })
+    .await?
+}
+
+/// Preferences > Integrations: hosts, user names and organisations (tokens stay in the credential store).
+#[tauri::command]
+fn set_integration_config(config: hosting::Config) {
+    hosting::set_config(config);
+    std::thread::spawn(|| hosting::sync_git_credentials(""));
+}
+
+#[tauri::command]
+async fn integration_statuses(ids: Vec<String>) -> Result<Vec<hosting::ServiceStatus>, String> {
+    blocking(move || {
+        let handles: Vec<_> = ids.into_iter().map(|id| std::thread::spawn(move || hosting::status(&id))).collect();
+        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+    })
+    .await
+}
+
+/// "Connect": browser sign-in through Git Credential Manager, or the GitHub CLI's sign-in ("gh").
+#[tauri::command]
+async fn integration_sign_in(id: String, method: String) -> Result<String, String> {
+    blocking(move || {
+        let token = if method == "gh" { hosting::gh_cli_token()? } else { hosting::browser_sign_in(&id)? };
+        hosting::secret_set(&hosting::secret_name(&id), &token)?;
+        hosting::sync_git_credentials("");
+        hosting::whoami_id(&id)
+    })
+    .await?
+}
+
+#[tauri::command]
+async fn integration_repos(id: String) -> Result<Vec<hosting::HostedRepo>, String> {
+    blocking(move || hosting::repositories(&id)).await?
+}
+
+#[tauri::command]
+async fn integration_add_ssh_key(id: String, title: String, key: String) -> Result<(), String> {
+    blocking(move || hosting::add_ssh_key(&id, &title, &key)).await?
+}
+
+#[tauri::command]
+fn integration_ssh_page(id: String) -> String {
+    hosting::ssh_keys_page(&id)
 }
 
 #[tauri::command]
@@ -392,6 +454,26 @@ async fn ai_explain_branch(path: String, branch: String, base: Option<String>) -
 }
 
 #[tauri::command]
+fn set_ai_config(config: ai::AiConfig) {
+    ai::set_config(config);
+}
+
+#[tauri::command]
+async fn ai_test_connection() -> Result<String, String> {
+    blocking(ai::test_connection).await?
+}
+
+#[tauri::command]
+async fn ai_pull_request(path: String, source: String, target: String) -> Result<(String, String), String> {
+    blocking(move || ai::pull_request_text(Path::new(&path), &source, &target)).await?
+}
+
+#[tauri::command]
+async fn ai_resolve_conflict(base: String, ours: String, theirs: String, file: String) -> Result<String, String> {
+    blocking(move || ai::resolve_conflict(&base, &ours, &theirs, &file)).await?
+}
+
+#[tauri::command]
 async fn ai_compose(path: String) -> Result<Vec<ai::ComposedCommit>, String> {
     blocking(move || ai::compose(Path::new(&path))).await?
 }
@@ -426,6 +508,58 @@ async fn repo_status(path: String) -> Result<git::WorkStatus, String> {
     blocking(move || git::status(Path::new(&path))).await
 }
 
+/// Hand the tokens of connected services to Git (HTTPS push / pull / fetch / clone).
+#[tauri::command]
+async fn sync_git_credentials(gitlab_host: String) -> Result<(), String> {
+    blocking(move || hosting::sync_git_credentials(&gitlab_host)).await
+}
+
+#[tauri::command]
+async fn remote_auth(path: String, gitlab_host: String) -> Result<hosting::RemoteAuth, String> {
+    blocking(move || hosting::remote_auth(Path::new(&path), &gitlab_host)).await
+}
+
+/// Preferences that change how Git runs: executable, SSH key / agent, extended logging.
+#[tauri::command]
+fn set_runtime_settings(settings: prefs::RuntimeSettings) {
+    prefs::set_runtime(settings);
+}
+
+#[tauri::command]
+async fn tool_versions(gpg_program: String) -> Result<prefs::Versions, String> {
+    blocking(move || prefs::versions(&gpg_program)).await
+}
+
+#[tauri::command]
+async fn git_config_get(path: Option<String>, scope: String, keys: Vec<String>) -> Result<HashMap<String, String>, String> {
+    blocking(move || prefs::config_get(path.as_deref().map(Path::new), &scope, &keys)).await
+}
+
+#[tauri::command]
+async fn gpg_generate_key(program: String, name: String, email: String, passphrase: String) -> Result<String, String> {
+    blocking(move || prefs::gpg_generate(&program, &name, &email, &passphrase)).await?
+}
+
+#[tauri::command]
+async fn gpg_export_key(program: String, key: String) -> Result<String, String> {
+    blocking(move || prefs::gpg_export(&program, &key)).await?
+}
+
+#[tauri::command]
+async fn forget_credentials(hosts: Vec<String>) -> Result<usize, String> {
+    blocking(move || prefs::forget_credentials(&hosts)).await
+}
+
+#[tauri::command]
+async fn delete_orig_files(path: String) -> Result<Vec<String>, String> {
+    blocking(move || prefs::delete_orig_files(Path::new(&path))).await
+}
+
+#[tauri::command]
+async fn pick_file(title: String) -> Result<Option<String>, String> {
+    blocking(move || rfd::FileDialog::new().set_title(&title).pick_file().map(|p| p.to_string_lossy().into_owned())).await
+}
+
 #[tauri::command]
 async fn repo_summary(path: String) -> Result<extras::RepoSummary, String> {
     blocking(move || extras::repo_summary(Path::new(&path))).await
@@ -449,22 +583,10 @@ fn update_config(app: tauri::AppHandle) -> serde_json::Value {
     serde_json::json!({ "configured": configured, "endpoint": u["endpoints"][0] })
 }
 
-/// Open the repository in VS Code (File > Open Repo in VS Code).
+/// File > Open Repo in <editor> (Preferences > External Tools > Editor); with `file`, open that file.
 #[tauri::command]
-fn open_in_editor(path: String) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        std::process::Command::new("cmd")
-            .args(["/C", "code", "."])
-            .current_dir(&path)
-            .creation_flags(0x0800_0000)
-            .spawn()
-            .map_err(err)?;
-    }
-    #[cfg(not(windows))]
-    std::process::Command::new("code").arg(".").current_dir(&path).spawn().map_err(err)?;
-    Ok(())
+fn open_in_editor(path: String, file: Option<String>, tool: Option<String>, exe: Option<String>, file_args: Option<String>, repo_args: Option<String>) -> Result<(), String> {
+    external::open_editor(&path, file.as_deref(), tool.as_deref().unwrap_or("vscode"), exe.as_deref().unwrap_or(""), file_args.as_deref().unwrap_or(""), repo_args.as_deref().unwrap_or(""))
 }
 
 #[tauri::command]
@@ -547,21 +669,10 @@ async fn clone_repo(url: String, parent: String, depth: Option<u32>, state: Stat
     .await?
 }
 
+/// File > Open External Terminal (Preferences > External Tools > Terminal).
 #[tauri::command]
-fn open_terminal(path: String) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "cmd"])
-            .current_dir(&path)
-            .creation_flags(0x0800_0000)
-            .spawn()
-            .map_err(err)?;
-    }
-    #[cfg(not(windows))]
-    std::process::Command::new("x-terminal-emulator").current_dir(&path).spawn().map_err(err)?;
-    Ok(())
+fn open_terminal(path: String, tool: Option<String>, exe: Option<String>, args: Option<String>) -> Result<(), String> {
+    external::open_terminal(&path, tool.as_deref().unwrap_or("default"), exe.as_deref().unwrap_or(""), args.as_deref().unwrap_or(""))
 }
 
 #[tauri::command]
@@ -714,12 +825,26 @@ fn main() {
             ai_explain_commit,
             ai_explain_branch,
             ai_compose,
+            set_ai_config,
+            ai_test_connection,
+            ai_pull_request,
+            ai_resolve_conflict,
             save_patch,
             pick_patch_file,
             conflict_check,
             agent_sessions,
             pr_template,
             repo_summary,
+            set_runtime_settings,
+            tool_versions,
+            git_config_get,
+            gpg_generate_key,
+            gpg_export_key,
+            forget_credentials,
+            delete_orig_files,
+            pick_file,
+            sync_git_credentials,
+            remote_auth,
             repo_status,
             hosting_status,
             set_secret,
@@ -731,6 +856,13 @@ fn main() {
             create_pr,
             merge_pr,
             launchpad,
+            create_issue,
+            set_integration_config,
+            integration_statuses,
+            integration_sign_in,
+            integration_repos,
+            integration_add_ssh_key,
+            integration_ssh_page,
             issue_branch_name,
             open_url,
             term_open,

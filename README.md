@@ -15,7 +15,8 @@ GitCraft is a desktop Git client for exploring repository history and managing e
 - **Use your existing Git setup.** Fetch, pull, and push through the installed Git CLI and its configured credentials. The activity log shows the Git commands GitCraft runs.
 - **Rewrite and resolve.** Interactive rebase (pick, reword, squash, drop, reorder), cherry pick, and a three-pane merge tool for conflicts.
 - **Power tools.** Remotes, worktrees, submodules, Gitflow, Git LFS, sparse checkout, a command palette, a built-in terminal, workspaces, profiles, and four themes.
-- **Pull requests and issues.** Connect GitHub or GitLab with a personal access token to list, view, create, comment on, and merge pull requests, work with issues, and see everything on the Launchpad.
+- **Pull requests and issues.** Connect GitHub, GitHub Enterprise, GitLab, Bitbucket, Azure DevOps, Jira or Trello (browser sign-in for GitHub, GitLab, Bitbucket and Azure DevOps, or a token) to list, view, create, comment on, and merge pull requests, work with issues, clone your repositories, and see everything on the Launchpad.
+- **Preferences like you expect.** A full Preferences screen covers Git, SSH, signing, the editor, the terminal, external tools, AI providers, and per-repository settings.
 - **AI helpers (optional).** With your own Anthropic API key, generate commit and stash messages, explain a commit or branch, or split your changes into focused commits. Nothing is sent unless you press an AI button.
 - **Manage many repositories.** Repository Management lists open, favorite, and recent repositories with their branch and uncommitted changes, and fetches or pulls them all at once.
 - **Stays up to date.** Installed copies check GitHub Releases, download signed updates in the background, and install them on restart. See [RELEASING.md](RELEASING.md) to publish a version.

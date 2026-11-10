@@ -1,3 +1,5 @@
+import { SERVICES, integrations } from "@/lib/integrations";
+import { PreferencesScreen } from "./prefs/Preferences";
 import { RepoManagementDialog } from "./RepoManagement";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
@@ -70,7 +72,7 @@ export function Dialogs() {
     case "plan":
       return <PlanDialog onClose={close} />;
     case "prefs":
-      return <PrefsDialog onClose={close} />;
+      return <PreferencesScreen onClose={close} section={d.section} />;
     case "choice":
       return (
         <Dialog
@@ -116,7 +118,7 @@ export function Dialogs() {
     case "sparse":
       return <SparseDialog onClose={close} />;
     case "accounts":
-      return <AccountsDialog onClose={close} />;
+      return <PreferencesScreen onClose={close} section="integrations" />;
     case "profiles":
       return <ProfilesDialog onClose={close} />;
     case "workspaces":
@@ -271,6 +273,7 @@ function CloneDialog({ onClose }: { onClose: () => void }) {
         </>
       }
     >
+      <HostedRepoPicker onPick={setUrl} />
       <Field label="URL">
         <input autoFocus className={inputClass} value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://github.com/owner/project.git" />
       </Field>
@@ -284,6 +287,51 @@ function CloneDialog({ onClose }: { onClose: () => void }) {
       </label>
       {error && <div className="text-[12px] text-[#ef7a76] whitespace-pre-wrap">{error}</div>}
     </Dialog>
+  );
+}
+
+/** "GitCraft will help you find stuff on {service} when cloning": your repositories on connected services. */
+function HostedRepoPicker({ onPick }: { onPick: (url: string) => void }) {
+  const s = useStore();
+  const st = useQuery({ queryKey: ["integrationStatuses", s.settings.integrations], queryFn: () => integrations.statuses(SERVICES.filter((x) => x.kind === "hosting").map((x) => x.id)) });
+  const connected = (st.data ?? []).filter((x) => x.connected && !x.error);
+  const [svc, setSvc] = useState("");
+  const [q, setQ] = useState("");
+  const id = svc || connected[0]?.id || "";
+  const repos = useQuery({ queryKey: ["hostedRepos", id], queryFn: () => integrations.repos(id), enabled: !!id });
+  if (!connected.length)
+    return (
+      <div className="text-[12px] text-fg3 mb-2">
+        Connect GitHub, GitLab, Bitbucket or Azure DevOps to pick from your repositories.{" "}
+        <button className="text-link hover:underline" onClick={() => s.setDialog({ kind: "prefs", section: "integrations" })}>
+          Integrations
+        </button>
+      </div>
+    );
+  const list = (repos.data ?? []).filter((r) => r.full_name.toLowerCase().includes(q.toLowerCase()));
+  return (
+    <div className="mb-3">
+      <div className="flex gap-2 mb-1.5">
+        <select className={cn(inputClass, "w-[180px]")} value={id} onChange={(e) => setSvc(e.target.value)}>
+          {connected.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.label}
+            </option>
+          ))}
+        </select>
+        <input className={cn(inputClass, "flex-1")} placeholder="Search your repositories" value={q} onChange={(e) => setQ(e.target.value)} />
+      </div>
+      <div className="h-[150px] overflow-auto rounded border border-white/8 bg-white/[0.02]">
+        {repos.isLoading && <div className="p-2 text-[12px] text-fg3">Loading…</div>}
+        {repos.error && <div className="p-2 text-[12px] text-[#ef7a76]">{String(repos.error)}</div>}
+        {list.map((r) => (
+          <button key={r.full_name} className="w-full flex items-center gap-2 px-2 h-[26px] text-left text-[12.5px] hover:bg-hoverrow" title={r.description} onClick={() => onPick(r.https_url || r.ssh_url)}>
+            <span className="truncate text-fg flex-1">{r.full_name}</span>
+            {r.private && <span className="text-[11px] text-fg3">private</span>}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -498,7 +546,7 @@ function PlanDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
-function PrefsDialog({ onClose }: { onClose: () => void }) {
+export function PrefsDialog({ onClose }: { onClose: () => void }) {
   const s = useStore();
   const set = s.settings;
   const tab = s.tabs.find((t) => t.id === s.activeId);
@@ -594,8 +642,25 @@ function PrefsDialog({ onClose }: { onClose: () => void }) {
 }
 
 /** A small form: text fields (optionally with a folder Browse button) and checkboxes. */
-function FormDialog({ title, fields, confirm, help, onSubmit, onClose }: { title: string; fields: FormField[]; confirm: string; help?: string; onSubmit: (v: Record<string, string | boolean>) => void; onClose: () => void }) {
+function FormDialog({
+  title,
+  fields,
+  confirm,
+  help,
+  onSubmit,
+  onClose,
+  action,
+}: {
+  title: string;
+  fields: FormField[];
+  confirm: string;
+  help?: string;
+  onSubmit: (v: Record<string, string | boolean>) => void;
+  onClose: () => void;
+  action?: { label: string; run: (v: Record<string, string | boolean>) => Promise<Record<string, string | boolean>> };
+}) {
   const [v, setV] = useState<Record<string, string | boolean>>(Object.fromEntries(fields.map((f) => [f.key, f.value])));
+  const [running, setRunning] = useState(false);
   const submit = () => {
     onClose();
     onSubmit(v);
@@ -608,6 +673,25 @@ function FormDialog({ title, fields, confirm, help, onSubmit, onClose }: { title
       width={500}
       footer={
         <>
+          {action && (
+            <Button
+              variant="ai"
+              className="mr-auto"
+              disabled={running}
+              onClick={async () => {
+                setRunning(true);
+                try {
+                  setV(await action.run(v));
+                } catch (e) {
+                  useStore.getState().toast(false, String(e));
+                } finally {
+                  setRunning(false);
+                }
+              }}
+            >
+              {running ? "Working…" : action.label}
+            </Button>
+          )}
           <Button onClick={onClose}>Cancel</Button>
           <Button variant="primary" onClick={submit}>
             {confirm}
@@ -841,8 +925,11 @@ function Check({ label, value, onChange }: { label: string; value: boolean; onCh
 export function Toasts() {
   const toasts = useStore((s) => s.toasts);
   const drop = useStore((s) => s.dropToast);
+  // UI Customization > Notification Location (the original's default: bottom left).
+  const where = useStore((s) => s.settings.notificationLocation) ?? "bottom-left";
+  const pos = { "top-left": "left-3 top-[100px]", "top-right": "right-3 top-[100px]", "bottom-left": "left-3 bottom-9", "bottom-right": "right-3 bottom-9" }[where];
   return (
-    <div className="fixed right-3 bottom-9 z-[70] flex flex-col gap-2 w-[300px] pointer-events-none">
+    <div className={cn("fixed z-[70] flex flex-col gap-2 w-[300px] pointer-events-none", pos, where.startsWith("top") && "flex-col-reverse")}>
       {toasts.map((t) => (
         <div
           key={t.id}
@@ -908,7 +995,7 @@ function SparseDialog({ onClose }: { onClose: () => void }) {
 }
 
 /** Identity, credentials, SSH keys and GPG signing (Git's own settings, so other tools agree). */
-function AccountsDialog({ onClose }: { onClose: () => void }) {
+export function AccountsDialog({ onClose }: { onClose: () => void }) {
   const s = useStore();
   const tab = s.tabs.find((t) => t.id === s.activeId);
   const path = tab?.kind === "repo" ? tab.path! : null;
@@ -1010,13 +1097,13 @@ function AccountsDialog({ onClose }: { onClose: () => void }) {
 }
 
 /** Profiles: separate settings and Git identity, switched from the profile button. */
-function ProfilesDialog({ onClose }: { onClose: () => void }) {
+export function ProfilesPanel() {
   const s = useStore();
   const [name, setName] = useState("");
   const [gitName, setGitName] = useState("");
   const [email, setEmail] = useState("");
   return (
-    <Dialog open onClose={onClose} title="Profiles" width={520}>
+    <>
       {s.profiles.map((p) => (
         <div key={p.id} className="flex items-center gap-2 h-[34px] border-b border-white/5 text-[13px]">
           <span className={cn("flex-1 truncate", p.id === s.activeProfile ? "text-white font-semibold" : "text-fg")}>
@@ -1058,6 +1145,14 @@ function ProfilesDialog({ onClose }: { onClose: () => void }) {
         Add Profile
       </Button>
       <div className="text-[12px] text-fg3 mt-3">A new profile starts with a copy of the current settings. Switching sets your global Git name and email to the profile's.</div>
+    </>
+  );
+}
+
+function ProfilesDialog({ onClose }: { onClose: () => void }) {
+  return (
+    <Dialog open onClose={onClose} title="Profiles" width={520}>
+      <ProfilesPanel />
     </Dialog>
   );
 }

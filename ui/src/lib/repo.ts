@@ -1,4 +1,5 @@
 import { QueryClient, useQuery } from "@tanstack/react-query";
+import { invoke } from "@tauri-apps/api/core";
 import { api, type Action, type FileChange, type GitRef, type RefView, type RepoView } from "./api";
 import { useStore } from "./store";
 
@@ -19,11 +20,14 @@ export function useRepo(path: string | undefined, tabId: string) {
   const hidden = useStore((s) => (path ? s.settings.hidden[path] : undefined));
   const solo = useStore((s) => (path ? s.settings.solo[path] : undefined));
   const pinned = useStore((s) => (path ? s.settings.pinned?.[path] : undefined));
-  const view: RefView = { hidden: hidden ?? [], solo: solo ?? [], pinned: pinned ?? null };
+  // General > Initial Commits in Graph / Show All Commits; UI Customization > Smart Branch Visibility.
+  const initial = useStore((s) => (s.settings.showAllCommits ? 10000000 : Math.max(500, s.settings.initialCommits || 2000)));
+  const smart = useStore((s) => !!s.settings.smartBranches);
+  const view: RefView = { hidden: hidden ?? [], solo: solo ?? [], pinned: pinned ?? null, smart };
   return useQuery({
-    queryKey: ["repo", path, limit, view],
+    queryKey: ["repo", path, limit, view, initial],
     queryFn: async () => {
-      const r = await api.openRepo(path!, limit || undefined, view);
+      const r = await api.openRepo(path!, limit || initial, view);
       latest.set(path!, r);
       return r;
     },
@@ -131,6 +135,17 @@ const BUSY_LABEL: Partial<Record<Action["type"], string>> = {
 /** Run a Git action in the background, show the result and refresh the repository. */
 export async function act(path: string, action: Action, quiet = false): Promise<boolean> {
   const st = useStore.getState();
+  const set = st.settings;
+  // Commit > Merge Behavior: Squash - local merges stage the changes for one commit instead of a merge commit.
+  if (action.type === "merge" && set.squashMerge) {
+    const head = latest.get(path)?.head_branch ?? "HEAD";
+    const ok = await act(path, { type: "mergeSquash", branch: action.branch }, quiet);
+    if (ok) st.setDraft(path, { summary: `Squash merge ${action.branch} into ${head}`, description: "", amend: false });
+    return ok;
+  }
+  // Commit > Remove comments from commit messages.
+  if (action.type === "commit" && set.stripComments) action = { ...action, stripComments: true };
+  const wasMerging = !!latest.get(path)?.state_note;
   st.setBusy(BUSY_LABEL[action.type] ?? "Working…");
   const light = indexOnly(action);
   const before = latest.get(path)?.status;
@@ -146,8 +161,13 @@ export async function act(path: string, action: Action, quiet = false): Promise<
       offerForcePush(path);
       return false;
     }
+    if (!r.ok && NETWORK.has(action.type) && signInProblem(r.message)) {
+      void offerSignInHelp(path, action, r.message);
+      return false;
+    }
     if (!r.ok || (!quiet && st.settings.notifySuccess)) st.toast(r.ok, r.message);
     ok = r.ok;
+    await afterAction(path, action, r.ok, r.message, wasMerging);
     return r.ok;
   } catch (e) {
     st.toast(false, String(e));
@@ -161,6 +181,113 @@ export async function act(path: string, action: Action, quiet = false): Promise<
     }
     st.setBusy(null);
   }
+}
+
+const NETWORK = new Set<Action["type"]>(["fetch", "pull", "push", "fetchRemote"]);
+const MOVES_HEAD = new Set<Action["type"]>(["pull", "checkout", "checkoutRemote", "merge", "mergeSquash", "rebase", "interactiveRebase", "fastForward", "reset", "stashPop", "stashApply", "cherryPick"]);
+
+/** Preferences that act after a Git action finishes. */
+async function afterAction(path: string, action: Action, ok: boolean, message: string, wasMerging: boolean) {
+  const set = useStore.getState().settings;
+  // General > Keep submodules up to date: "Automatically update all submodules after performing a Git action".
+  if (ok && set.autoUpdateSubmodules && MOVES_HEAD.has(action.type) && (latest.get(path)?.submodules.length ?? 0) > 0)
+    await api.run(path, { type: "submoduleUpdate", paths: [] }).catch(() => undefined);
+  // General > Delete ".orig" files after merging.
+  if (ok && set.deleteOrigAfterMerge && (wasMerging && (action.type === "commit" || action.type === "markResolved" || action.type === "continueRebase") || action.type === "merge"))
+    await invoke<string[]>("delete_orig_files", { path }).catch(() => undefined);
+  // Notifications > Enable Desktop Notifications: long network actions that finish while GitCraft is in the background.
+  if (set.desktopNotifications && NETWORK.has(action.type) && !document.hasFocus() && "Notification" in window && Notification.permission === "granted") {
+    try {
+      new Notification(ok ? "GitCraft" : "GitCraft: action failed", { body: `${path.split(/[\\/]/).pop()}: ${message.split("\n")[0]}` });
+    } catch {
+      /* notifications unavailable */
+    }
+  }
+}
+
+const SSH_REFUSED = /Permission denied \(publickey|Could not read from remote repository|Host key verification failed/i;
+const HTTPS_REFUSED = /Authentication failed|could not read Username|terminal prompts disabled|returned error: 403|Permission to .* denied|Invalid username or (password|token)/i;
+
+/** Git couldn't sign in to the remote (SSH key refused, or no / wrong HTTPS sign-in). */
+export function signInProblem(message: string): "ssh" | "https" | null {
+  if (SSH_REFUSED.test(message)) return "ssh";
+  if (HTTPS_REFUSED.test(message)) return "https";
+  return null;
+}
+
+interface RemoteAuth {
+  remote: string;
+  url: string;
+  ssh: boolean;
+  host: string;
+  https_url: string | null;
+  connected: boolean;
+}
+
+/** Explain a refused sign-in and offer the fixes: switch an SSH remote to HTTPS (browser sign-in, or the account
+ *  connected in Accounts), add this computer's SSH key to the service, or connect an account. */
+async function offerSignInHelp(path: string, action: Action, message: string) {
+  const st = useStore.getState();
+  const gitlabHost = st.settings.gitlabHost ?? "";
+  const info = await invoke<RemoteAuth>("remote_auth", { path, gitlabHost }).catch(() => null);
+  const service = info?.host === "github.com" ? "GitHub" : info?.host ? info.host : "the server";
+  const openAccounts = { label: "Open Accounts", onSelect: () => st.setDialog({ kind: "accounts" }) };
+  if (info && info.ssh) {
+    const https = info.https_url;
+    const keysPage = info.host === "github.com" ? "https://github.com/settings/ssh/new" : `https://${info.host}/-/user_settings/ssh_keys`;
+    st.setDialog({
+      kind: "choice",
+      title: `${service} didn't accept your SSH key`,
+      text:
+        `The remote "${info.remote}" uses SSH (${info.url}), and ${service} refused the SSH key on this computer. ` +
+        `Usually the key just hasn't been added to your ${service} account.\n\n` +
+        (https
+          ? `Easiest fix: use HTTPS instead. You sign in once (in your browser${info.connected ? ", or with the account connected in Accounts" : ""}) and Push, Pull and Fetch work from then on.\n\n`
+          : "") +
+        `Or add this computer's SSH key to ${service}: GitCraft copies the key and opens the page to paste it.\n\nGit said: ${message.split("\n")[0]}`,
+      choices: [
+        ...(https
+          ? [
+              {
+                label: "Use HTTPS (recommended)",
+                variant: "primary" as const,
+                onSelect: async () => {
+                  const ok = await act(path, { type: "remoteEdit", name: info.remote, newName: "", url: https, pushUrl: "" }, true);
+                  if (ok) {
+                    st.toast(true, `${info.remote} now uses ${https}. Trying again…`);
+                    await act(path, action);
+                  }
+                },
+              },
+            ]
+          : []),
+        {
+          label: "Add my SSH key",
+          onSelect: async () => {
+            const acc = await api.accountInfo(path).catch(() => null);
+            const key = acc?.ssh_keys.find((k) => /id_ed25519/.test(k.path)) ?? acc?.ssh_keys[0];
+            if (!key) return st.setDialog({ kind: "accounts" });
+            await navigator.clipboard.writeText(key.public).catch(() => undefined);
+            st.toast(true, `Copied ${key.path.split(/[\\/]/).pop()} - paste it on the page that just opened, then try again`);
+            await invoke("open_url", { url: keysPage }).catch(() => undefined);
+          },
+        },
+        openAccounts,
+      ],
+    });
+    return;
+  }
+  st.setDialog({
+    kind: "choice",
+    title: `Sign in to ${service}`,
+    text:
+      `${service} didn't accept the sign-in for "${info?.remote ?? "the remote"}" (${info?.url ?? ""}).\n\n` +
+      (info?.connected
+        ? `GitCraft used the token saved in Accounts. Check it hasn't expired and that it may push (classic token: "repo" scope; fine-grained: Contents read and write).`
+        : `Connect your ${service} account in Accounts with a personal access token that may push (classic token: "repo" scope), and GitCraft will use it for Push, Pull and Fetch.`) +
+      `\n\nGit said: ${message.split("\n")[0]}`,
+    choices: [{ ...openAccounts, variant: "primary" as const }],
+  });
 }
 
 /** The remote has commits we don't: pull first, or force push (with lease, or without as a last resort). */
@@ -191,7 +318,8 @@ export async function openRepoPath(path: string) {
   try {
     const r = await api.openRepo(path);
     latest.set(r.path, r);
-    st.openRepoTab(r.path, r.name);
+    const main = r.worktrees[0]?.path;
+    st.openRepoTab(r.path, r.name, main && main.replace(/\\/g, "/").toLowerCase() !== r.path.replace(/\\/g, "/").toLowerCase() ? main : undefined);
   } catch (e) {
     st.toast(false, String(e));
   }

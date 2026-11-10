@@ -85,9 +85,18 @@ export type DialogState =
   | { kind: "shortcuts" }
   | { kind: "about" }
   | { kind: "plan" }
-  | { kind: "prefs" }
+  | { kind: "prefs"; section?: string }
   | { kind: "fileFinder" }
-  | { kind: "form"; title: string; fields: FormField[]; confirm: string; help?: string; onSubmit: (v: Record<string, string | boolean>) => void }
+  | {
+      kind: "form";
+      title: string;
+      fields: FormField[];
+      confirm: string;
+      help?: string;
+      onSubmit: (v: Record<string, string | boolean>) => void;
+      /** An extra button that fills in the fields (e.g. "Write with AI"). */
+      action?: { label: string; run: (v: Record<string, string | boolean>) => Promise<Record<string, string | boolean>> };
+    }
   | { kind: "cleanup" }
   | { kind: "sparse" }
   | { kind: "accounts" }
@@ -154,7 +163,126 @@ export interface Settings {
   ghostRefs: boolean;
   /** Self-managed GitLab host (empty = gitlab.com only). */
   gitlabHost: string;
+  // ---- Preferences screen (defaults: the original's getDefaultSettings in main.bundle.js) ----
+  /** General > Keep submodules up to date (autoUpdateSubmodules: true). */
+  autoUpdateSubmodules: boolean;
+  /** General > Delete ".orig" files after merging (deleteOrigAfterMerge: false). */
+  deleteOrigAfterMerge: boolean;
+  /** General > Remember tabs (rememberTabs: true). */
+  rememberTabs: boolean;
+  /** General > Initial Commits in Graph (maxCommitsInGraph 2000, minimum 500) / Show All Commits. */
+  initialCommits: number;
+  showAllCommits: boolean;
+  /** General > Use extended logging in activity log. */
+  extendedLog: boolean;
+  /** General > Enable proactive conflict detection with target branch (conflictDetection.enabled: true). */
+  conflictDetection: boolean;
+  /** General > Use In-App Terminal Instead (of an external terminal). */
+  useInAppTerminal: boolean;
+  /** Commit > Merge Behavior: squash local merges. */
+  squashMerge: boolean;
+  /** SSH: use the system SSH agent / config, or this key pair. */
+  sshUseAgent: boolean;
+  sshPrivateKey: string;
+  sshPublicKey: string;
+  /** UI Customization. */
+  notificationLocation: "top-left" | "top-right" | "bottom-left" | "bottom-right";
+  dateFormat: string;
+  dateTimeFormat: string;
+  dateVerboseFormat: string;
+  authorInitials: boolean;
+  highlightRowsOnHover: boolean;
+  smartBranches: boolean;
+  autogroupWorktreeTabs: boolean;
+  showAgentsView: boolean;
+  /** Notifications > Enable Desktop Notifications (showDesktopNotifications: false). */
+  desktopNotifications: boolean;
+  /** Editor (editor: fontSize 12, tabSize 4, showLineNumbers, syntaxHighlighting, CRLF on Windows). */
+  editorFontFamily: string;
+  editorFontSize: number;
+  editorLineNumbers: boolean;
+  editorSyntax: boolean;
+  editorTabSize: number;
+  editorEol: "lf" | "crlf";
+  monospaceOnly: boolean;
+  /** In-App Terminal (cli: fontSize 12, lineHeight 1.2, cursor bar, dim when unfocused, PowerShell). */
+  termShell: string;
+  termFontFamily: string;
+  termFontSize: number;
+  termLineHeight: number;
+  termCursor: "block" | "underline" | "bar";
+  termDim: boolean;
+  /** External Tools: editor, terminal, coding agent. */
+  externalEditor: string;
+  editorPath: string;
+  editorFileArgs: string;
+  editorRepoArgs: string;
+  externalTerminal: string;
+  terminalPath: string;
+  terminalArgs: string;
+  codingAgent: string;
+  agentArgs: string;
+  /** Agents: setup commands for a new agent worktree, and WIP rows for worktrees. */
+  agentSetup: string;
+  showWorktreeWip: boolean;
+  /** Commit: apply the template; strip # comments (templates.useCommitTemplate true, shouldRemoveComments false). */
+  useCommitTemplate: boolean;
+  stripComments: boolean;
+  /** Experimental > Git Executable (empty = git on PATH). */
+  gitPath: string;
+  ai: AiSettings;
+  integrations: IntegrationSettings;
+  /** Repo-specific preferences, per repository path. */
+  repoPrefs: Record<string, RepoPrefs>;
 }
+
+export interface AiSettings {
+  enabled: boolean;
+  provider: "anthropic" | "openai" | "google" | "ollama" | "custom";
+  endpoint: string;
+  instructions: string;
+  /** Feature (commit, compose, stash, explain, pr, conflict) -> model. */
+  models: Record<string, string>;
+  featureInstructions: Record<string, string>;
+}
+
+export interface IntegrationSettings {
+  githubEnterpriseHost: string;
+  gitlabHost: string;
+  bitbucketUser: string;
+  bitbucketServerHost: string;
+  bitbucketServerUser: string;
+  azureOrg: string;
+  jiraSite: string;
+  jiraEmail: string;
+  jiraServerHost: string;
+  trelloKey: string;
+}
+
+export interface RepoPrefs {
+  /** Issue Tracker: "" = the hosting service's issues; jira, jira-server, trello, azure. */
+  tracker?: { kind: string; project: string };
+  /** Conflict Prevention for this repository, base branch patterns and excluded branches (one per line). */
+  conflictDetection?: boolean;
+  baseBranches?: string;
+  excludedBranches?: string;
+  /** Encoding: default encoding for reading / writing files. */
+  encoding?: string;
+}
+
+export const DEFAULT_AI: AiSettings = { enabled: true, provider: "anthropic", endpoint: "", instructions: "", models: {}, featureInstructions: {} };
+export const DEFAULT_INTEGRATIONS: IntegrationSettings = {
+  githubEnterpriseHost: "",
+  gitlabHost: "",
+  bitbucketUser: "",
+  bitbucketServerHost: "",
+  bitbucketServerUser: "",
+  azureOrg: "",
+  jiraSite: "",
+  jiraEmail: "",
+  jiraServerHost: "",
+  trelloKey: "",
+};
 
 export interface Workspace {
   id: string;
@@ -234,6 +362,58 @@ export const DEFAULT_SETTINGS: Settings = {
   pinned: {},
   ghostRefs: true,
   gitlabHost: "",
+  autoUpdateSubmodules: true,
+  deleteOrigAfterMerge: false,
+  rememberTabs: true,
+  initialCommits: 2000,
+  showAllCommits: false,
+  extendedLog: false,
+  conflictDetection: true,
+  useInAppTerminal: false,
+  squashMerge: false,
+  sshUseAgent: true,
+  sshPrivateKey: "",
+  sshPublicKey: "",
+  notificationLocation: "bottom-left",
+  dateFormat: "MM/DD/YYYY",
+  dateTimeFormat: "MM/DD/YYYY @ h:mm A",
+  dateVerboseFormat: "MMMM D, YYYY h:mm A",
+  authorInitials: false,
+  highlightRowsOnHover: true,
+  smartBranches: false,
+  autogroupWorktreeTabs: true,
+  showAgentsView: true,
+  desktopNotifications: false,
+  editorFontFamily: "",
+  editorFontSize: 12,
+  editorLineNumbers: true,
+  editorSyntax: true,
+  editorTabSize: 4,
+  editorEol: typeof navigator !== "undefined" && /Win/.test(navigator.platform) ? "crlf" : "lf",
+  monospaceOnly: true,
+  termShell: "powershell",
+  termFontFamily: "",
+  termFontSize: 12,
+  termLineHeight: 1.2,
+  termCursor: "bar",
+  termDim: true,
+  externalEditor: "vscode",
+  editorPath: "",
+  editorFileArgs: "",
+  editorRepoArgs: "",
+  externalTerminal: "default",
+  terminalPath: "",
+  terminalArgs: "",
+  codingAgent: "claude",
+  agentArgs: "",
+  agentSetup: "",
+  showWorktreeWip: true,
+  useCommitTemplate: true,
+  stripComments: false,
+  gitPath: "",
+  ai: DEFAULT_AI,
+  integrations: DEFAULT_INTEGRATIONS,
+  repoPrefs: {},
 };
 
 /** Same numbers as src/metrics.rs; replaced by the Rust values at start-up. */
@@ -314,7 +494,7 @@ interface Store {
   version: string;
   metrics: Metrics;
 
-  openRepoTab: (path: string, name: string) => void;
+  openRepoTab: (path: string, name: string, group?: string) => void;
   newTab: () => void;
   openLaunchpad: () => void;
   closeTab: (id: string) => void;
@@ -365,7 +545,7 @@ export const useStore = create<Store>((set, get) => {
     version: "0.1.0",
     metrics: DEFAULT_METRICS,
 
-    openRepoTab: (path, name) => {
+    openRepoTab: (path, name, group) => {
       const s = get();
       const existing = s.tabs.find((t) => t.kind === "repo" && t.path?.toLowerCase() === path.toLowerCase());
       const recents = [path, ...s.settings.recents.filter((r) => r.toLowerCase() !== path.toLowerCase())].slice(0, 20);
@@ -384,7 +564,11 @@ export const useStore = create<Store>((set, get) => {
           settings: { ...s.settings, recents },
         });
       } else {
-        set({ tabs: [...s.tabs, tab], activeId: tab.id, ui: { ...s.ui, [tab.id]: defaultUi() }, settings: { ...s.settings, recents } });
+        // UI Customization > Automatically group worktree tabs together: a linked worktree opens next to its repository.
+        const norm = (p?: string) => (p ?? "").replace(/\\/g, "/").toLowerCase();
+        const at = group && s.settings.autogroupWorktreeTabs !== false ? s.tabs.map((t) => norm(t.path) === norm(group)).lastIndexOf(true) : -1;
+        const tabs = at >= 0 ? [...s.tabs.slice(0, at + 1), tab, ...s.tabs.slice(at + 1)] : [...s.tabs, tab];
+        set({ tabs, activeId: tab.id, ui: { ...s.ui, [tab.id]: defaultUi() }, settings: { ...s.settings, recents } });
       }
     },
     newTab: () => {

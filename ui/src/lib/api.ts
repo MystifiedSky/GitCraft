@@ -1,3 +1,4 @@
+import { useStore } from "./store";
 import { invoke } from "@tauri-apps/api/core";
 
 export type RefKind = "Local" | "Remote" | "Tag";
@@ -111,6 +112,7 @@ export interface RefView {
   hidden: string[];
   solo: string[];
   pinned?: string | null;
+  smart?: boolean;
 }
 
 export type PatchOp = "stage" | "unstage" | "discard";
@@ -223,7 +225,7 @@ export type Action =
   | { type: "unstageAll" }
   | { type: "discard"; paths: string[] }
   | { type: "discardAll" }
-  | { type: "commit"; summary: string; description: string; amend: boolean; stageAll: boolean; skipHooks?: boolean }
+  | { type: "commit"; summary: string; description: string; amend: boolean; stageAll: boolean; skipHooks?: boolean; stripComments?: boolean }
   | { type: "checkout"; target: string }
   | { type: "checkoutRemote"; remoteBranch: string }
   | { type: "createBranch"; name: string; at: string | null; checkout: boolean }
@@ -357,7 +359,11 @@ export const api = {
   commitStats: (path: string, shas: string[]) => invoke<Stats[]>("commit_stats", { path, shas }),
   rangeFiles: (path: string, from: string, to: string) => invoke<FileChange[]>("range_files", { path, from, to }),
   trackedFiles: (path: string) => invoke<string[]>("tracked_files", { path }),
-  openInEditor: (path: string) => invoke<void>("open_in_editor", { path }),
+  /** Preferences > External Tools > Editor. */
+  openInEditor: (path: string, file?: string) => {
+    const t = useStore.getState().settings;
+    return invoke<void>("open_in_editor", { path, file: file ?? null, tool: t.externalEditor, exe: t.editorPath, fileArgs: t.editorFileArgs, repoArgs: t.editorRepoArgs });
+  },
   accountInfo: (path: string | null) => invoke<AccountInfo>("account_info", { path }),
   setGitConfig: (path: string | null, scope: "global" | "local", key: string, value: string) => invoke<void>("set_git_config", { path, scope, key, value }),
   generateSshKey: (email: string, name: string) => invoke<string>("generate_ssh_key", { email, name }),
@@ -381,7 +387,15 @@ export const api = {
   pickFolder: (title: string) => invoke<string | null>("pick_folder", { title }),
   initRepo: (parent: string, name: string, options?: InitOptions) => invoke<string>("init_repo", { parent, name, options: options ?? null }),
   cloneRepo: (url: string, parent: string, depth?: number) => invoke<string>("clone_repo", { url, parent, depth: depth ?? null }),
-  openTerminal: (path: string) => invoke<void>("open_terminal", { path }),
+  /** Preferences > External Tools > Terminal; General > Use In-App Terminal Instead opens the built-in one. */
+  openTerminal: (path: string) => {
+    const t = useStore.getState().settings;
+    if (t.useInAppTerminal) {
+      useStore.getState().setSettings({ showTerminal: true });
+      return Promise.resolve();
+    }
+    return invoke<void>("open_terminal", { path, tool: t.externalTerminal, exe: t.terminalPath, args: t.terminalArgs });
+  },
   openFileManager: (path: string) => invoke<void>("open_file_manager", { path }),
   loadSettings: () => invoke<unknown>("load_settings"),
   saveSettings: (settings: unknown) => invoke<void>("save_settings", { settings }),

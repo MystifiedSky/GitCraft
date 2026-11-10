@@ -112,9 +112,54 @@ impl GitOut {
     }
 }
 
+/// Sign-ins for HTTPS remotes: (host, user name, token). Filled from the services connected in Accounts
+/// (GitHub / GitLab tokens in the system's credential store), like the original's own GitHub sign-in.
+static HOST_TOKENS: std::sync::RwLock<Vec<(String, String, String)>> = std::sync::RwLock::new(Vec::new());
+
+pub fn set_host_tokens(tokens: Vec<(String, String, String)>) {
+    if let Ok(mut t) = HOST_TOKENS.write() {
+        *t = tokens;
+    }
+}
+
+/// Config (through GIT_CONFIG_COUNT, so nothing shows in the command line or the activity log) that makes Git
+/// use a connected service's token for https://<host>. The token itself travels in an environment variable.
+pub fn credential_env(tokens: &[(String, String, String)]) -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    let mut n = 0;
+    for (i, (host, user, token)) in tokens.iter().enumerate() {
+        let key = format!("credential.https://{host}.helper");
+        // An empty helper first clears any other helper for this host, so Git doesn't ask twice.
+        env.push((format!("GIT_CONFIG_KEY_{n}"), key.clone()));
+        env.push((format!("GIT_CONFIG_VALUE_{n}"), String::new()));
+        n += 1;
+        env.push((format!("GIT_CONFIG_KEY_{n}"), key));
+        env.push((
+            format!("GIT_CONFIG_VALUE_{n}"),
+            format!("!f() {{ test \"$1\" = get || exit 0; echo username={user}; echo \"password=$GITCRAFT_TOKEN_{i}\"; }}; f"),
+        ));
+        n += 1;
+        env.push((format!("GITCRAFT_TOKEN_{i}"), token.clone()));
+    }
+    if n > 0 {
+        env.push(("GIT_CONFIG_COUNT".into(), n.to_string()));
+    }
+    env
+}
+
 pub fn git_cmd(dir: &Path) -> Command {
-    let mut c = Command::new("git");
+    // Preferences > Experimental > Git Executable, and SSH > private key (when the SSH agent isn't used).
+    let rt = crate::prefs::runtime();
+    let mut c = Command::new(crate::prefs::git_program());
     c.current_dir(dir);
+    if let Some(ssh) = crate::prefs::ssh_command(&rt) {
+        c.env("GIT_SSH_COMMAND", ssh);
+    }
+    if let Ok(t) = HOST_TOKENS.read() {
+        if !t.is_empty() {
+            c.envs(credential_env(&t));
+        }
+    }
     c.env("GIT_TERMINAL_PROMPT", "0");
     c.env("GIT_EDITOR", "true");
     c.env("GIT_SEQUENCE_EDITOR", "true");
@@ -170,6 +215,28 @@ pub struct RefView {
     /// "Pin to Left": full ref name whose line is drawn in lane 0.
     #[serde(default)]
     pub pinned: Option<String>,
+    /// UI Customization > Branch visibility: Smart Branch Visibility.
+    #[serde(default)]
+    pub smart: bool,
+}
+
+/// Smart Branch Visibility: the checked-out branch, its upstream and the branch it will merge into
+/// (the remote's default branch).
+pub fn smart_refs(dir: &Path) -> Vec<String> {
+    let mut v = vec!["HEAD".to_string()];
+    let head = run(dir, &["symbolic-ref", "-q", "HEAD"]).stdout.trim().to_string();
+    if !head.is_empty() {
+        let up = run(dir, &["for-each-ref", "--format=%(upstream)", &head]).stdout.trim().to_string();
+        v.push(head);
+        if !up.is_empty() {
+            v.push(up);
+        }
+    }
+    if let Some(t) = crate::extras::default_target(dir) {
+        v.push(t);
+    }
+    v.dedup();
+    v
 }
 
 /// Arguments for `git log` that select the commits the graph should show.
@@ -197,6 +264,13 @@ pub fn load(dir: &Path, max_commits: usize) -> RepoData {
 }
 
 pub fn load_view(dir: &Path, max_commits: usize, view: &RefView) -> RepoData {
+    let smart_view;
+    let view = if view.smart && view.solo.is_empty() {
+        smart_view = RefView { solo: smart_refs(dir), ..view.clone() };
+        &smart_view
+    } else {
+        view
+    };
     let mut d = RepoData::default();
 
     // History, newest first, every branch.

@@ -1,3 +1,4 @@
+import { EDITORS } from "./prefs/GeneralSections";
 import { checkForUpdates, download, installAndRestart, RELEASES_URL, updateMenuLabel, useUpdates } from "@/lib/updates";
 import { hosting } from "@/lib/hosting";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -65,7 +66,7 @@ export function MenuBar() {
     { label: "Init Repo...", shortcut: `${MOD}+I`, onSelect: () => s.setDialog({ kind: "init" }) },
     { label: "Open Repo...", shortcut: `${MOD}+O`, onSelect: () => s.setDialog({ kind: "open" }) },
     { label: "Open Repo Management", shortcut: `Alt+${MOD}+O`, onSelect: () => s.setDialog({ kind: "repoManagement" }) },
-    { label: "Open Repo in VS Code", shortcut: `${MOD}+Shift+E`, disabled: !repoPath, onSelect: () => repoPath && api.openInEditor(repoPath) },
+    { label: `Open Repo in ${editorName(set.externalEditor)}`, shortcut: `${MOD}+Shift+E`, disabled: !repoPath, onSelect: () => repoPath && api.openInEditor(repoPath) },
     { separator: true },
     { label: "Open External Terminal", shortcut: "Alt+T", disabled: !repoPath, onSelect: () => repoPath && api.openTerminal(repoPath) },
     { label: "Open in File Manager", shortcut: "Alt+O", disabled: !repoPath, onSelect: () => repoPath && api.openFileManager(repoPath) },
@@ -132,4 +133,9 @@ export function MenuBar() {
       ))}
     </div>
   );
+}
+
+/** "Open Repo in {0}" (menuStrings OpenRepoInNamedExternalEditor). */
+function editorName(tool: string) {
+  return EDITORS.find(([id]) => id === tool)?.[1] ?? "External Editor";
 }

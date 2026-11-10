@@ -19,6 +19,27 @@ pub struct Terminals {
     next: AtomicU32,
 }
 
+/// Preferences > In-App Terminal > Default In-App Terminal: powershell, pwsh, cmd, gitbash, wsl (Windows);
+/// default, bash, zsh, fish elsewhere.
+pub fn shell_for(name: &str) -> CommandBuilder {
+    match name {
+        "powershell" if cfg!(windows) => CommandBuilder::new("powershell.exe"),
+        "pwsh" => CommandBuilder::new(if cfg!(windows) { "pwsh.exe" } else { "pwsh" }),
+        "cmd" if cfg!(windows) => CommandBuilder::new("cmd.exe"),
+        "wsl" if cfg!(windows) => CommandBuilder::new("wsl.exe"),
+        "gitbash" if cfg!(windows) => {
+            // Git for Windows: <install>\cmd\git.exe -> <install>\bin\bash.exe
+            let git = std::process::Command::new("where").arg("git").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or_default().trim().to_string()).unwrap_or_default();
+            let bash = std::path::Path::new(&git).parent().and_then(|p| p.parent()).map(|p| p.join("bin").join("bash.exe")).filter(|p| p.exists());
+            let mut c = CommandBuilder::new(bash.map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "bash.exe".into()));
+            c.args(["--login", "-i"]);
+            c
+        }
+        "bash" | "zsh" | "fish" => CommandBuilder::new(name),
+        _ => default_shell(),
+    }
+}
+
 /// The shell to start: PowerShell on Windows, the user's shell elsewhere.
 fn default_shell() -> CommandBuilder {
     if cfg!(windows) {
@@ -52,6 +73,7 @@ impl Terminals {
     /// Start a shell in `cwd`. Output goes to `on_data`; `on_exit` runs when the shell ends.
     pub fn open(
         &self,
+        shell: &str,
         cwd: &str,
         cols: u16,
         rows: u16,
@@ -62,7 +84,7 @@ impl Terminals {
         let pair = pty
             .openpty(PtySize { rows: rows.max(2), cols: cols.max(10), pixel_width: 0, pixel_height: 0 })
             .map_err(|e| e.to_string())?;
-        let mut cmd = default_shell();
+        let mut cmd = shell_for(shell);
         cmd.cwd(cwd);
         cmd.env("TERM", "xterm-256color");
         let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
@@ -131,7 +153,7 @@ mod tests {
         let out = Arc::new(Mutex::new(String::new()));
         let o2 = out.clone();
         let id = t
-            .open(&std::env::temp_dir().to_string_lossy(), 80, 24, Arc::new(move |_, s| o2.lock().unwrap().push_str(&s)), Arc::new(|_| {}))
+            .open("", &std::env::temp_dir().to_string_lossy(), 80, 24, Arc::new(move |_, s| o2.lock().unwrap().push_str(&s)), Arc::new(|_| {}))
             .unwrap();
         // Like xterm.js does in the app: answer the console's "where is the cursor?" request.
         let mut answered = false;

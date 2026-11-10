@@ -224,7 +224,7 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
   // Commit template (Preferences > Commit): fill an empty, untouched commit box.
   useEffect(() => {
     const t = s.settings;
-    if (!merging && !draft.summary && !draft.description && !draft.amend && (t.templateSummary || t.templateDescription))
+    if (t.useCommitTemplate !== false && !merging && !draft.summary && !draft.description && !draft.amend && (t.templateSummary || t.templateDescription))
       s.setDraft(repo.path, { summary: t.templateSummary, description: t.templateDescription });
   }, [repo.path, merging, draft.summary, draft.description]);
   // Prefill the commit box with the message git prepared for the merge (MERGE_MSG).

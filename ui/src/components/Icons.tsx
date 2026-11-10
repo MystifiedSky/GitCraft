@@ -1,4 +1,22 @@
+import { useEffect, useState } from "react";
 import { authorColor, initials } from "@/lib/utils";
+import { useStore } from "@/lib/store";
+
+/** Gravatar address for an e-mail (SHA-256 of the trimmed, lower-case address). */
+const avatarCache = new Map<string, Promise<string>>();
+function gravatar(email: string, size: number): Promise<string> {
+  const key = `${email}|${size}`;
+  let p = avatarCache.get(key);
+  if (!p) {
+    p = crypto.subtle.digest("SHA-256", new TextEncoder().encode(email.trim().toLowerCase())).then((h) => {
+      const hex = [...new Uint8Array(h)].map((b) => b.toString(16).padStart(2, "0")).join("");
+      return `https://gravatar.com/avatar/${hex}?s=${size * 2}&d=404`;
+    });
+    avatarCache.set(key, p);
+  }
+  return p;
+}
+const missing = new Set<string>();
 
 /** GitCraft's own mark: two lanes joining, drawn with simple shapes. */
 export function AppMark({ size = 16 }: { size?: number }) {
@@ -14,6 +32,32 @@ export function AppMark({ size = 16 }: { size?: number }) {
 }
 
 export function Avatar({ name, email, size = 22 }: { name: string; email: string; size?: number }) {
+  // UI Customization > "Display author initials ... instead of avatars" (off by default: avatars where the author has one).
+  const initialsOnly = useStore((s) => s.settings.authorInitials);
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    setSrc(null);
+    if (!initialsOnly && email && !missing.has(email)) gravatar(email, size).then((u) => live && setSrc(u));
+    return () => {
+      live = false;
+    };
+  }, [email, size, initialsOnly]);
+  if (src)
+    return (
+      <img
+        src={src}
+        alt={name}
+        width={size}
+        height={size}
+        className="rounded-full shrink-0 object-cover"
+        style={{ width: size, height: size }}
+        onError={() => {
+          missing.add(email);
+          setSrc(null);
+        }}
+      />
+    );
   return (
     <span
       className="inline-flex items-center justify-center rounded-full text-white font-semibold shrink-0"

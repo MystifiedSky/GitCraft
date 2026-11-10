@@ -37,6 +37,14 @@ interface Tab {
   key: number;
   id: number | null;
   title: string;
+  /** A command typed into the shell once it starts (coding agent sessions). */
+  run?: string;
+}
+
+/** Open a new in-app terminal tab that runs `command` (shows the terminal panel). */
+export function runInTerminal(command: string, title: string) {
+  useStore.getState().setSettings({ showTerminal: true });
+  setTimeout(() => window.dispatchEvent(new CustomEvent("gitcraft-terminal-run", { detail: { command, title } })), 50);
 }
 
 /** In-app terminal under the graph, with terminal tabs (Ctrl+` toggles it). */
@@ -49,6 +57,18 @@ export function TerminalPanel({ cwd }: { cwd: string }) {
     setTabs([...tabs, { key, id: null, title: `Terminal ${key}` }]);
     setActive(key);
   };
+  useEffect(() => {
+    const on = (e: Event) => {
+      const { command, title } = (e as CustomEvent<{ command: string; title: string }>).detail;
+      setTabs((all) => {
+        const key = Math.max(0, ...all.map((t) => t.key)) + 1;
+        setActive(key);
+        return [...all, { key, id: null, title, run: command }];
+      });
+    };
+    window.addEventListener("gitcraft-terminal-run", on);
+    return () => window.removeEventListener("gitcraft-terminal-run", on);
+  }, []);
   const close = (key: number) => {
     const t = tabs.find((x) => x.key === key);
     if (t?.id) invoke("term_close", { id: t.id });
@@ -103,6 +123,7 @@ export function TerminalPanel({ cwd }: { cwd: string }) {
           <TermView
             key={t.key}
             cwd={cwd}
+            run={t.run}
             visible={active === t.key}
             onReady={(id) => setTabs((all) => all.map((x) => (x.key === t.key ? { ...x, id } : x)))}
             onExit={() => close(t.key)}
@@ -113,7 +134,11 @@ export function TerminalPanel({ cwd }: { cwd: string }) {
   );
 }
 
-function TermView({ cwd, visible, onReady, onExit }: { cwd: string; visible: boolean; onReady: (id: number) => void; onExit: () => void }) {
+function TermView({ cwd, run, visible, onReady, onExit }: { cwd: string; run?: string; visible: boolean; onReady: (id: number) => void; onExit: () => void }) {
+  // Preferences > In-App Terminal.
+  const pref = useStore.getState().settings;
+  const [focused, setFocused] = useState(true);
+  const dim = useStore((s) => s.settings.termDim !== false);
   const host = useRef<HTMLDivElement>(null);
   const fit = useRef<FitAddon | null>(null);
   const term = useRef<Terminal | null>(null);
@@ -122,7 +147,16 @@ function TermView({ cwd, visible, onReady, onExit }: { cwd: string; visible: boo
   cb.current = { onReady, onExit };
 
   useEffect(() => {
-    const t = new Terminal({ fontFamily: "'Cascadia Mono', Consolas, monospace", fontSize: 12.5, theme: THEME, cursorBlink: true, scrollback: 5000, allowProposedApi: true });
+    const t = new Terminal({
+      fontFamily: `${pref.termFontFamily ? `'${pref.termFontFamily}', ` : ""}'Cascadia Mono', Consolas, monospace`,
+      fontSize: pref.termFontSize || 12,
+      lineHeight: pref.termLineHeight || 1.2,
+      cursorStyle: pref.termCursor || "bar",
+      theme: THEME,
+      cursorBlink: true,
+      scrollback: 5000,
+      allowProposedApi: true,
+    });
     const f = new FitAddon();
     t.loadAddon(f);
     t.open(host.current!);
@@ -140,11 +174,12 @@ function TermView({ cwd, visible, onReady, onExit }: { cwd: string; visible: boo
     const unExit = listen<number>("term-exit", (e) => {
       if (e.payload === idRef.current) cb.current.onExit();
     });
-    invoke<number>("term_open", { cwd, cols: t.cols, rows: t.rows })
+    invoke<number>("term_open", { cwd, cols: t.cols, rows: t.rows, shell: pref.termShell || null })
       .then((id) => {
         if (disposed) return invoke("term_close", { id });
         idRef.current = id;
         cb.current.onReady(id);
+        if (run) setTimeout(() => invoke("term_write", { id, data: run + "\r" }), 700);
       })
       .catch((e) => t.write(`\r\nCould not start a shell: ${e}\r\n`));
     const input = t.onData((d) => idRef.current && invoke("term_write", { id: idRef.current, data: d }));
@@ -182,5 +217,12 @@ function TermView({ cwd, visible, onReady, onExit }: { cwd: string; visible: boo
     }
   }, [visible]);
 
-  return <div ref={host} className={cn("absolute inset-0 pl-2 pt-1", !visible && "invisible")} />;
+  return (
+    <div
+      ref={host}
+      onFocusCapture={() => setFocused(true)}
+      onBlurCapture={() => setFocused(false)}
+      className={cn("absolute inset-0 pl-2 pt-1 transition-opacity", !visible && "invisible", dim && !focused && "opacity-60")}
+    />
+  );
 }

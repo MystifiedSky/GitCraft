@@ -1,3 +1,5 @@
+import { startBackendSync } from "@/lib/integrations";
+import { syncGitCredentials } from "@/lib/hosting";
 import { onWatcherChange } from "@/lib/repo";
 import { startUpdateChecks } from "@/lib/updates";
 import { listen } from "@tauri-apps/api/event";
@@ -185,6 +187,8 @@ function useStartup() {
           } else if (opts.shot_view === "start") st.newTab();
           else if (opts.shot_view === "conflict") st.setUi(tab.id, { conflict: "settings.txt" });
           else if (opts.shot_view === "palette") st.setPalette("root");
+          else if (opts.shot_view === "prefs") st.setDialog({ kind: "prefs" });
+          else if (opts.shot_view === "integrations") st.setDialog({ kind: "prefs", section: "integrations" });
           else if (opts.shot_view === "light" || opts.shot_view === "dark-hc") st.setSettings({ theme: opts.shot_view });
           else if (opts.shot_view === "terminal") {
             st.setSettings({ showTerminal: true });
@@ -215,7 +219,10 @@ function useStartup() {
       if (saved?.settings) useStore.setState({ settings: { ...DEFAULT_SETTINGS, ...saved.settings } });
       if (saved?.profiles?.length) useStore.setState({ profiles: saved.profiles, activeProfile: saved.activeProfile ?? saved.profiles[0].id });
       if (saved?.settings?.zoom && saved.settings.zoom !== 1) setZoom(saved.settings.zoom);
-      for (const p of saved?.tabs ?? []) await openRepoPath(p);
+      startBackendSync();
+      await syncGitCredentials();
+      // General > Remember tabs.
+      if (useStore.getState().settings.rememberTabs) for (const p of saved?.tabs ?? []) await openRepoPath(p);
       const tabs = useStore.getState().tabs;
       const repoTabs = tabs.filter((t) => t.kind === "repo");
       if (saved?.active !== undefined && repoTabs[saved.active]) useStore.getState().setActive(repoTabs[saved.active].id);

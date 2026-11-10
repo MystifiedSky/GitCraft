@@ -108,7 +108,10 @@ pub fn versions(dir: &Path, src: &DiffSource, file: &str, parent: Option<&str>, 
         v.editable = false;
         return v;
     }
-    let is_bin = |b: &Option<Vec<u8>>| b.as_ref().map(|x| is_binary(x)).unwrap_or(false);
+    // Repo-Specific > Encoding (UTF-16 files contain zero bytes, so they aren't treated as binary then).
+    let enc = crate::prefs::encoding_for(dir);
+    let utf16 = enc.map(|e| e == encoding_rs::UTF_16LE || e == encoding_rs::UTF_16BE).unwrap_or(false);
+    let is_bin = |b: &Option<Vec<u8>>| !utf16 && b.as_ref().map(|x| is_binary(x)).unwrap_or(false);
     if is_bin(&old) || is_bin(&new) {
         v.binary = true;
         v.editable = false;
@@ -116,6 +119,9 @@ pub fn versions(dir: &Path, src: &DiffSource, file: &str, parent: Option<&str>, 
     }
     let text = |b: Option<Vec<u8>>| {
         b.map(|x| {
+            if let Some(e) = enc {
+                return crate::prefs::decode(&x, e);
+            }
             let x = x.strip_prefix(&[0xEF, 0xBB, 0xBF][..]).map(|s| s.to_vec()).unwrap_or(x);
             match String::from_utf8(x) {
                 Ok(s) => s,
@@ -289,9 +295,19 @@ pub fn apply_patch(dir: &Path, patch: &str, cached: bool, reverse: bool) -> Resu
 pub fn save(dir: &Path, file: &str, content: &str) -> Result<(), String> {
     let p = dir.join(file);
     // Keep the file's existing line endings.
-    let crlf = std::fs::read(&p).map(|b| b.windows(2).any(|w| w == b"\r\n")).unwrap_or(false);
+    let before = std::fs::read(&p).unwrap_or_default();
+    let enc = crate::prefs::encoding_for(dir);
+    let old_text = match enc {
+        Some(e) => crate::prefs::decode(&before, e),
+        None => String::from_utf8_lossy(&before).into_owned(),
+    };
+    let crlf = old_text.contains("\r\n");
     let text = if crlf { content.replace("\r\n", "\n").replace('\n', "\r\n") } else { content.to_string() };
-    std::fs::write(p, text).map_err(|e| e.to_string())
+    let bytes = match enc {
+        Some(e) => crate::prefs::encode(&text, e, before.starts_with(&[0xFF, 0xFE]) || before.starts_with(&[0xFE, 0xFF])),
+        None => text.into_bytes(),
+    };
+    std::fs::write(p, bytes).map_err(|e| e.to_string())
 }
 
 #[derive(Serialize)]

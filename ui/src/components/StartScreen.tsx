@@ -193,7 +193,7 @@ export function LaunchpadScreen() {
             <button key={i.url} onClick={() => hosting.openUrl(i.url)} className="w-full flex items-center gap-2 px-3 h-[34px] text-left text-[13px] border-b border-white/5 last:border-0 hover:bg-hoverrow">
               <CircleDot size={14} className="text-good" />
               <span className="text-fg3 text-[12px] w-[160px] truncate shrink-0">{i.repo}</span>
-              <span className="text-fg3 text-[12px]">#{i.number}</span>
+              <span className="text-fg3 text-[12px]">{i.key || `#${i.number}`}</span>
               <span className="truncate flex-1 text-white/90">{i.title}</span>
               <span className="text-[12px] w-[34px] text-right">{since(i.updated)}</span>
             </button>

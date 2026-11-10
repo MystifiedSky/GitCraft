@@ -90,7 +90,8 @@ export function GraphView({ repo, tabId }: Props) {
   // Rows that belong to a hovered branch label: its first-parent chain while it stays in the label's lane.
   const highlighted = useMemo(() => {
     const set = new Set<number>();
-    if (hoverRef === null) return set;
+    // UI Customization > Highlight associated rows when hovering over a branch.
+    if (hoverRef === null || useStore.getState().settings.highlightRowsOnHover === false) return set;
     let i = hoverRef;
     const lane = repo.graph.rows[i]?.col;
     while (i >= 0 && i < repo.commits.length && repo.graph.rows[i]?.col === lane) {

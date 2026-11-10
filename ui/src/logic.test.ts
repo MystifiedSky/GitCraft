@@ -5,7 +5,8 @@ import { parseConflicts } from "./components/ConflictView";
 import { comboOf, fuzzy } from "./lib/commands";
 import { todo } from "./lib/rewrite";
 import { timeSince, withCoauthors } from "./lib/utils";
-import { indexOnly, predictStatus } from "./lib/repo";
+import { indexOnly, predictStatus, signInProblem } from "./lib/repo";
+import { globMatch } from "./lib/conflict";
 import { DEFAULT_METRICS, type RebasePlan } from "./lib/store";
 
 describe("merge tool", () => {
@@ -85,5 +86,23 @@ describe("staging feedback", () => {
     expect(r.unstaged.find((f) => f.path === "b.txt")?.status).toBe("?");
     expect(indexOnly({ type: "stageAll" })).toBe(true);
     expect(indexOnly({ type: "commit", summary: "x", description: "", amend: false, stageAll: false, skipHooks: false })).toBe(false);
+  });
+});
+
+describe("sign-in problems", () => {
+  it("tells SSH key refusals from HTTPS sign-in failures", () => {
+    expect(signInProblem("git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.")).toBe("ssh");
+    expect(signInProblem("fatal: could not read Username for 'https://github.com': terminal prompts disabled")).toBe("https");
+    expect(signInProblem("remote: Permission to a/b.git denied to someone.\nfatal: unable to access ...: The requested URL returned error: 403")).toBe("https");
+    expect(signInProblem("! [rejected] main -> main (fetch first)")).toBe(null);
+  });
+});
+
+describe("conflict prevention rules", () => {
+  it("matches the original's base branch patterns", () => {
+    expect(globMatch("origin/main", "origin/main")).toBe(true);
+    expect(globMatch("origin/**", "origin/feature/x")).toBe(true);
+    expect(globMatch("origin/feature/**", "origin/bugfix/x")).toBe(false);
+    expect(globMatch("origin/*", "origin/feature/x")).toBe(false);
   });
 });

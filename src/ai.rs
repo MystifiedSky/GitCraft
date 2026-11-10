@@ -15,22 +15,107 @@ const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 /// Largest diff sent (characters). Bigger changes are refused with a message instead of being cut.
 const MAX_INPUT_CHARS: usize = 600000;
 
+/// Preferences > AI (the original's GKAIPreferences): on/off, which provider your own key is for, an
+/// optional endpoint, and per feature a model and custom instructions on top of the global ones.
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AiConfig {
+    pub enabled: bool,
+    /// anthropic, openai, google, ollama or custom (any OpenAI-compatible endpoint).
+    pub provider: String,
+    pub endpoint: String,
+    pub instructions: String,
+    /// Feature -> model ("" = the provider's default).
+    pub models: std::collections::HashMap<String, String>,
+    /// Feature -> extra instructions.
+    pub feature_instructions: std::collections::HashMap<String, String>,
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        AiConfig { enabled: true, provider: "anthropic".into(), endpoint: String::new(), instructions: String::new(), models: Default::default(), feature_instructions: Default::default() }
+    }
+}
+
+static CONFIG: std::sync::RwLock<Option<AiConfig>> = std::sync::RwLock::new(None);
+
+pub fn set_config(c: AiConfig) {
+    if let Ok(mut w) = CONFIG.write() {
+        *w = Some(c);
+    }
+}
+
+fn config() -> AiConfig {
+    CONFIG.read().ok().and_then(|c| c.clone()).unwrap_or_default()
+}
+
+/// The credential-store name of each provider's key.
+pub fn key_name(provider: &str) -> &'static str {
+    match provider {
+        "openai" => "openai-key",
+        "google" => "google-key",
+        "ollama" => "ollama-key",
+        "custom" => "custom-ai-key",
+        _ => "anthropic-key",
+    }
+}
+
+fn provider_label(p: &str) -> &'static str {
+    match p {
+        "openai" => "OpenAI",
+        "google" => "Google",
+        "ollama" => "Ollama",
+        "custom" => "your AI provider",
+        _ => "Anthropic",
+    }
+}
+
+/// OpenAI-style chat completions URL for the non-Anthropic providers.
+fn chat_url(c: &AiConfig) -> Result<String, String> {
+    let e = c.endpoint.trim().trim_end_matches('/');
+    Ok(match c.provider.as_str() {
+        "openai" if e.is_empty() => "https://api.openai.com/v1/chat/completions".into(),
+        "google" if e.is_empty() => "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions".into(),
+        "ollama" if e.is_empty() => "http://localhost:11434/v1/chat/completions".into(),
+        "custom" if e.is_empty() => return Err("Set the API endpoint URL in Preferences > AI.".into()),
+        _ if e.ends_with("/chat/completions") => e.to_string(),
+        _ => format!("{e}/chat/completions"),
+    })
+}
+
 fn too_big(what: &str, n: usize) -> String {
     format!("{what} is too large to send ({} KB). Stage fewer files and try again.", n / 1024)
 }
 
-/// One request with a JSON schema for the answer; returns the parsed JSON object.
-fn ask(system: &str, prompt: String, effort: &str, schema: Value) -> Result<Value, String> {
-    let key = secret_get("anthropic-key").ok_or("Add your Anthropic API key in Accounts to use the AI helpers.")?;
+/// One request with a JSON schema for the answer; returns the parsed JSON object. `feature` picks the model
+/// and the custom instructions (commit, compose, stash, explain, pr, conflict).
+fn ask(feature: &str, system: &str, prompt: String, effort: &str, schema: Value) -> Result<Value, String> {
+    let c = config();
+    if !c.enabled {
+        return Err("AI features are turned off (Preferences > AI).".into());
+    }
+    let mut system = system.to_string();
+    for extra in [c.instructions.trim(), c.feature_instructions.get(feature).map(|s| s.trim()).unwrap_or("")] {
+        if !extra.is_empty() {
+            system.push_str("\n\nFollow these instructions from the user as well:\n");
+            system.push_str(extra);
+        }
+    }
+    let model = c.models.get(feature).map(|m| m.trim().to_string()).filter(|m| !m.is_empty());
+    if c.provider != "anthropic" && !c.provider.is_empty() {
+        return ask_openai_style(&c, model, &system, prompt, schema);
+    }
+    let key = secret_get("anthropic-key").ok_or("Add your Anthropic API key in Preferences > AI to use the AI helpers.")?;
+    let url = if c.endpoint.trim().is_empty() { API_URL.to_string() } else { format!("{}/v1/messages", c.endpoint.trim().trim_end_matches('/').trim_end_matches("/v1/messages")) };
     let body = json!({
-        "model": MODEL,
+        "model": model.as_deref().unwrap_or(MODEL),
         "max_tokens": 16000,
         "system": system,
         "messages": [{ "role": "user", "content": prompt }],
         "output_config": { "effort": effort, "format": { "type": "json_schema", "schema": schema } },
         "fallbacks": "default",
     });
-    let res = ureq::post(API_URL)
+    let res = ureq::post(&url)
         .set("x-api-key", &key)
         .set("anthropic-version", API_VERSION)
         .set("anthropic-beta", FALLBACK_BETA)
@@ -43,7 +128,7 @@ fn ask(system: &str, prompt: String, effort: &str, schema: Value) -> Result<Valu
             let v: Value = r.into_json().unwrap_or(Value::Null);
             let msg = v["error"]["message"].as_str().unwrap_or("request failed").to_string();
             return Err(match code {
-                401 => "The Anthropic API key was not accepted. Check it in Accounts.".into(),
+                401 => "The Anthropic API key was not accepted. Check it in Preferences > AI.".into(),
                 429 => "The Claude API is busy or your rate limit was reached. Try again shortly.".into(),
                 _ => format!("Claude API error {code}: {msg}"),
             });
@@ -63,6 +148,48 @@ fn ask(system: &str, prompt: String, effort: &str, schema: Value) -> Result<Valu
         .filter_map(|b| b["text"].as_str())
         .collect();
     serde_json::from_str(&text).map_err(|e| format!("Unexpected answer from Claude: {e}"))
+}
+
+/// OpenAI, Google (its OpenAI-compatible endpoint), Ollama and custom endpoints: chat completions with a JSON schema.
+fn ask_openai_style(c: &AiConfig, model: Option<String>, system: &str, prompt: String, schema: Value) -> Result<Value, String> {
+    let url = chat_url(c)?;
+    let key = secret_get(key_name(&c.provider));
+    if key.is_none() && c.provider != "ollama" {
+        return Err(format!("Add your {} API key in Preferences > AI.", provider_label(&c.provider)));
+    }
+    let model = model.ok_or_else(|| format!("Choose a model for {} in Preferences > AI.", provider_label(&c.provider)))?;
+    let body = json!({
+        "model": model,
+        "messages": [{ "role": "system", "content": system }, { "role": "user", "content": prompt }],
+        "response_format": { "type": "json_schema", "json_schema": { "name": "answer", "strict": true, "schema": schema } },
+    });
+    let mut req = ureq::post(&url).set("content-type", "application/json").timeout(std::time::Duration::from_secs(300));
+    if let Some(k) = key {
+        req = req.set("Authorization", &format!("Bearer {k}"));
+    }
+    let v: Value = match req.send_json(body) {
+        Ok(r) => r.into_json().map_err(|e| e.to_string())?,
+        Err(ureq::Error::Status(code, r)) => {
+            let v: Value = r.into_json().unwrap_or(Value::Null);
+            let msg = v["error"]["message"].as_str().or(v[0]["error"]["message"].as_str()).unwrap_or("request failed").to_string();
+            return Err(format!("{} error {code}: {msg}", provider_label(&c.provider)));
+        }
+        Err(e) => return Err(format!("Could not reach {}: {e}", provider_label(&c.provider))),
+    };
+    let choice = &v["choices"][0];
+    if choice["finish_reason"] == "length" {
+        return Err("The answer was cut off. Try with fewer changes.".into());
+    }
+    let text = choice["message"]["content"].as_str().unwrap_or_default();
+    let text = text.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
+    serde_json::from_str(text).map_err(|e| format!("Unexpected answer from {}: {e}", provider_label(&c.provider)))
+}
+
+/// Preferences > AI > Test Connection.
+pub fn test_connection() -> Result<String, String> {
+    let schema = json!({ "type": "object", "properties": { "ok": { "type": "boolean" } }, "required": ["ok"], "additionalProperties": false });
+    ask("test", "Answer with {\"ok\": true}.", "Reply ok.".into(), "low", schema)?;
+    Ok(format!("{} API key is valid", provider_label(&config().provider)))
 }
 
 fn staged_or_all(dir: &Path) -> String {
@@ -99,7 +226,7 @@ pub fn commit_message(dir: &Path) -> Result<(String, String), String> {
         "required": ["summary", "description"],
         "additionalProperties": false
     });
-    let v = ask(COMMIT_SYSTEM, prompt, "low", schema)?;
+    let v = ask("commit", COMMIT_SYSTEM, prompt, "low", schema)?;
     Ok((v["summary"].as_str().unwrap_or_default().to_string(), v["description"].as_str().unwrap_or_default().to_string()))
 }
 
@@ -113,6 +240,7 @@ pub fn stash_message(dir: &Path) -> Result<String, String> {
     }
     let schema = json!({ "type": "object", "properties": { "title": { "type": "string" } }, "required": ["title"], "additionalProperties": false });
     let v = ask(
+        "stash",
         "You name git stashes. Give a short title (under 60 characters) saying what work in progress these changes hold.",
         format!("Changes being stashed:\n{diff}"),
         "low",
@@ -127,6 +255,7 @@ fn explain(prompt: String) -> Result<String, String> {
     }
     let schema = json!({ "type": "object", "properties": { "explanation": { "type": "string" } }, "required": ["explanation"], "additionalProperties": false });
     let v = ask(
+        "explain",
         "You explain code changes to someone who may not be a programmer. Say what changed, why it likely matters, and anything risky \
          worth checking, in plain language and short paragraphs or bullet points. Mention file names where helpful.",
         prompt,
@@ -196,6 +325,7 @@ pub fn compose(dir: &Path) -> Result<Vec<ComposedCommit>, String> {
         "additionalProperties": false
     });
     let v = ask(
+        "compose",
         "You organise uncommitted work into a small number of focused git commits, oldest first. Group whole files that belong to the \
          same logical change. Every listed file goes in exactly one commit. Each commit gets an imperative one-line summary of at most \
          72 characters and a short description (may be empty).",
@@ -215,6 +345,49 @@ pub fn compose(dir: &Path) -> Result<Vec<ComposedCommit>, String> {
         out.push(ComposedCommit { summary: "Remaining changes".into(), description: String::new(), files: rest });
     }
     Ok(out)
+}
+
+/// Pull Request (GKAIPreferences-PullRequest): a title and description from a branch's commits and changes.
+pub fn pull_request_text(dir: &Path, source: &str, target: &str) -> Result<(String, String), String> {
+    let base = format!("{target}...{source}");
+    let log = git::run(dir, &["log", "--format=- %s%n%b", &format!("{target}..{source}")]).stdout;
+    let diff = git::run(dir, &["diff", "--no-color", "--no-ext-diff", &base]).stdout;
+    if log.trim().is_empty() && diff.trim().is_empty() {
+        return Err(format!("{source} has no changes compared with {target}."));
+    }
+    let prompt = format!("Write a pull request for merging '{source}' into '{target}'.\nCommits:\n{log}\nCombined diff:\n{diff}");
+    if prompt.len() > MAX_INPUT_CHARS {
+        return Err(too_big("This branch's changes", prompt.len()));
+    }
+    let schema = json!({ "type": "object", "properties": { "title": { "type": "string" }, "description": { "type": "string" } }, "required": ["title", "description"], "additionalProperties": false });
+    let v = ask(
+        "pr",
+        "You write pull request titles and descriptions. The title is one short line. The description says what changed and why, \
+         lists notable changes as bullet points, and mentions anything reviewers should check. Use Markdown.",
+        prompt,
+        "medium",
+        schema,
+    )?;
+    Ok((v["title"].as_str().unwrap_or_default().to_string(), v["description"].as_str().unwrap_or_default().to_string()))
+}
+
+/// Conflict Resolution (GKAIPreferences-ConflictResolution): a merged version of a conflicted file, for the
+/// merge tool's Output (the person reviews it before saving).
+pub fn resolve_conflict(base: &str, ours: &str, theirs: &str, file: &str) -> Result<String, String> {
+    let prompt = format!("File: {file}\n\n=== BASE (common ancestor) ===\n{base}\n=== CURRENT (ours) ===\n{ours}\n=== INCOMING (theirs) ===\n{theirs}");
+    if prompt.len() > MAX_INPUT_CHARS {
+        return Err(too_big("This file", prompt.len()));
+    }
+    let schema = json!({ "type": "object", "properties": { "merged": { "type": "string" }, "notes": { "type": "string" } }, "required": ["merged", "notes"], "additionalProperties": false });
+    let v = ask(
+        "conflict",
+        "You resolve git merge conflicts. Combine the current and incoming versions so both sides' intended changes are kept \
+         where possible. Return the complete merged file without conflict markers, preserving formatting and line endings.",
+        prompt,
+        "high",
+        schema,
+    )?;
+    Ok(v["merged"].as_str().unwrap_or_default().to_string())
 }
 
 #[cfg(test)]

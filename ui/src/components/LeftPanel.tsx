@@ -72,7 +72,7 @@ export function LeftPanel({ repo, tabId, onSelectSha }: { repo: RepoView | undef
   const toggle = (k: SectionKey) => setOpen((o) => ({ ...o, [k]: !o[k] }));
   const conflicts = useConflictCheck(repo).data;
 
-  if (s.settings.leftView === "agents") {
+  if (s.settings.leftView === "agents" && s.settings.showAgentsView !== false) {
     return (
       <Shell tabId={tabId}>
         <AgentsView repo={repo} />
@@ -315,12 +315,14 @@ function Shell({ children, tabId }: { children: ReactNode; tabId: string }) {
           >
             <List size={14} /> List
           </button>
-          <button
-            onClick={() => s.setSettings({ leftView: "agents" })}
-            className={cn("flex-1 flex items-center justify-center gap-1.5 text-[13px]", view === "agents" ? "bg-accent/25 text-white border border-accent/70" : "bg-white/5 text-fg2 hover:text-white")}
-          >
-            <Bot size={14} /> Agents
-          </button>
+          {s.settings.showAgentsView !== false && (
+            <button
+              onClick={() => s.setSettings({ leftView: "agents" })}
+              className={cn("flex-1 flex items-center justify-center gap-1.5 text-[13px]", view === "agents" ? "bg-accent/25 text-white border border-accent/70" : "bg-white/5 text-fg2 hover:text-white")}
+            >
+              <Bot size={14} /> Agents
+            </button>
+          )}
         </div>
       </div>
       {children}
@@ -631,7 +633,7 @@ function HostedLists({ repo, tabId, prsOpen, issuesOpen, toggle }: { repo: RepoV
           >
             <Row indent={1} title={i.labels.join(", ")} onClick={() => s.setUi(tabId, { issue: i.number, pr: null, diff: null, history: null })}>
               <CircleDot size={13} className="text-good" />
-              <span className="text-fg3 text-[11.5px]">#{i.number}</span>
+              <span className="text-fg3 text-[11.5px]">{i.key || `#${i.number}`}</span>
               <span className="truncate flex-1">{i.title}</span>
             </Row>
           </CtxMenu>

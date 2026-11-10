@@ -1,5 +1,39 @@
 import { useEffect, useRef } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { EDITOR_FONT, editorTheme, languageFor, monaco } from "@/lib/monaco";
+import { useStore } from "@/lib/store";
+
+/** Preferences > Editor: font, size, line numbers, syntax highlighting, tab size, end of line. */
+function useEditorPrefs() {
+  return useStore(
+    useShallow((s) => ({
+      font: s.settings.editorFontFamily,
+      size: s.settings.editorFontSize || 12,
+      lines: s.settings.editorLineNumbers !== false,
+      syntax: s.settings.editorSyntax !== false,
+      tab: s.settings.editorTabSize || 4,
+      eol: s.settings.editorEol,
+    })),
+  );
+}
+
+type Prefs = ReturnType<typeof useEditorPrefs>;
+
+function prefOptions(p: Prefs): monaco.editor.IEditorOptions {
+  return {
+    fontFamily: p.font ? `'${p.font}', ${EDITOR_FONT}` : EDITOR_FONT,
+    fontSize: p.size,
+    lineHeight: Math.round(p.size * 1.5),
+    lineNumbers: p.lines ? "on" : "off",
+  };
+}
+
+function applyModelPrefs(m: monaco.editor.ITextModel | null | undefined, p: Prefs, file: string) {
+  if (!m) return;
+  m.updateOptions({ tabSize: p.tab, insertSpaces: true });
+  monaco.editor.setModelLanguage(m, p.syntax ? languageFor(file) : "plaintext");
+  m.setEOL(p.eol === "crlf" ? monaco.editor.EndOfLineSequence.CRLF : monaco.editor.EndOfLineSequence.LF);
+}
 
 const baseOptions: monaco.editor.IEditorOptions = {
   fontFamily: EDITOR_FONT,
@@ -47,10 +81,12 @@ export function MonacoDiff({
   const ed = useRef<monaco.editor.IStandaloneDiffEditor | null>(null);
   const cb = useRef({ onChange, onSave });
   cb.current = { onChange, onSave };
+  const prefs = useEditorPrefs();
 
   useEffect(() => {
     const e = monaco.editor.createDiffEditor(host.current!, {
       ...baseOptions,
+      ...prefOptions(prefs),
       theme: editorTheme(),
       readOnly: true,
       originalEditable: false,
@@ -90,6 +126,13 @@ export function MonacoDiff({
     ed.current?.getOriginalEditor().updateOptions({ wordWrap: wordWrap ? "on" : "off" });
   }, [sideBySide, ignoreWhitespace, wordWrap, editable]);
 
+  useEffect(() => {
+    ed.current?.updateOptions(prefOptions(prefs) as monaco.editor.IDiffEditorOptions);
+    const m = ed.current?.getModel();
+    applyModelPrefs(m?.original, prefs, file);
+    applyModelPrefs(m?.modified, prefs, file);
+  }, [prefs, file]);
+
   return <div ref={host} className="h-full w-full" />;
 }
 
@@ -113,10 +156,12 @@ export function MonacoFile({
   const ed = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   const cb = useRef({ onChange, onSave });
   cb.current = { onChange, onSave };
+  const prefs = useEditorPrefs();
 
   useEffect(() => {
     const e = monaco.editor.create(host.current!, {
       ...baseOptions,
+      ...prefOptions(prefs),
       theme: editorTheme(),
       model: monaco.editor.createModel(value, languageFor(file)),
       readOnly,
@@ -141,6 +186,11 @@ export function MonacoFile({
   useEffect(() => {
     ed.current?.updateOptions({ readOnly, wordWrap: wordWrap ? "on" : "off" });
   }, [readOnly, wordWrap]);
+
+  useEffect(() => {
+    ed.current?.updateOptions(prefOptions(prefs));
+    applyModelPrefs(ed.current?.getModel(), prefs, file);
+  }, [prefs, file]);
 
   return <div ref={host} className="h-full w-full" />;
 }

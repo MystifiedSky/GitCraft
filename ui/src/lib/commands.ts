@@ -101,7 +101,7 @@ export const COMMANDS: Command[] = [
   },
   { id: "repo:gitflow", label: "Configure Gitflow", group: "Repo Actions", repo: true, run: (p) => initGitflow(p!) },
   { id: "repo:lfs", label: "Initialize LFS on this repo", group: "Repo Actions", repo: true, keywords: "configure lfs", run: (p) => act(p!, { type: "lfsInstall" }) },
-  { id: "repo:signing", label: "Configure Commit Signing", group: "Repo Actions", keywords: "gpg ssh accounts identity", run: () => st().setDialog({ kind: "accounts" }) },
+  { id: "repo:signing", label: "Configure Commit Signing", group: "Repo Actions", keywords: "gpg ssh accounts identity", run: () => st().setDialog({ kind: "prefs", section: "gpg" }) },
   { id: "repo:addRemote", label: "Add Remote", group: "Repo Actions", repo: true, run: (p) => addRemote(p!) },
   { id: "repo:setUpstream", label: "Set Upstream", group: "Repo Actions", repo: true, run: (p) => {
       const r = repoData(p!);
@@ -111,6 +111,7 @@ export const COMMANDS: Command[] = [
   { id: "repo:addWorktree", label: "Add a new worktree", group: "Repo Actions", repo: true, run: (p) => repoData(p!) && addWorktree(repoData(p!)!) },
   { id: "repo:addSubmodule", label: "Add Submodule", group: "Repo Actions", repo: true, run: (p) => addSubmodule(p!) },
   { id: "repo:cleanup", label: "Clean Up Local Branches", group: "Repo Actions", repo: true, run: openCleanup },
+  { id: "ui:integrations", label: "Integrations", group: "UI", keywords: "github gitlab bitbucket azure jira trello connect", run: () => st().setDialog({ kind: "prefs", section: "integrations" }) },
   { id: "repo:sparse", label: "Sparse Checkout", group: "Repo Actions", repo: true, run: () => st().setDialog({ kind: "sparse" }) },
 
   // Navigation

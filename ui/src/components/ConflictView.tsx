@@ -1,3 +1,5 @@
+import { aiApi } from "@/lib/integrations";
+import { Sparkles } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowDown, ArrowUp, Pencil, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -66,6 +68,7 @@ export function ConflictView({ repo, tabId, file }: { repo: RepoView; tabId: str
   const [picks, setPicks] = useState<Record<number, Pick>>({});
   const [manual, setManual] = useState<string | null>(null);
   const [current, setCurrent] = useState(0);
+  const [aiBusy, setAiBusy] = useState(false);
   const panes = useRef<(HTMLDivElement | null)[]>([]);
   const crlf = !!info?.working?.includes("\r\n");
   useEffect(() => {
@@ -232,6 +235,27 @@ export function ConflictView({ repo, tabId, file }: { repo: RepoView; tabId: str
             Output
           </span>
           <span className="text-fg3 flex-1">{manual !== null ? "edited by hand" : unresolved ? `${unresolved} conflict${unresolved === 1 ? "" : "s"} left` : "all conflicts decided"}</span>
+          <Button
+            size="sm"
+            variant="ai"
+            className="h-[22px]"
+            disabled={aiBusy}
+            title="Ask the AI (Preferences > AI) to merge both sides; check the result before saving"
+            onClick={async () => {
+              setAiBusy(true);
+              try {
+                const merged = await aiApi.resolveConflict(info.base ?? "", info.ours ?? "", info.theirs ?? "", file);
+                setManual(merged.replace(/\r\n/g, "\n"));
+                s.toast(true, "AI suggestion is in the Output - review it, then Save Output");
+              } catch (e) {
+                s.toast(false, String(e));
+              } finally {
+                setAiBusy(false);
+              }
+            }}
+          >
+            <Sparkles size={11} /> {aiBusy ? "Resolving…" : "Auto-resolve with AI"}
+          </Button>
           {manual === null && (
             <Button size="sm" className="h-[22px]" onClick={() => setManual(built)} title="Type in the output directly">
               <Pencil size={11} /> Edit

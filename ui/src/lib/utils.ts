@@ -1,3 +1,5 @@
+import { useStore } from "./store";
+import { formatDate } from "./integrations";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 
@@ -70,9 +72,15 @@ export function relTime(unix: number) {
   return `${Math.floor(s / 86400)} days ago`;
 }
 
+/** A commit's date and time in the UI Customization > Date/Time Format (default "MM/DD/YYYY @ h:mm A"). */
 export function fullDate(unix: number) {
-  const d = new Date(unix * 1000);
-  return d.toLocaleString(undefined, { year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" });
+  const fmt = useStore.getState().settings.dateTimeFormat || "MM/DD/YYYY @ h:mm A";
+  return formatDate(new Date(unix * 1000), fmt);
+}
+
+/** "Date verbose Format" (default "MMMM D, YYYY h:mm A"). */
+export function verboseDate(unix: number) {
+  return formatDate(new Date(unix * 1000), useStore.getState().settings.dateVerboseFormat || "MMMM D, YYYY h:mm A");
 }
 
 export const isMac = navigator.platform.toLowerCase().includes("mac");

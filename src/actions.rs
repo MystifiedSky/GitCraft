@@ -15,7 +15,17 @@ pub enum Action {
     UnstageAll,
     Discard { paths: Vec<String> },
     DiscardAll,
-    Commit { summary: String, description: String, amend: bool, stage_all: bool, #[serde(default)] skip_hooks: bool },
+    Commit {
+        summary: String,
+        description: String,
+        amend: bool,
+        stage_all: bool,
+        #[serde(default)]
+        skip_hooks: bool,
+        /// Commit > Remove comments from commit messages (git commit --cleanup=strip).
+        #[serde(default)]
+        strip_comments: bool,
+    },
     Checkout { target: String },
     CheckoutRemote { remote_branch: String },
     CreateBranch { name: String, at: Option<String>, checkout: bool },
@@ -170,6 +180,25 @@ pub struct UndoInfo {
     pub redo: Option<String>,
 }
 
+/// Activity log text: Git's message, or with extended logging both outputs in full.
+fn log_output(o: &git::GitOut) -> String {
+    if crate::prefs::runtime().extended_log {
+        let mut t = String::new();
+        if !o.stdout.trim().is_empty() {
+            t.push_str(o.stdout.trim_end());
+        }
+        if !o.stderr.trim().is_empty() {
+            if !t.is_empty() {
+                t.push('\n');
+            }
+            t.push_str(o.stderr.trim_end());
+        }
+        t
+    } else {
+        o.message()
+    }
+}
+
 impl Engine {
     pub fn log_entries(&self) -> Vec<LogEntry> {
         self.log.lock().unwrap().clone()
@@ -203,7 +232,7 @@ impl Engine {
             time: chrono::Local::now().format("%H:%M:%S").to_string(),
             command: format!("git {}", args.join(" ")),
             ok: o.ok,
-            output: o.message(),
+            output: log_output(&o),
         };
         let mut l = self.log.lock().unwrap();
         l.push(entry);
@@ -223,7 +252,7 @@ impl Engine {
 
     fn record(&self, command: &str, o: &git::GitOut) {
         let mut l = self.log.lock().unwrap();
-        l.push(LogEntry { time: chrono::Local::now().format("%H:%M:%S").to_string(), command: command.to_string(), ok: o.ok, output: o.message() });
+        l.push(LogEntry { time: chrono::Local::now().format("%H:%M:%S").to_string(), command: command.to_string(), ok: o.ok, output: log_output(o) });
     }
 
     fn in_progress(&self, dir: &Path, what: &str) -> bool {
@@ -280,7 +309,7 @@ impl Engine {
             }
             Action::Discard { paths } => self.discard(repo, dir, Some(paths)),
             Action::DiscardAll => self.discard(repo, dir, None),
-            Action::Commit { summary, description, amend, stage_all, skip_hooks } => {
+            Action::Commit { summary, description, amend, stage_all, skip_hooks, strip_comments } => {
                 if summary.trim().is_empty() {
                     return ActionResult { ok: false, message: "Type a commit summary first".into() };
                 }
@@ -302,6 +331,9 @@ impl Engine {
                 }
                 if skip_hooks {
                     a.push("--no-verify"); // "Skip git hooks"
+                }
+                if strip_comments {
+                    a.push("--cleanup=strip"); // "Remove comments from commit messages"
                 }
                 let o = self.git(dir, &a);
                 if o.ok && !before.is_empty() {
@@ -927,7 +959,7 @@ mod tests {
         let e = Engine::default();
         fs::write(d.join("a.txt"), "one\n").unwrap();
         assert!(e.perform(&repo, Action::StageAll).ok);
-        assert!(e.perform(&repo, Action::Commit { summary: "first".into(), description: String::new(), amend: false, stage_all: false, skip_hooks: false }).ok);
+        assert!(e.perform(&repo, Action::Commit { summary: "first".into(), description: String::new(), amend: false, stage_all: false, skip_hooks: false, strip_comments: false }).ok);
         let first = head(&d);
 
         fs::write(d.join("a.txt"), "one\ntwo\n").unwrap();
@@ -935,7 +967,7 @@ mod tests {
         assert_eq!(st.unstaged.len(), 1);
         assert!(e.perform(&repo, Action::Stage { paths: vec!["a.txt".into()] }).ok);
         assert_eq!(git::status(&d).staged.len(), 1);
-        assert!(e.perform(&repo, Action::Commit { summary: "second".into(), description: "body".into(), amend: false, stage_all: false, skip_hooks: false }).ok);
+        assert!(e.perform(&repo, Action::Commit { summary: "second".into(), description: "body".into(), amend: false, stage_all: false, skip_hooks: false, strip_comments: false }).ok);
         let second = head(&d);
         assert_ne!(first, second);
 
@@ -996,7 +1028,7 @@ mod tests {
         let read = |p: &str| fs::read_to_string(d.join(p)).unwrap().replace("\r\n", "\n");
         let index = |p: &str| git::run(&d, &["show", &format!(":{p}")]).stdout.replace("\r\n", "\n");
         fs::write(d.join("f.txt"), "a\nb\nc\n").unwrap();
-        assert!(e.perform(&repo, Action::Commit { summary: "base".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false }).ok);
+        assert!(e.perform(&repo, Action::Commit { summary: "base".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false }).ok);
         let base = head(&d);
         fs::write(d.join("f.txt"), "a\nB\nc\nnew\n").unwrap();
         // Hunk body: " a", "-b", "+B", " c", "+new" -> stage only "+new" (index 4)
@@ -1020,7 +1052,7 @@ mod tests {
         assert_eq!(index("n.txt"), "one\n");
 
         // Commit and compare; hide a branch from the graph.
-        assert!(e.perform(&repo, Action::Commit { summary: "next".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false }).ok);
+        assert!(e.perform(&repo, Action::Commit { summary: "next".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false }).ok);
         assert!(e.perform(&repo, Action::CreateBranch { name: "side".into(), at: Some(base.clone()), checkout: false }).ok);
         let files = crate::files::range_files(&d, &base, "HEAD");
         assert_eq!(files.len(), 2);
@@ -1032,9 +1064,9 @@ mod tests {
         assert_eq!(bl.len(), 4);
         let v = crate::files::versions(&d, &git::DiffSource::Range(base.clone(), git::WORKDIR.into()), "f.txt", None, false);
         assert_eq!(v.old.as_deref().map(|s| s.replace("\r\n", "\n")), Some("a\nb\nc\n".to_string()));
-        let view = git::RefView { hidden: vec!["refs/heads/side".into()], solo: vec![], pinned: None };
+        let view = git::RefView { hidden: vec!["refs/heads/side".into()], solo: vec![], pinned: None, smart: false };
         assert_eq!(git::load_view(&d, 100, &view).commits.len(), 2);
-        let solo = git::RefView { hidden: vec![], solo: vec!["refs/heads/side".into()], pinned: None };
+        let solo = git::RefView { hidden: vec![], solo: vec!["refs/heads/side".into()], pinned: None, smart: false };
         assert_eq!(git::load_view(&d, 100, &solo).commits.len(), 1);
         let more = git::load_view(&d, 1, &git::RefView::default());
         assert!(more.has_more);
@@ -1051,7 +1083,7 @@ mod tests {
         let read = |p: &str| fs::read_to_string(d.join(p)).unwrap().replace("\r\n", "\n");
         let commit = |f: &str, t: &str, m: &str| {
             fs::write(d.join(f), t).unwrap();
-            assert!(e.perform(&repo, Action::Commit { summary: m.into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false }).ok);
+            assert!(e.perform(&repo, Action::Commit { summary: m.into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false }).ok);
             head(&d)
         };
         let base = commit("a.txt", "1\n", "one");
@@ -1122,7 +1154,7 @@ mod tests {
         assert!(e.perform(&repo, Action::SaveResolved { file: "a.txt".into(), content: "master\nside\n".into() }).ok);
         assert!(!git::status(&d).conflicted);
         assert!(git::load(&d, 50).merge_msg.unwrap().contains("Merge branch 'side'"));
-        assert!(e.perform(&repo, Action::Commit { summary: "Merge side".into(), description: String::new(), amend: false, stage_all: false, skip_hooks: false }).ok);
+        assert!(e.perform(&repo, Action::Commit { summary: "Merge side".into(), description: String::new(), amend: false, stage_all: false, skip_hooks: false, strip_comments: false }).ok);
         assert_eq!(git::run(&d, &["rev-list", "--parents", "-n1", "HEAD"]).stdout.split_whitespace().count(), 3);
 
         // Fast-forward a branch that isn't checked out, set an upstream, rename a stash.
@@ -1146,7 +1178,7 @@ mod tests {
         let e = Engine::default();
         let commit = |f: &str, m: &str| {
             fs::write(d.join(f), m).unwrap();
-            assert!(e.perform(&repo, Action::Commit { summary: m.into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false }).ok);
+            assert!(e.perform(&repo, Action::Commit { summary: m.into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false }).ok);
         };
         commit("a.txt", "one");
         assert!(e.perform(&repo, Action::RenameBranch { old: "master".into(), new: "main".into() }).ok);
@@ -1188,7 +1220,7 @@ mod tests {
             assert!(e.perform(&repo, Action::SubmoduleUpdate { paths: vec![] }).ok);
             assert!(e.perform(&repo, Action::SubmoduleRemove { path: "libs/dep".into() }).ok);
         } // (some Git setups forbid file:// submodules; the rest still runs)
-        assert!(e.perform(&repo, Action::Commit { summary: "tidy".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false }).ok || true);
+        assert!(e.perform(&repo, Action::Commit { summary: "tidy".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false }).ok || true);
 
         // Gitflow: init creates develop; feature start / finish; release with a tag.
         let cfg = crate::manage::gitflow_config(&d);
@@ -1226,7 +1258,7 @@ mod tests {
         let repo = d.to_string_lossy().to_string();
         let e = Engine::default();
         let rd = |p: std::path::PathBuf| fs::read_to_string(p).unwrap().replace("\r\n", "\n");
-        let commit = |m: &str| assert!(e.perform(&repo, Action::Commit { summary: m.into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false }).ok);
+        let commit = |m: &str| assert!(e.perform(&repo, Action::Commit { summary: m.into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false }).ok);
         fs::write(d.join("a.txt"), "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n").unwrap();
         fs::write(d.join("b.txt"), "b\n").unwrap();
         commit("base");
@@ -1283,7 +1315,7 @@ mod tests {
 
         // Ignore helpers: add once, untrack a tracked file.
         fs::write(d.join("secret.log"), "x").unwrap();
-        assert!(e.perform(&repo, Action::Commit { summary: "log".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false }).ok);
+        assert!(e.perform(&repo, Action::Commit { summary: "log".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false }).ok);
         assert!(e.perform(&repo, Action::Ignore { pattern: "*.log".into(), untrack: vec!["secret.log".into()] }).ok);
         assert!(e.perform(&repo, Action::Ignore { pattern: "*.log".into(), untrack: vec![] }).ok);
         assert_eq!(fs::read_to_string(d.join(".gitignore")).unwrap().matches("*.log").count(), 1);
@@ -1293,16 +1325,16 @@ mod tests {
         let hooks = d.join(".git").join("hooks");
         fs::create_dir_all(&hooks).unwrap();
         fs::write(hooks.join("pre-commit"), "#!/bin/sh\necho blocked by hook >&2\nexit 1\n").unwrap();
-        let r = e.perform(&repo, Action::Commit { summary: "blocked".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false });
+        let r = e.perform(&repo, Action::Commit { summary: "blocked".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false });
         assert!(!r.ok && r.message.contains("blocked by hook"), "{}", r.message);
-        assert!(e.perform(&repo, Action::Commit { summary: "skipped".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: true }).ok);
+        assert!(e.perform(&repo, Action::Commit { summary: "skipped".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: true, strip_comments: false }).ok);
         let _ = fs::remove_file(hooks.join("pre-commit"));
 
         // Sparse checkout: only docs/ stays in the working folder.
         fs::create_dir_all(d.join("docs")).unwrap();
         fs::write(d.join("docs/a.md"), "a").unwrap();
         fs::write(d.join("big.bin"), "b").unwrap();
-        assert!(e.perform(&repo, Action::Commit { summary: "files".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false }).ok);
+        assert!(e.perform(&repo, Action::Commit { summary: "files".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false }).ok);
         assert!(e.perform(&repo, Action::SparseSet { patterns: vec!["/docs/".into()] }).ok);
         assert!(crate::manage::sparse_info(&d).enabled);
         assert!(!d.join("big.bin").exists() && d.join("docs/a.md").exists());
