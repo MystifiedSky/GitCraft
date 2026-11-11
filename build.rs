@@ -15,7 +15,7 @@ fn prepare_windows_output() {
     let profile = out.ancestors().nth(3).expect("Cargo build output directory");
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
     let deps = profile.join("deps");
-    let mut outputs = vec![profile.join("gitcraft.exe")];
+    let mut outputs = vec![profile.join("gitcraft.exe"), deps.join("gitcraft.exe")];
     if let Ok(entries) = fs::read_dir(&deps) {
         for entry in entries.flatten() {
             let path = entry.path();

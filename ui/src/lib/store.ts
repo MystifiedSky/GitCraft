@@ -144,6 +144,8 @@ export interface Settings {
   workspaces: Workspace[];
   /** Tab / repository aliases (path -> name). */
   aliases: Record<string, string>;
+  /** User-sized repository tabs, in CSS pixels, keyed by repository path. */
+  tabWidths: Record<string, number>;
   spellcheck: boolean;
   /** Check GitHub Releases for new versions and download them in the background. */
   autoUpdate: boolean;
@@ -360,6 +362,7 @@ export const DEFAULT_SETTINGS: Settings = {
   theme: "dark",
   workspaces: [],
   aliases: {},
+  tabWidths: {},
   spellcheck: true,
   autoUpdate: true,
   favorites: [],
