@@ -28,6 +28,7 @@ keyring = { version = "3", features = ["windows-native", "apple-native", "linux-
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 encoding_rs = "0.8"
+tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

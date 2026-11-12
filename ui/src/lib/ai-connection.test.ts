@@ -43,4 +43,14 @@ describe("all AI features share the selected connection", () => {
     await expect(aiApi.test()).rejects.toThrow("settings unavailable");
     expect(invoke).toHaveBeenCalledTimes(1);
   });
+
+  it.each(["codex", "claude_code"] as const)("sends %s program and account folder to the same commit helper", async (provider) => {
+    const cliPath = "/example/bin/agent";
+    const cliConfigDir = "/example/account";
+    useStore.getState().setSettings({ ai: { ...DEFAULT_AI, provider, cliPath, cliConfigDir } });
+    vi.mocked(invoke).mockResolvedValueOnce(undefined).mockResolvedValueOnce(["Summarize changes", ""]);
+    await expect(ai.commitMessage("/repo")).resolves.toEqual(["Summarize changes", ""]);
+    expect(invoke).toHaveBeenNthCalledWith(1, "set_ai_config", { config: expect.objectContaining({ provider, cliPath, cliConfigDir }) });
+    expect(invoke).toHaveBeenNthCalledWith(2, "ai_commit_message", { path: "/repo" });
+  });
 });

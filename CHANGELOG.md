@@ -4,7 +4,13 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
-Expected next release: `0.1.3`.
+Expected next release: `0.1.4`.
+
+### Added
+
+- Use your ChatGPT or Claude subscription for commit and stash messages, change explanations, pull request drafts, and other AI helpers. GitCraft connects to the account you signed into with the installed Codex CLI or Claude Code.
+
+## [0.1.3] - 2026-11-11
 
 ### Added
 
@@ -56,6 +62,7 @@ Expected next release: `0.1.3`.
 - First public release of GitCraft, with Windows NSIS and MSI installers, a universal macOS DMG, and Linux AppImage, DEB, and RPM packages.
 - GitHub Actions builds installers for each push to `main` and publishes signed updates for installed copies.
 
-[Unreleased]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/MystifiedSky/GitCraft/releases/tag/v0.1.1

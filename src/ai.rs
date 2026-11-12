@@ -1,8 +1,8 @@
-//! Every AI helper shares a connection, including local and hosted OpenAI-compatible APIs.
-//! Credentials stay in the OS credential store. Requests only follow an AI button press.
+//! Every AI helper shares a connection, including subscription CLIs and compatible APIs.
+//! Credentials stay in their provider's credential store. Requests only follow an AI button press.
 //! Compatibility retries stay on the chosen endpoint.
 
-use crate::git;
+use crate::{ai_cli, git};
 use crate::hosting::secret_get;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -17,9 +17,11 @@ const MAX_INPUT_CHARS: usize = 600000;
 #[serde(rename_all = "camelCase", default)]
 pub struct AiConfig {
     pub enabled: bool,
-    /// anthropic, openai, google, ollama or custom (local or hosted compatible API).
+    /// anthropic, openai, codex, claude_code, google, ollama or custom.
     pub provider: String,
     pub endpoint: String,
+    pub cli_path: String,
+    pub cli_config_dir: String,
     /// Shared by every feature, including Test Connection; feature models override this.
     pub default_model: String,
     /// auto, json_schema, json_object or text (JSON requested in the prompt).
@@ -33,6 +35,7 @@ impl Default for AiConfig {
     fn default() -> Self {
         AiConfig {
             enabled: true, provider: "anthropic".into(), endpoint: String::new(),
+            cli_path: String::new(), cli_config_dir: String::new(),
             default_model: String::new(), response_format: "auto".into(),
             instructions: String::new(), models: Default::default(), feature_instructions: Default::default(),
         }
@@ -59,6 +62,7 @@ pub fn key_name(provider: &str) -> &'static str {
 fn provider_label(p: &str) -> &'static str {
     match p {
         "openai" => "OpenAI", "google" => "Google", "ollama" => "Ollama",
+        "codex" => "ChatGPT via Codex", "claude_code" => "Claude Code",
         "custom" => "your compatible AI server", _ => "Anthropic",
     }
 }
@@ -95,12 +99,15 @@ fn api_url(c: &AiConfig) -> Result<String, String> {
     Ok(url.into())
 }
 
-fn selected_model(c: &AiConfig, feature: &str) -> Result<String, String> {
-    let model = c.models.get(feature).map(|s| s.trim()).filter(|s| !s.is_empty())
+fn model_override<'a>(c: &'a AiConfig, feature: &str) -> Option<&'a str> {
+    c.models.get(feature).map(|s| s.trim()).filter(|s| !s.is_empty())
         .or_else(|| (!c.default_model.trim().is_empty()).then(|| c.default_model.trim()))
         // Older settings may only have per-feature models; test the commit model in that case.
-        .or_else(|| (feature == "test").then(|| c.models.get("commit").map(|s| s.trim()).filter(|s| !s.is_empty())).flatten());
-    match model {
+        .or_else(|| (feature == "test").then(|| c.models.get("commit").map(|s| s.trim()).filter(|s| !s.is_empty())).flatten())
+}
+
+fn selected_model(c: &AiConfig, feature: &str) -> Result<String, String> {
+    match model_override(c, feature) {
         Some(m) => Ok(m.to_string()),
         None if c.provider == "anthropic" => Ok(MODEL.into()),
         None => Err("Set a Default Model in Preferences > AI, or a model override for this feature.".into()),
@@ -110,8 +117,12 @@ fn selected_model(c: &AiConfig, feature: &str) -> Result<String, String> {
 /// Check configuration without making a network request.
 pub fn configured() -> bool {
     let c = config();
-    c.enabled && api_url(&c).is_ok() && selected_model(&c, "test").is_ok()
-        && (matches!(c.provider.as_str(), "ollama" | "custom") || secret_get(key_name(&c.provider)).is_some())
+    c.enabled && if let Some(agent) = ai_cli::Agent::from_provider(&c.provider) {
+        ai_cli::signed_in(agent, &c.cli_path, &c.cli_config_dir)
+    } else {
+        api_url(&c).is_ok() && selected_model(&c, "test").is_ok()
+            && (matches!(c.provider.as_str(), "ollama" | "custom") || secret_get(key_name(&c.provider)).is_some())
+    }
 }
 
 fn too_big(what: &str, n: usize) -> String {
@@ -161,16 +172,28 @@ fn parse_answer(text: &str, schema: &Value, provider: &str) -> Result<Value, Str
     Ok(v)
 }
 
+fn system_with_instructions(c: &AiConfig, feature: &str, system: &str) -> String {
+    let mut system = system.to_string();
+    // A connection check shouldn't send saved repository-specific instructions to the provider.
+    if feature != "test" {
+        for extra in [c.instructions.trim(), c.feature_instructions.get(feature).map(|s| s.trim()).unwrap_or("")] {
+            if !extra.is_empty() {
+                system.push_str("\n\nFollow these instructions from the user as well:\n");
+                system.push_str(extra);
+            }
+        }
+    }
+    system
+}
+
 /// All features, including PR drafting and conflict resolution, use this connection.
 fn ask(feature: &str, system: &str, prompt: String, effort: &str, schema: Value) -> Result<Value, String> {
     let c = config();
     if !c.enabled { return Err("AI features are turned off (Preferences > AI).".into()); }
-    let mut system = system.to_string();
-    for extra in [c.instructions.trim(), c.feature_instructions.get(feature).map(|s| s.trim()).unwrap_or("")] {
-        if !extra.is_empty() {
-            system.push_str("\n\nFollow these instructions from the user as well:\n");
-            system.push_str(extra);
-        }
+    let system = system_with_instructions(&c, feature, system);
+    if let Some(agent) = ai_cli::Agent::from_provider(&c.provider) {
+        let reply = ai_cli::ask(agent, &c.cli_path, &c.cli_config_dir, model_override(&c, feature), &system, &prompt, &schema)?;
+        return parse_answer(&reply, &schema, &c.provider);
     }
     let model = selected_model(&c, feature)?;
     let url = api_url(&c)?;
@@ -300,7 +323,6 @@ fn staged_or_all(dir: &Path) -> String {
 const COMMIT_SYSTEM: &str = "You write git commit messages. Read the diff and describe what changed and why it matters, \
 following the repository's existing message style shown in the recent commits. The summary is one line, imperative mood, \
 at most 72 characters, no trailing period. The description explains the change in a few short lines, or is empty for trivial changes.";
-
 pub fn commit_message(dir: &Path) -> Result<(String, String), String> {
     let diff = staged_or_all(dir);
     if diff.trim().is_empty() {

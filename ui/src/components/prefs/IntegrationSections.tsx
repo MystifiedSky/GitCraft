@@ -290,12 +290,16 @@ const AI_FEATURES: [string, string, string][] = [
   ["conflict", "Conflict Resolution", "The model GitCraft will use to auto-resolve conflicts."],
 ];
 
-const KEY_NAME: Record<AiSettings["provider"], string> = { anthropic: "anthropic-key", openai: "openai-key", google: "google-key", ollama: "ollama-key", custom: "custom-ai-key" };
+const KEY_NAME: Partial<Record<AiSettings["provider"], string>> = { anthropic: "anthropic-key", openai: "openai-key", google: "google-key", ollama: "ollama-key", custom: "custom-ai-key" };
 const KEY_PAGE: Partial<Record<AiSettings["provider"], string>> = {
   anthropic: "https://console.anthropic.com/settings/keys",
   openai: "https://platform.openai.com/api-keys",
   google: "https://aistudio.google.com/app/apikey",
 };
+const CLI_SETUP = {
+  codex: { name: "Codex CLI", login: "codex login", folder: "~/.codex", variable: "CODEX_HOME", docs: "https://developers.openai.com/codex/cli" },
+  claude_code: { name: "Claude Code", login: "claude auth login", folder: "~/.claude", variable: "CLAUDE_CONFIG_DIR", docs: "https://code.claude.com/docs/en/quickstart" },
+} as const;
 
 export function AiSection() {
   const { set, put, toast } = useSet();
@@ -309,22 +313,25 @@ export function AiSection() {
   const [testing, setTesting] = useState(false);
   const [result, setResult] = useState<{ config: string; ok: boolean; text: string } | null>(null);
   const signature = JSON.stringify(ai);
-  const label = { anthropic: "Anthropic", openai: "OpenAI", google: "Google", ollama: "Ollama", custom: "compatible server" }[ai.provider];
+  const label = { anthropic: "Anthropic", openai: "OpenAI", codex: "ChatGPT", claude_code: "Claude", google: "Google", ollama: "Ollama", custom: "compatible server" }[ai.provider];
+  const cli = ai.provider === "codex" || ai.provider === "claude_code" ? CLI_SETUP[ai.provider] : undefined;
   const optionalKey = ai.provider === "ollama" || ai.provider === "custom";
-  const connection = (a: AiSettings) => ({ endpoint: a.endpoint, defaultModel: a.defaultModel, responseFormat: a.responseFormat, models: a.models });
+  const connection = (a: AiSettings) => ({ endpoint: a.endpoint, cliPath: a.cliPath, cliConfigDir: a.cliConfigDir, defaultModel: a.defaultModel, responseFormat: a.responseFormat, models: a.models });
   const choose = (provider: AiSettings["provider"], preset?: string) => {
     const current = { ...DEFAULT_AI, ...useStore.getState().settings.ai };
     const connections = { ...current.connections, [current.provider]: connection(current) };
-    const saved = connections[provider] ?? { endpoint: "", defaultModel: "", responseFormat: "auto" as const, models: {} };
+    const saved = { ...connection(DEFAULT_AI), ...connections[provider] };
     upd({ provider, connections, ...saved, ...(preset ? { endpoint: preset, defaultModel: "", models: {}, responseFormat: "auto" as const } : {}) });
     setKey("");
     setResult(null);
   };
   const saveKey = async (value: string) => {
+    const name = KEY_NAME[ai.provider];
+    if (!name) return;
     setSaving(true);
     setResult(null);
     try {
-      await hosting.setSecret(KEY_NAME[ai.provider], value);
+      await hosting.setSecret(name, value);
       setKey("");
       toast(true, value ? "Saved to the system credential store" : "Saved API key removed");
     } catch (e) {
@@ -336,7 +343,7 @@ export function AiSection() {
   return (
     <>
       <H>AI</H>
-      <Note>Use your preferred hosted provider or a local AI server for every AI feature. Set one default model, then optionally choose different models or instructions below.</Note>
+      <Note>Use your ChatGPT or Claude subscription, a hosted API, or a local server for GitCraft’s AI helpers.</Note>
       <Row label="Enable AI" help="Commit and stash messages, commit composition, change explanations, pull request drafts and conflict resolution all use this connection.">
         <Toggle value={ai.enabled} onChange={(v) => upd({ enabled: v })} />
       </Row>
@@ -345,8 +352,10 @@ export function AiSection() {
           value={ai.provider}
           onChange={(v) => choose(v)}
           options={[
-            ["anthropic", "Anthropic (Claude)"],
-            ["openai", "OpenAI"],
+            ["anthropic", "Anthropic API (Claude)"],
+            ["openai", "OpenAI API"],
+            ["codex", "ChatGPT subscription (Codex CLI)"],
+            ["claude_code", "Claude subscription (Claude Code)"],
             ["google", "Google (Gemini)"],
             ["ollama", "Ollama (local AI)"],
             ["custom", "Local / OpenAI-compatible API"],
@@ -360,33 +369,49 @@ export function AiSection() {
           <Btn onClick={() => choose("custom", "http://localhost:8080/v1")}>llama.cpp</Btn>
         </div>
       </Row>
-      <Row
-        label={optionalKey ? "API Key (optional)" : "Provider API Key"}
-        help={
-          <>
-            {optionalKey ? "Leave empty for a local server without authentication, or save a key if your server requires one. Keys stay in the system credential store." : "Your API key stays in the system credential store."}{" "}
-            {KEY_PAGE[ai.provider] && (
-              <button className="text-link hover:underline" onClick={() => hosting.openUrl(KEY_PAGE[ai.provider]!)}>
-                Get an API key for {label}.
-              </button>
-            )}
-          </>
-        }
-      >
-        <input type="password" autoComplete="off" aria-label="AI API key" className={cn(field, "flex-1")} placeholder={optionalKey ? "optional key" : "paste key"} value={key} onChange={(e) => setKey(e.target.value)} />
-        <Btn disabled={!key.trim() || saving} onClick={() => void saveKey(key.trim())}>Save</Btn>
-        <Btn disabled={saving} onClick={() => void saveKey("")} title="Remove this provider's key from the credential store">Remove Key</Btn>
+      {cli ? (
+        <>
+          <Row label={`${label} sign-in`} help={<>Install {cli.name}, then run <code>{cli.login}</code> in a terminal and sign in to your {label} account. Requests use that CLI’s allowance. GitCraft passes the context needed for the helper to {cli.name}.</>}>
+            <Btn onClick={() => void hosting.openUrl(cli.docs)}>Setup Guide</Btn>
+          </Row>
+          <Row label="Program" help={`Leave empty to find ${cli.name} automatically, or choose its installed executable.`}>
+            <PathField key={ai.provider} value={ai.cliPath} onSave={(v) => upd({ cliPath: v.trim() })} placeholder="Find automatically" title={`Choose the ${cli.name} executable`} />
+          </Row>
+          <Row label={`${cli.name} folder`} help={<>Optional. Choose the folder you used when signing in with <code>{cli.variable}</code>. Leave empty to use the CLI’s usual folder.</>}>
+            <PathField key={ai.provider} value={ai.cliConfigDir} onSave={(v) => upd({ cliConfigDir: v.trim() })} placeholder={cli.folder} folder title={`Choose the ${cli.name} config folder`} />
+          </Row>
+        </>
+      ) : (
+        <>
+          <Row
+            label={optionalKey ? "API Key (optional)" : "Provider API Key"}
+            help={
+              <>
+                {optionalKey ? "Leave empty for a local server without authentication, or save a key if your server requires one. Keys stay in the system credential store." : "Your API key stays in the system credential store."}{" "}
+                {KEY_PAGE[ai.provider] && (
+                  <button className="text-link hover:underline" onClick={() => hosting.openUrl(KEY_PAGE[ai.provider]!)}>
+                    Get an API key for {label}.
+                  </button>
+                )}
+              </>
+            }
+          >
+            <input type="password" autoComplete="off" aria-label="AI API key" className={cn(field, "flex-1")} placeholder={optionalKey ? "optional key" : "paste key"} value={key} onChange={(e) => setKey(e.target.value)} />
+            <Btn disabled={!key.trim() || saving} onClick={() => void saveKey(key.trim())}>Save</Btn>
+            <Btn disabled={saving} onClick={() => void saveKey("")} title="Remove this provider's key from the credential store">Remove Key</Btn>
+          </Row>
+          <Row
+            label="API Endpoint URL"
+            help={ai.provider === "anthropic" ? "Optional API base or full Messages URL. Empty uses Anthropic." : "Enter a server address, a /v1 API base, or the full /chat/completions URL. Empty uses the provider default; a compatible server needs its own URL."}
+          >
+            <Text key={ai.provider} value={ai.endpoint} onSave={(v) => upd({ endpoint: v.trim() })} placeholder={ai.provider === "ollama" ? "http://localhost:11434/v1" : ai.provider === "custom" ? "http://localhost:1234/v1" : "provider default"} mono />
+          </Row>
+        </>
+      )}
+      <Row label={cli ? "Default Model (optional)" : "Default Model"} help={cli ? `Leave empty to use the CLI default. If you specify a model, it must be available to your ${label} account.` : "Used by every feature and Test Connection. Use the model ID from your provider or local server; no fixed model list."}>
+        <Text key={ai.provider} value={ai.defaultModel} placeholder={cli ? `${cli.name} default` : ai.provider === "anthropic" ? "claude-opus-5-5" : "model ID from your server"} onSave={(v) => upd({ defaultModel: v.trim() })} mono />
       </Row>
-      <Row
-        label="API Endpoint URL"
-        help={ai.provider === "anthropic" ? "Optional API base or full Messages URL. Empty uses Anthropic." : "Enter a server address, a /v1 API base, or the full /chat/completions URL. Empty uses the provider default; a compatible server needs its own URL."}
-      >
-        <Text key={ai.provider} value={ai.endpoint} onSave={(v) => upd({ endpoint: v.trim() })} placeholder={ai.provider === "ollama" ? "http://localhost:11434/v1" : ai.provider === "custom" ? "http://localhost:1234/v1" : "provider default"} mono />
-      </Row>
-      <Row label="Default Model" help="Used by every feature and Test Connection. Use the model ID from your provider or local server; no fixed model list.">
-        <Text value={ai.defaultModel} placeholder={ai.provider === "anthropic" ? "claude-opus-5-5" : "model ID from your server"} onSave={(v) => upd({ defaultModel: v.trim() })} mono />
-      </Row>
-      {ai.provider !== "anthropic" && (
+      {ai.provider !== "anthropic" && !cli && (
         <Row label="Response Mode" help="Automatic tries structured output, then JSON mode, then a JSON prompt only if the server rejects the format. Every mode supports every feature; answers are validated before use.">
           <Select
             value={ai.responseFormat}
@@ -395,7 +420,7 @@ export function AiSection() {
           />
         </Row>
       )}
-      <Row label="Test Connection" help={result?.config === signature ? result.text : "Tests the default model with the same connection and response mode used by AI features."} error={result?.config === signature && !result.ok ? "Connection test failed. Check the settings above and try again." : undefined}>
+      <Row label="Test Connection" help={result?.config === signature ? result.text : cli ? "Checks your subscription sign-in and makes a short test request without repository data." : "Tests the default model with the same connection and response mode used by AI features."} error={result?.config === signature && !result.ok ? "Connection test failed. Check the settings above and try again." : undefined}>
         <Btn
           disabled={testing || !ai.enabled}
           onClick={async () => {
@@ -423,7 +448,7 @@ export function AiSection() {
         <div key={id}>
           <H sub>{title}</H>
           <Row label="Model Override (optional)" help={modelHelp + " Leave empty to use the Default Model."}>
-            <Text value={ai.models[id] ?? ""} placeholder={ai.defaultModel || (ai.provider === "anthropic" ? "claude-opus-5-5" : "inherit default model")} onSave={(v) => upd({ models: { ...useStore.getState().settings.ai.models, [id]: v.trim() } })} mono />
+            <Text key={ai.provider} value={ai.models[id] ?? ""} placeholder={ai.defaultModel || (ai.provider === "anthropic" ? "claude-opus-5-5" : cli ? `${cli.name} default` : "inherit default model")} onSave={(v) => upd({ models: { ...useStore.getState().settings.ai.models, [id]: v.trim() } })} mono />
           </Row>
           <Row label="Custom Instructions" wide>
             <Area value={ai.featureInstructions[id] ?? ""} rows={2} onSave={(v) => upd({ featureInstructions: { ...useStore.getState().settings.ai.featureInstructions, [id]: v } })} />

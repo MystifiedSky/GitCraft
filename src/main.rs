@@ -7,6 +7,7 @@ mod files;
 mod git;
 mod graph;
 mod ai;
+mod ai_cli;
 mod extras;
 mod external;
 mod prefs;
