@@ -1,17 +1,35 @@
 //! Generate structured text with the official CLI and its existing subscription login.
 
-use serde_json::Value;
+use crate::ai_models::Model;
+use serde_json::{json, Value};
 use std::{
+    collections::HashSet,
     env,
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Child, ChildStdin, Command, Output, Stdio},
     sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
 
 const MAX_OUTPUT: u64 = 2 * 1024 * 1024;
+const CLAUDE_TEXT_ARGS: &[&str] = &[
+    "--restricted",
+    "-p",
+    "--no-session-persistence",
+    "--disable-slash-commands",
+    "--no-chrome",
+    "--tools",
+    "",
+    "--strict-mcp-config",
+    "--mcp-config",
+    r#"{"mcpServers":{}}"#,
+    "--settings",
+    r#"{"disableAllHooks":true}"#,
+    "--disallowedTools",
+    "mcp__*",
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Agent {
@@ -84,6 +102,14 @@ fn absolute_path(value: &str) -> Option<PathBuf> {
     path.is_absolute().then_some(path)
 }
 
+#[cfg(windows)]
+fn npm_entry(agent: Agent) -> &'static str {
+    match agent {
+        Agent::Codex => "node_modules/@openai/codex/bin/codex.js",
+        Agent::Claude => "node_modules/@anthropic-ai/claude-code/cli.js",
+    }
+}
+
 impl Cli {
     fn find(agent: Agent, program: &str, config_dir: &str) -> Result<Self, String> {
         let config_dir = match config_dir.trim() {
@@ -102,6 +128,18 @@ impl Cli {
         if !program.trim().is_empty() {
             let path = absolute_path(program.trim())
                 .ok_or("Choose an absolute executable path in Preferences > AI.")?;
+            #[cfg(windows)]
+            if path.ends_with(npm_entry(agent)) && path.is_file() {
+                let env_path = env::var_os("PATH").unwrap_or_default();
+                if let Some(node) = env::split_paths(&env_path)
+                    .filter(|p| p.is_absolute())
+                    .map(|p| p.join("node.exe"))
+                    .find(|p| p.is_file())
+                {
+                    return Ok(make(node, Some(path)));
+                }
+                return Err("Node.js is needed to run this npm installation. Install it or choose the standalone CLI executable.".into());
+            }
             // Windows batch files go through a shell. Only launch a binary or our known npm entry.
             if cfg!(windows)
                 && !path
@@ -147,10 +185,7 @@ impl Cli {
         #[cfg(windows)]
         {
             // npm uses .cmd shims on Windows. Invoke a known official JS entry without cmd.exe.
-            let entry = match agent {
-                Agent::Codex => "node_modules/@openai/codex/bin/codex.js",
-                Agent::Claude => "node_modules/@anthropic-ai/claude-code/cli.js",
-            };
+            let entry = npm_entry(agent);
             let launcher = dirs.iter().map(|p| p.join(entry)).find(|p| p.is_file());
             let node = dirs
                 .iter()
@@ -264,26 +299,9 @@ impl Cli {
                 .arg(schema_path);
             }
             Agent::Claude => {
-                cmd.args([
-                    "--restricted",
-                    "-p",
-                    "--no-session-persistence",
-                    "--disable-slash-commands",
-                    "--no-chrome",
-                    "--tools",
-                    "",
-                    "--strict-mcp-config",
-                    "--mcp-config",
-                    r#"{"mcpServers":{}}"#,
-                    "--settings",
-                    r#"{"disableAllHooks":true}"#,
-                    "--disallowedTools",
-                    "mcp__*",
-                    "--output-format",
-                    "json",
-                    "--json-schema",
-                ])
-                .arg(schema.to_string());
+                cmd.args(CLAUDE_TEXT_ARGS)
+                    .args(["--output-format", "json", "--json-schema"])
+                    .arg(schema.to_string());
             }
         }
         if let Some(model) = model {
@@ -314,6 +332,239 @@ pub fn signed_in(agent: Agent, program: &str, config_dir: &str) -> bool {
         return false;
     };
     tempfile::tempdir().is_ok_and(|dir| cli.check_login(dir.path()).is_ok())
+}
+
+#[derive(serde::Serialize)]
+pub struct DetectedProgram {
+    path: String,
+    version: String,
+}
+
+/// Verify the discovered binary locally; this does not sign in or send a prompt.
+pub fn detect_program(agent: Agent) -> Result<DetectedProgram, String> {
+    let cli = Cli::find(agent, "", "")?;
+    let dir =
+        tempfile::tempdir().map_err(|_| "Could not prepare a temporary folder for discovery.")?;
+    let out = run(
+        agent,
+        cli.command(dir.path()).arg("--version"),
+        "",
+        Duration::from_secs(10),
+    )?;
+    let expected = match agent {
+        Agent::Codex => "codex",
+        Agent::Claude => "claude code",
+    };
+    let version = [&out.stdout, &out.stderr].iter().find_map(|bytes| {
+        std::str::from_utf8(bytes)
+            .ok()?
+            .lines()
+            .map(str::trim)
+            .find(|line| line.len() <= 120 && line.to_ascii_lowercase().contains(expected))
+    });
+    match (out.status.success(), version) {
+        (true, Some(version)) => Ok(DetectedProgram {
+            path: cli.launcher.as_ref().unwrap_or(&cli.executable).to_string_lossy().into_owned(),
+            version: version.into(),
+        }),
+        _ => Err(format!("Found a program, but it did not identify itself as {}. Choose its executable manually.", agent.name())),
+    }
+}
+
+pub fn list_models(agent: Agent, program: &str, config_dir: &str) -> Result<Vec<Model>, String> {
+    let cli = Cli::find(agent, program, config_dir)?;
+    let dir =
+        tempfile::tempdir().map_err(|_| "Could not prepare a temporary folder to list models.")?;
+    cli.check_login(dir.path())?;
+    match agent {
+        Agent::Codex => codex_models(&cli, dir.path()),
+        Agent::Claude => claude_models(&cli, dir.path()),
+    }
+}
+
+fn claude_models(cli: &Cli, dir: &Path) -> Result<Vec<Model>, String> {
+    let mut command = cli.command(dir);
+    command.args(CLAUDE_TEXT_ARGS).args([
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+    ]);
+    let mut session = JsonSession::start(&mut command, cli.agent)?;
+    // Claude Code's SDK receives supportedModels in the initialize response, before any prompt.
+    session.send(
+        json!({"type":"control_request","request_id":"models","request":{"subtype":"initialize"}}),
+    )?;
+    let reply = session.receive(|value| value["response"]["request_id"] == "models")?;
+    let rows = reply["response"]["response"]["models"].as_array().ok_or(
+        "Claude Code did not return a model list. Update Claude Code or enter a model ID manually.",
+    )?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| Model::from_fields(row, "value", "displayName"))
+        .filter(|model| model.id != "default")
+        .collect())
+}
+
+fn codex_models(cli: &Cli, dir: &Path) -> Result<Vec<Model>, String> {
+    let mut command = cli.command(dir);
+    command.args([
+        "-c",
+        "force_login_method=\"chatgpt\"",
+        "-c",
+        "model_provider=\"openai\"",
+        "-c",
+        "mcp_servers={}",
+        "--disable",
+        "apps",
+        "--disable",
+        "plugins",
+        "--disable",
+        "hooks",
+        "app-server",
+        "--listen",
+        "stdio://",
+    ]);
+    let mut session = JsonSession::start(&mut command, cli.agent)?;
+    session.request(1, "initialize", json!({
+        "clientInfo": { "name":"gitcraft", "title":"GitCraft", "version":env!("CARGO_PKG_VERSION") }
+    }))?;
+    session.send(json!({"method":"initialized","params":{}}))?;
+    let config = session.request(2, "config/read", json!({"includeLayers":false}))?;
+    let custom_catalog = config["config"]["model_catalog_json"]
+        .as_str()
+        .is_some_and(|path| !path.is_empty());
+    let mut models = Vec::new();
+    let mut cursor: Option<String> = None;
+    for id in 3..13 {
+        let page = session.request(
+            id,
+            "model/list",
+            json!({"cursor":cursor,"limit":100,"includeHidden":false}),
+        )?;
+        let rows = page["data"]
+            .as_array()
+            .ok_or("Codex did not return a model list.")?;
+        models.extend(
+            rows.iter()
+                .filter(|row| {
+                    row["hidden"] != true
+                        && row["inputModalities"]
+                            .as_array()
+                            .is_none_or(|types| types.iter().any(|t| t == "text"))
+                })
+                .filter_map(|row| Model::from_fields(row, "model", "displayName")),
+        );
+        let Some(next) = page["nextCursor"].as_str() else {
+            drop(session);
+            // Draft generation ignores the user's custom Codex config. With a custom catalog,
+            // intersect its visible choices with this CLI's bundled IDs to exclude local aliases.
+            if custom_catalog {
+                let output = run(
+                    cli.agent,
+                    cli.command(dir).args(["debug", "models", "--bundled"]),
+                    "",
+                    Duration::from_secs(10),
+                )?;
+                let catalog: Value = serde_json::from_slice(&output.stdout)
+                    .ok().filter(|_| output.status.success())
+                    .ok_or("Could not separate local Codex aliases from ChatGPT models. Update Codex CLI or enter a model ID manually.")?;
+                let builtin: HashSet<_> = catalog["models"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|row| row["slug"].as_str())
+                    .collect();
+                models.retain(|model| builtin.contains(model.id.as_str()));
+            }
+            return Ok(models);
+        };
+        if cursor.as_deref() == Some(next) {
+            break;
+        }
+        cursor = Some(next.into());
+    }
+    Err("The Codex model list did not finish. Try fetching it again.".into())
+}
+
+/// Short-lived CLI transport for catalog lookups. No thread or inference turn is started.
+struct JsonSession {
+    agent: Agent,
+    child: Child,
+    input: ChildStdin,
+    messages: mpsc::Receiver<Value>,
+    deadline: Instant,
+}
+
+impl JsonSession {
+    fn start(command: &mut Command, agent: Agent) -> Result<Self, String> {
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| format!("Could not start {} to list models.", agent.name()))?;
+        let input = child.stdin.take().expect("piped stdin");
+        let output = child.stdout.take().expect("piped stdout");
+        let (tx, messages) = mpsc::sync_channel(16);
+        thread::spawn(move || {
+            for line in BufReader::new(output.take(MAX_OUTPUT))
+                .lines()
+                .map_while(Result::ok)
+            {
+                if let Ok(value) = serde_json::from_str(&line) {
+                    if tx.send(value).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        Ok(Self {
+            agent,
+            child,
+            input,
+            messages,
+            deadline: Instant::now() + Duration::from_secs(20),
+        })
+    }
+
+    fn send(&mut self, value: Value) -> Result<(), String> {
+        writeln!(self.input, "{value}")
+            .map_err(|_| format!("Could not request models from {}.", self.agent.name()))
+    }
+
+    fn receive(&self, matches: impl Fn(&Value) -> bool) -> Result<Value, String> {
+        loop {
+            let message = self
+                .messages
+                .recv_timeout(self.deadline.saturating_duration_since(Instant::now()))
+                .map_err(|_| {
+                    format!(
+                        "{} did not answer the model request. Check your sign-in and CLI version.",
+                        self.agent.name()
+                    )
+                })?;
+            if matches(&message) {
+                return Ok(message);
+            }
+        }
+    }
+
+    fn request(&mut self, id: u32, method: &str, params: Value) -> Result<Value, String> {
+        self.send(json!({"id":id,"method":method,"params":params}))?;
+        self.receive(|reply| reply["id"] == id)?
+            .get("result")
+            .cloned()
+            .ok_or_else(|| format!("{} rejected the model catalog request.", self.agent.name()))
+    }
+}
+
+impl Drop for JsonSession {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 pub fn ask(
@@ -604,5 +855,16 @@ mod tests {
     #[ignore = "requires a signed-in Claude Code CLI and uses a small amount of subscription usage"]
     fn live_claude_connection() {
         subscription_smoke(Agent::Claude);
+    }
+
+    #[test]
+    #[ignore = "requires both signed-in CLIs; does not send a prompt"]
+    fn live_model_catalogs() {
+        for agent in [Agent::Codex, Agent::Claude] {
+            let program = detect_program(agent).unwrap();
+            let models = list_models(agent, &program.path, "").unwrap();
+            assert!(!models.is_empty(), "No models listed for {}", agent.name());
+            eprintln!("{}: {} models", program.version, models.len());
+        }
     }
 }

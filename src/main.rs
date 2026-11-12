@@ -8,6 +8,7 @@ mod git;
 mod graph;
 mod ai;
 mod ai_cli;
+mod ai_models;
 mod extras;
 mod external;
 mod prefs;
@@ -458,6 +459,17 @@ async fn ai_test_connection() -> Result<String, String> {
 }
 
 #[tauri::command]
+async fn ai_list_models(config: ai::AiConfig) -> Result<Vec<ai_models::Model>, String> {
+    blocking(move || ai_models::list(&config)).await?
+}
+
+#[tauri::command]
+async fn ai_find_program(provider: String) -> Result<ai_cli::DetectedProgram, String> {
+    let agent = ai_cli::Agent::from_provider(&provider).ok_or("This provider does not use a local program.")?;
+    blocking(move || ai_cli::detect_program(agent)).await?
+}
+
+#[tauri::command]
 async fn ai_pull_request(path: String, source: String, target: String) -> Result<(String, String), String> {
     blocking(move || ai::pull_request_text(Path::new(&path), &source, &target)).await?
 }
@@ -853,6 +865,8 @@ fn main() {
             ai_compose,
             set_ai_config,
             ai_test_connection,
+            ai_list_models,
+            ai_find_program,
             ai_pull_request,
             ai_resolve_conflict,
             save_patch,

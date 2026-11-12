@@ -54,3 +54,15 @@ describe("all AI features share the selected connection", () => {
     expect(invoke).toHaveBeenNthCalledWith(2, "ai_commit_message", { path: "/repo" });
   });
 });
+
+it("discovers the program and models without changing the active connection or requesting a draft", async () => {
+  const config = { ...DEFAULT_AI, provider: "claude_code" as const, cliConfigDir: "/personal/claude" };
+  const model = { id: "sonnet", name: "Sonnet" };
+  vi.mocked(invoke).mockResolvedValueOnce({ path: "/bin/claude", version: "Claude Code" }).mockResolvedValueOnce([model]);
+  await expect(aiApi.findProgram(config.provider)).resolves.toMatchObject({ path: "/bin/claude" });
+  await expect(aiApi.listModels(config)).resolves.toEqual([model]);
+  expect(vi.mocked(invoke).mock.calls).toEqual([
+    ["ai_find_program", { provider: "claude_code" }],
+    ["ai_list_models", { config }],
+  ]);
+});

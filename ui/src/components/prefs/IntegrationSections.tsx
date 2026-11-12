@@ -1,10 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
 import { CheckCircle2, CircleDashed, ExternalLink, AlertTriangle } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { hosting } from "@/lib/hosting";
 import { useStore, DEFAULT_AI, type AiSettings, type Settings } from "@/lib/store";
-import { SERVICES, aiApi, integrations, tools, type ServiceInfo } from "@/lib/integrations";
+import { SERVICES, aiApi, integrations, tools, type AiModel, type ServiceInfo } from "@/lib/integrations";
 import { cn } from "@/lib/utils";
 import { Area, Btn, H, Note, PathField, Row, Select, Text, Toggle, field } from "./controls";
 
@@ -301,6 +301,26 @@ const CLI_SETUP = {
   claude_code: { name: "Claude Code", login: "claude auth login", folder: "~/.claude", variable: "CLAUDE_CONFIG_DIR", docs: "https://code.claude.com/docs/en/quickstart" },
 } as const;
 
+function modelSource(a: AiSettings) {
+  return JSON.stringify([a.provider, a.endpoint, a.cliPath, a.cliConfigDir]);
+}
+
+function ModelField({ models, value, fallback, label, onChange }: {
+  models: AiModel[]; value: string; fallback: string; label: string; onChange: (value: string) => void;
+}) {
+  const [manual, setManual] = useState(false);
+  const options: [string, string][] = [["", fallback], ...models.map((m): [string, string] => [m.id, m.name === m.id ? m.name : `${m.name} (${m.id})`])];
+  if (value && !models.some((m) => m.id === value)) options.push([value, `${value} (saved)`]);
+  return (
+    <div className="flex min-w-0 flex-1 items-center gap-2">
+      {models.length > 0 && !manual
+        ? <Select label={label} value={value} options={options} onChange={onChange} />
+        : <Text label={label} value={value} placeholder={fallback} onSave={(v) => onChange(v.trim())} mono />}
+      {models.length > 0 && <Btn onClick={() => setManual(!manual)}>{manual ? "Use List" : "Enter ID"}</Btn>}
+    </div>
+  );
+}
+
 export function AiSection() {
   const { set, put, toast } = useSet();
   const ai = { ...DEFAULT_AI, ...set.ai };
@@ -312,10 +332,19 @@ export function AiSection() {
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [result, setResult] = useState<{ config: string; ok: boolean; text: string } | null>(null);
+  const [catalog, setCatalog] = useState<{ source: string; models: AiModel[]; loading: boolean; error?: string }>();
+  const [programResult, setProgramResult] = useState<{ provider: AiSettings["provider"]; path: string; found?: string; error?: string }>();
+  const [finding, setFinding] = useState(false);
+  const catalogRequest = useRef(0);
   const signature = JSON.stringify(ai);
+  const source = modelSource(ai);
+  const currentCatalog = catalog?.source === source ? catalog : undefined;
+  const models = currentCatalog?.models ?? [];
+  const program = programResult?.provider === ai.provider && programResult.path === ai.cliPath ? programResult : undefined;
   const label = { anthropic: "Anthropic", openai: "OpenAI", codex: "ChatGPT", claude_code: "Claude", google: "Google", ollama: "Ollama", custom: "compatible server" }[ai.provider];
   const cli = ai.provider === "codex" || ai.provider === "claude_code" ? CLI_SETUP[ai.provider] : undefined;
   const optionalKey = ai.provider === "ollama" || ai.provider === "custom";
+  const defaultLabel = cli ? `Use ${cli.name} default` : ai.provider === "anthropic" ? "Use Anthropic default" : "Select a model";
   const connection = (a: AiSettings) => ({ endpoint: a.endpoint, cliPath: a.cliPath, cliConfigDir: a.cliConfigDir, defaultModel: a.defaultModel, responseFormat: a.responseFormat, models: a.models });
   const choose = (provider: AiSettings["provider"], preset?: string) => {
     const current = { ...DEFAULT_AI, ...useStore.getState().settings.ai };
@@ -333,11 +362,44 @@ export function AiSection() {
     try {
       await hosting.setSecret(name, value);
       setKey("");
+      if (useStore.getState().settings.ai.provider === ai.provider) {
+        catalogRequest.current++;
+        setCatalog(undefined);
+      }
       toast(true, value ? "Saved to the system credential store" : "Saved API key removed");
     } catch (e) {
       toast(false, String(e));
     } finally {
       setSaving(false);
+    }
+  };
+  const fetchModels = async () => {
+    const config = { ...DEFAULT_AI, ...useStore.getState().settings.ai };
+    const from = modelSource(config);
+    const request = ++catalogRequest.current;
+    setCatalog((prev) => ({ source: from, loading: true, models: prev?.source === from ? prev.models : [] }));
+    try {
+      const list = await aiApi.listModels(config);
+      if (request === catalogRequest.current) setCatalog({ source: from, loading: false, models: list });
+    } catch (e) {
+      if (request === catalogRequest.current) setCatalog((prev) => ({ source: from, loading: false, models: prev?.models ?? [], error: String(e) }));
+    }
+  };
+  const findProgram = async () => {
+    const { provider, cliPath } = { ...DEFAULT_AI, ...useStore.getState().settings.ai };
+    setFinding(true);
+    setProgramResult(undefined);
+    try {
+      const found = await aiApi.findProgram(provider);
+      const current = useStore.getState().settings.ai;
+      if (current.provider === provider && (current.cliPath ?? "") === cliPath) {
+        upd({ cliPath: found.path });
+        setProgramResult({ provider, path: found.path, found: found.version });
+      }
+    } catch (e) {
+      setProgramResult({ provider, path: cliPath, error: String(e) });
+    } finally {
+      setFinding(false);
     }
   };
   return (
@@ -362,7 +424,7 @@ export function AiSection() {
           ]}
         />
       </Row>
-      <Row label="Local AI presets" help="Start your local server and load a model, select its preset here, then enter the exact model ID below. Presets reset model overrides for the new server.">
+      <Row label="Local AI presets" help="Start your local server, select its preset here, then fetch its models below. Presets reset model overrides for the new server.">
         <div className="flex gap-2 flex-wrap">
           <Btn onClick={() => choose("ollama", "http://localhost:11434/v1")}>Ollama</Btn>
           <Btn onClick={() => choose("custom", "http://localhost:1234/v1")}>LM Studio</Btn>
@@ -374,8 +436,12 @@ export function AiSection() {
           <Row label={`${label} sign-in`} help={<>Install {cli.name}, then run <code>{cli.login}</code> in a terminal and sign in to your {label} account. Requests use that CLI’s allowance. GitCraft passes the context needed for the helper to {cli.name}.</>}>
             <Btn onClick={() => void hosting.openUrl(cli.docs)}>Setup Guide</Btn>
           </Row>
-          <Row label="Program" help={`Leave empty to find ${cli.name} automatically, or choose its installed executable.`}>
-            <PathField key={ai.provider} value={ai.cliPath} onSave={(v) => upd({ cliPath: v.trim() })} placeholder="Find automatically" title={`Choose the ${cli.name} executable`} />
+          <Row label="Program" help={program?.found ? <span role="status">Found and verified: {program.found}</span> : `Find ${cli.name} on this computer or browse to its executable.`}
+            error={program?.error}>
+            <div className="flex w-full flex-wrap items-center gap-2">
+              <PathField key={ai.provider} value={ai.cliPath} onSave={(v) => upd({ cliPath: v.trim() })} placeholder="Program path" title={`Choose the ${cli.name} executable`} />
+              <Btn disabled={finding} onClick={() => void findProgram()}>{finding ? "Finding…" : "Find Automatically"}</Btn>
+            </div>
           </Row>
           <Row label={`${cli.name} folder`} help={<>Optional. Choose the folder you used when signing in with <code>{cli.variable}</code>. Leave empty to use the CLI’s usual folder.</>}>
             <PathField key={ai.provider} value={ai.cliConfigDir} onSave={(v) => upd({ cliConfigDir: v.trim() })} placeholder={cli.folder} folder title={`Choose the ${cli.name} config folder`} />
@@ -408,8 +474,16 @@ export function AiSection() {
           </Row>
         </>
       )}
-      <Row label={cli ? "Default Model (optional)" : "Default Model"} help={cli ? `Leave empty to use the CLI default. If you specify a model, it must be available to your ${label} account.` : "Used by every feature and Test Connection. Use the model ID from your provider or local server; no fixed model list."}>
-        <Text key={ai.provider} value={ai.defaultModel} placeholder={cli ? `${cli.name} default` : ai.provider === "anthropic" ? "claude-opus-5-5" : "model ID from your server"} onSave={(v) => upd({ defaultModel: v.trim() })} mono />
+      <Row label={cli ? "Default Model (optional)" : "Default Model"} error={currentCatalog?.error}
+        help={<>Fetch the models available on this connection. The default is used by every feature unless you choose an override.
+          {currentCatalog && !currentCatalog.loading && !currentCatalog.error && (
+            <span role="status" className="block mt-1">{models.length ? `${models.length} models found.` : "No models were listed. You can still enter a model ID."}</span>
+          )}
+        </>}>
+        <div className="flex w-full flex-wrap items-center gap-2">
+          <ModelField key={source} label="Default Model" models={models} value={ai.defaultModel} fallback={defaultLabel} onChange={(v) => upd({ defaultModel: v })} />
+          <Btn disabled={currentCatalog?.loading || saving} onClick={() => void fetchModels()}>{currentCatalog?.loading ? "Fetching…" : models.length ? "Refresh Models" : "Fetch Models"}</Btn>
+        </div>
       </Row>
       {ai.provider !== "anthropic" && !cli && (
         <Row label="Response Mode" help="Automatic tries structured output, then JSON mode, then a JSON prompt only if the server rejects the format. Every mode supports every feature; answers are validated before use.">
@@ -448,7 +522,7 @@ export function AiSection() {
         <div key={id}>
           <H sub>{title}</H>
           <Row label="Model Override (optional)" help={modelHelp + " Leave empty to use the Default Model."}>
-            <Text key={ai.provider} value={ai.models[id] ?? ""} placeholder={ai.defaultModel || (ai.provider === "anthropic" ? "claude-opus-5-5" : cli ? `${cli.name} default` : "inherit default model")} onSave={(v) => upd({ models: { ...useStore.getState().settings.ai.models, [id]: v.trim() } })} mono />
+            <ModelField key={source} label={`${title} Model`} models={models} value={ai.models[id] ?? ""} fallback="Use Default Model" onChange={(v) => upd({ models: { ...useStore.getState().settings.ai.models, [id]: v } })} />
           </Row>
           <Row label="Custom Instructions" wide>
             <Area value={ai.featureInstructions[id] ?? ""} rows={2} onSave={(v) => upd({ featureInstructions: { ...useStore.getState().settings.ai.featureInstructions, [id]: v } })} />

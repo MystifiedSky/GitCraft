@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use std::path::Path;
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
-const API_VERSION: &str = "2026-10-21";
+pub(crate) const API_VERSION: &str = "2026-10-21";
 const MODEL: &str = "claude-opus-5-5";
 const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 const MAX_INPUT_CHARS: usize = 600000;
@@ -59,7 +59,7 @@ pub fn key_name(provider: &str) -> &'static str {
     }
 }
 
-fn provider_label(p: &str) -> &'static str {
+pub(crate) fn provider_label(p: &str) -> &'static str {
     match p {
         "openai" => "OpenAI", "google" => "Google", "ollama" => "Ollama",
         "codex" => "ChatGPT via Codex", "claude_code" => "Claude Code",
@@ -68,7 +68,7 @@ fn provider_label(p: &str) -> &'static str {
 }
 
 /// Accept a server root, API base or complete endpoint, preserving proxy paths and query parameters.
-fn api_url(c: &AiConfig) -> Result<String, String> {
+pub(crate) fn api_url(c: &AiConfig) -> Result<String, String> {
     let default = match c.provider.as_str() {
         "anthropic" => API_URL,
         "openai" => "https://api.openai.com/v1/chat/completions",

@@ -31,7 +31,7 @@ export function Toggle({ value, onChange, disabled }: { value: boolean; onChange
 }
 
 /** A text box that saves when you leave it or press Enter. */
-export function Text({ value, onSave, placeholder, password, className, mono }: { value: string; onSave: (v: string) => void; placeholder?: string; password?: boolean; className?: string; mono?: boolean }) {
+export function Text({ value, onSave, placeholder, password, className, mono, label }: { value: string; onSave: (v: string) => void; placeholder?: string; password?: boolean; className?: string; mono?: boolean; label?: string }) {
   const [v, setV] = useState(value);
   useEffect(() => setV(value), [value]);
   const save = () => v !== value && onSave(v);
@@ -41,6 +41,7 @@ export function Text({ value, onSave, placeholder, password, className, mono }: 
       className={cn(field, "flex-1", mono && "mono", className)}
       value={v}
       placeholder={placeholder}
+      aria-label={label}
       onChange={(e) => setV(e.target.value)}
       onBlur={save}
       onKeyDown={(e) => e.key === "Enter" && save()}
@@ -77,9 +78,9 @@ export function Num({ value, onSave, min, max, step = 1, width = 90 }: { value: 
   return <input type="number" step={step} min={min} max={max} className={field} style={{ width }} value={v} onChange={(e) => setV(e.target.value)} onBlur={save} onKeyDown={(e) => e.key === "Enter" && save()} />;
 }
 
-export function Select<T extends string>({ value, onChange, options, className }: { value: T; onChange: (v: T) => void; options: [T, string][]; className?: string }) {
+export function Select<T extends string>({ value, onChange, options, className, label }: { value: T; onChange: (v: T) => void; options: [T, string][]; className?: string; label?: string }) {
   return (
-    <select className={cn(field, "flex-1", className)} value={value} onChange={(e) => onChange(e.target.value as T)}>
+    <select className={cn(field, "flex-1", className)} aria-label={label} value={value} onChange={(e) => onChange(e.target.value as T)}>
       {options.map(([k, l]) => (
         <option key={k} value={k}>
           {l}

@@ -4,7 +4,13 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
-Expected next release: `0.1.5`.
+Expected next release: `0.1.6`.
+
+### Added
+
+- Fetch model lists in AI Preferences and pick a default model or an override for each helper. Find and verify the installed Codex CLI or Claude Code without running an AI request.
+
+## [0.1.5] - 2026-11-11
 
 ### Fixed
 
@@ -68,7 +74,8 @@ Expected next release: `0.1.5`.
 - First public release of GitCraft, with Windows NSIS and MSI installers, a universal macOS DMG, and Linux AppImage, DEB, and RPM packages.
 - GitHub Actions builds installers for each push to `main` and publishes signed updates for installed copies.
 
-[Unreleased]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.1...v0.1.2
