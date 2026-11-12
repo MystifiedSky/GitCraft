@@ -67,6 +67,23 @@ fn rename_limit(dir: &Path) -> u32 {
     if limit > 0 { limit as u32 } else { MERGE_RENAME_LIMIT }
 }
 
+/// Shared CLI adaptation of nodegit.node FUN_180296e60: flags=1 enables renames,
+/// similarity defaults to 50%, and the candidate limit follows rename_limit above.
+/// Use for previews and merges so personal merge.renames settings cannot make them disagree.
+pub fn merge_args(dir: &Path, command: &str, args: &[&str]) -> Vec<String> {
+    let mut out = vec![
+        "-c".into(),
+        "merge.renames=true".into(),
+        "-c".into(),
+        format!("merge.renameLimit={}", rename_limit(dir)),
+        command.into(),
+        "-X".into(),
+        format!("find-renames={MERGE_RENAME_THRESHOLD}%"),
+    ];
+    out.extend(args.iter().map(|s| (*s).to_string()));
+    out
+}
+
 /// Apply a patch file: mailbox patches become commits (`git am`), plain diffs change the working folder.
 pub fn apply_patch_file(dir: &Path, file: &Path, run: &dyn Fn(&[&str]) -> git::GitOut) -> git::GitOut {
     let text = std::fs::read_to_string(file).unwrap_or_default();
@@ -175,9 +192,8 @@ pub fn conflict_check(dir: &Path, target: Option<&str>) -> ConflictCheck {
     let Some(target) = target.map(|s| s.to_string()).or_else(|| default_target(dir)) else {
         return ConflictCheck { note: Some("No target branch to compare with.".into()), ..Default::default() };
     };
-    let limit = format!("merge.renameLimit={}", rename_limit(dir));
-    let threshold = format!("find-renames={MERGE_RENAME_THRESHOLD}%");
-    let o = git::run(dir, &["-c", &limit, "merge-tree", "--write-tree", "--name-only", "--no-messages", "-X", &threshold, "HEAD", &target]);
+    let args = merge_args(dir, "merge-tree", &["--write-tree", "--name-only", "--no-messages", "HEAD", &target]);
+    let o = git::run(dir, &args.iter().map(String::as_str).collect::<Vec<_>>());
     // Exit 0 = clean, 1 = conflicts (first line is the tree id, then the conflicted paths).
     if o.ok {
         return ConflictCheck { target, ..Default::default() };

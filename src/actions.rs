@@ -51,17 +51,21 @@ pub enum Action {
     RenameBranch { old: String, new: String },
     CreateTag { name: String, at: Option<String>, message: Option<String> },
     DeleteTag { name: String },
+    PushTag { name: String, remote: String },
+    DeleteRemoteTag { name: String, remote: String },
     Fetch,
     Pull { mode: String },
     /// force: push even though the remote has other commits. lease (default true) keeps the
     /// safety check that the remote branch is still where we last saw it.
     Push { force: bool, #[serde(default)] lease: Option<bool> },
+    /// Push the selected local branch without changing the checked-out branch.
+    PushBranch { branch: String },
     Stash { message: String },
     StashPop { index: usize },
     StashApply { index: usize },
     StashDrop { index: usize },
-    CherryPick { sha: String },
-    Revert { sha: String },
+    CherryPick { sha: String, #[serde(default)] mainline: Option<usize> },
+    Revert { sha: String, #[serde(default)] mainline: Option<usize> },
     Reset { sha: String, mode: String },
     Merge { branch: String },
     Rebase { onto: String },
@@ -151,7 +155,7 @@ enum UndoRec {
     Checkout { from: String, to: String },
     CreateBranch { name: String, sha: String },
     DeleteBranch { name: String, sha: String },
-    Reset { before: String, after: String, mode: String },
+    Reset { before: String, after: String, mode: String, branch: String },
     CreateTag { name: String, sha: String },
     DeleteTag { name: String, sha: String },
     Discard { stash: String },
@@ -295,6 +299,29 @@ impl Engine {
         }
     }
 
+    /// Merge commits require an explicit mainline; reject stale or invalid choices before changing HEAD.
+    fn apply_commit(&self, dir: &Path, sha: &str, mainline: Option<usize>, revert: bool) -> ActionResult {
+        let resolved = git::run(dir, &["rev-parse", "--verify", "--end-of-options", &format!("{sha}^{{commit}}")]);
+        if !resolved.ok {
+            return ActionResult { ok: false, message: resolved.message() };
+        }
+        let sha = resolved.stdout.trim();
+        let parents = git::run(dir, &["rev-list", "--parents", "-n1", sha]);
+        if !parents.ok {
+            return ActionResult { ok: false, message: parents.message() };
+        }
+        let count = parents.stdout.split_whitespace().count().saturating_sub(1);
+        if (count > 1 && mainline.is_none()) || mainline.is_some_and(|p| count <= 1 || p == 0 || p > count) {
+            return ActionResult { ok: false, message: format!("Choose a parent of this merge commit (1–{count}).") };
+        }
+        let mut args = vec![if revert { "revert".to_string() } else { "cherry-pick".to_string() }];
+        if revert { args.push("--no-edit".into()); }
+        if let Some(parent) = mainline { args.extend(["-m".into(), parent.to_string()]); }
+        args.push(sha.into());
+        let out = self.git(dir, &args.iter().map(String::as_str).collect::<Vec<_>>());
+        ActionResult { ok: out.ok, message: if out.ok { if revert { "Reverted commit" } else { "Cherry picked commit" }.into() } else { out.message() } }
+    }
+
     pub fn perform(&self, repo: &str, action: Action) -> ActionResult {
         let dir = Path::new(repo);
         let done = |o: git::GitOut, msg: &str| -> ActionResult {
@@ -304,6 +331,7 @@ impl Engine {
                 ActionResult { ok: false, message: o.message() }
             }
         };
+        let deleting_tag = matches!(&action, Action::DeleteRemoteTag { .. });
         match action {
             Action::Stage { paths } => {
                 let mut a = vec!["add", "--"];
@@ -423,25 +451,45 @@ impl Engine {
                     None => self.git(dir, &["tag", &name, &at]),
                 };
                 if o.ok {
-                    let sha = self.rev(dir, &format!("{name}^{{commit}}"));
+                    let sha = self.rev(dir, &format!("refs/tags/{name}"));
                     self.push_undo(repo, UndoRec::CreateTag { name: name.clone(), sha });
                 }
                 done(o, &format!("Created tag {name}"))
             }
             Action::DeleteTag { name } => {
-                let sha = self.rev(dir, &format!("{name}^{{commit}}"));
+                let sha = self.rev(dir, &format!("refs/tags/{name}"));
                 let o = self.git(dir, &["tag", "-d", &name]);
                 if o.ok {
                     self.push_undo(repo, UndoRec::DeleteTag { name: name.clone(), sha });
                 }
                 done(o, &format!("Deleted tag {name}"))
             }
+            Action::PushTag { name, remote } | Action::DeleteRemoteTag { name, remote } => {
+                let deleting = deleting_tag;
+                let full = format!("refs/tags/{name}");
+                if !git::run(dir, &["check-ref-format", &full]).ok {
+                    return ActionResult { ok: false, message: "Choose a valid tag name.".into() };
+                }
+                if !git::run(dir, &["remote"]).stdout.lines().any(|r| r == remote) {
+                    return ActionResult { ok: false, message: "The selected remote no longer exists.".into() };
+                }
+                if !deleting && !git::run(dir, &["show-ref", "--verify", "--quiet", &full]).ok {
+                    return ActionResult { ok: false, message: format!("Local tag {name} no longer exists.") };
+                }
+                // Full refspecs avoid ambiguity when a branch and tag share a name; never force a tag.
+                let spec = if deleting { format!(":{full}") } else { format!("{full}:{full}") };
+                done(self.job(repo, "push", dir, &["push", "--progress", "--", &remote, &spec]),
+                    &format!("{} tag {name} {} {remote}", if deleting { "Deleted" } else { "Pushed" }, if deleting { "from" } else { "to" }))
+            }
             Action::Fetch => done(self.job(repo, "fetch", dir, &["fetch", "--all", "--prune", "--progress"]), "Fetched all remotes"),
             Action::Pull { mode } => match mode.as_str() {
                 "fetch" => done(self.job(repo, "fetch", dir, &["fetch", "--all", "--prune", "--progress"]), "Fetched all remotes"),
                 "ffonly" => done(self.job(repo, "pull", dir, &["pull", "--ff-only", "--progress"]), "Pulled (fast-forward only)"),
                 "rebase" => done(self.job(repo, "pull", dir, &["pull", "--rebase", "--progress"]), "Pulled (rebase)"),
-                _ => done(self.job(repo, "pull", dir, &["pull", "--no-rebase", "--progress"]), "Pulled"),
+                _ => {
+                    let args = crate::extras::merge_args(dir, "pull", &["--no-rebase", "--progress"]);
+                    done(self.job(repo, "pull", dir, &args.iter().map(String::as_str).collect::<Vec<_>>()), "Pulled")
+                }
             },
             Action::Push { force, lease } => {
                 let branch = git::run(dir, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim().to_string();
@@ -470,6 +518,32 @@ impl Engine {
                 };
                 done(o, &format!("Pushed {branch}"))
             }
+            Action::PushBranch { branch } => {
+                let source = format!("refs/heads/{branch}");
+                let resolved = git::run(dir, &["rev-parse", "--verify", "--end-of-options", &source]);
+                if !resolved.ok {
+                    return ActionResult { ok: false, message: format!("Local branch {branch} no longer exists.") };
+                }
+                let remotes = git::run(dir, &["remote"]).stdout;
+                let configured = git::run(dir, &["config", "--get", &format!("branch.{branch}.remote")]).stdout.trim().to_string();
+                let remote = if !configured.is_empty() {
+                    configured
+                } else if remotes.lines().any(|r| r == "origin") {
+                    "origin".into()
+                } else {
+                    remotes.lines().next().unwrap_or("").to_string()
+                };
+                if remote.is_empty() || !remotes.lines().any(|r| r == remote) {
+                    return ActionResult { ok: false, message: "Choose a server remote for this branch before starting a pull request.".into() };
+                }
+                let merge = git::run(dir, &["config", "--get", &format!("branch.{branch}.merge")]).stdout.trim().to_string();
+                let destination = if merge.is_empty() { source.clone() } else { merge };
+                if !destination.starts_with("refs/heads/") {
+                    return ActionResult { ok: false, message: "The branch upstream must point to a remote branch.".into() };
+                }
+                let refspec = format!("{source}:{destination}");
+                done(self.job(repo, "push", dir, &["push", "--set-upstream", "--progress", &remote, &refspec]), &format!("Pushed {branch}"))
+            }
             Action::Stash { message } => {
                 // Like the original's gitStashAllCriticalSection (render.bundle.js): stage everything (new files
                 // too), then `stash push` without --include-untracked, named by stash_message. See MECHANICS.md
@@ -490,30 +564,29 @@ impl Engine {
             Action::StashPop { index } => done(self.git(dir, &["stash", "pop", "-q", &format!("stash@{{{index}}}")]), "Popped stash"),
             Action::StashApply { index } => done(self.git(dir, &["stash", "apply", "-q", &format!("stash@{{{index}}}")]), "Applied stash"),
             Action::StashDrop { index } => done(self.git(dir, &["stash", "drop", "-q", &format!("stash@{{{index}}}")]), "Deleted stash"),
-            Action::CherryPick { sha } => done(self.git(dir, &["cherry-pick", &sha]), "Cherry picked commit"),
-            Action::Revert { sha } => {
-                let parents = git::run(dir, &["rev-list", "--parents", "-n1", &sha]).stdout;
-                let o = if parents.split_whitespace().count() > 2 {
-                    self.git(dir, &["revert", "--no-edit", "-m", "1", &sha])
-                } else {
-                    self.git(dir, &["revert", "--no-edit", &sha])
-                };
-                done(o, "Reverted commit")
-            }
+            Action::CherryPick { sha, mainline } => self.apply_commit(dir, &sha, mainline, false),
+            Action::Revert { sha, mainline } => self.apply_commit(dir, &sha, mainline, true),
             Action::Reset { sha, mode } => {
                 let before = self.rev(dir, "HEAD");
                 let flag = match mode.as_str() {
                     "soft" => "--soft",
                     "hard" => "--hard",
-                    _ => "--mixed",
+                    "mixed" => "--mixed",
+                    _ => return ActionResult { ok: false, message: "Choose a soft, mixed, or hard reset.".into() },
                 };
+                let resolved = git::run(dir, &["rev-parse", "--verify", "--end-of-options", &format!("{sha}^{{commit}}")]);
+                if !resolved.ok { return done(resolved, ""); }
+                let sha = resolved.stdout.trim().to_string();
                 let o = self.git(dir, &["reset", "-q", flag, &sha]);
                 if o.ok {
-                    self.push_undo(repo, UndoRec::Reset { before, after: sha.clone(), mode: flag.to_string() });
+                    self.push_undo(repo, UndoRec::Reset { before, after: sha.clone(), mode: flag.to_string(), branch: git::run(dir, &["symbolic-ref", "-q", "HEAD"]).stdout.trim().to_string() });
                 }
                 done(o, "Reset branch")
             }
-            Action::Merge { branch } => done(self.git(dir, &["merge", "--no-edit", &branch]), &format!("Merged {branch}")),
+            Action::Merge { branch } => {
+                let args = crate::extras::merge_args(dir, "merge", &["--no-edit", &branch]);
+                done(self.git(dir, &args.iter().map(String::as_str).collect::<Vec<_>>()), &format!("Merged {branch}"))
+            }
             Action::Rebase { onto } => {
                 let before = self.rev(dir, "HEAD");
                 let o = self.git(dir, &["rebase", "--autostash", &onto]);
@@ -709,7 +782,10 @@ impl Engine {
                     Err(e) => ActionResult { ok: false, message: format!("The hunk could not be reverted because {file} has changed since: {e}") },
                 }
             }
-            Action::MergeSquash { branch } => done(self.git(dir, &["merge", "--squash", &branch]), &format!("Squashed {branch}; review and commit the staged changes")),
+            Action::MergeSquash { branch } => {
+                let args = crate::extras::merge_args(dir, "merge", &["--squash", &branch]);
+                done(self.git(dir, &args.iter().map(String::as_str).collect::<Vec<_>>()), &format!("Squashed {branch}; review and commit the staged changes"))
+            }
             Action::ApplyPatchFile { file } => {
                 let o = crate::extras::apply_patch_file(dir, Path::new(&file), &|a: &[&str]| self.git(dir, a));
                 done(o, "Patch applied")
@@ -903,8 +979,22 @@ impl Engine {
             (UndoRec::CreateBranch { name, sha }, false) | (UndoRec::DeleteBranch { name, sha }, true) => {
                 self.git(dir, &["branch", name, sha])
             }
-            (UndoRec::Reset { before, mode, .. }, true) => self.git(dir, &["reset", "-q", mode, before]),
-            (UndoRec::Reset { after, mode, .. }, false) => self.git(dir, &["reset", "-q", mode, after]),
+            (UndoRec::Reset { before, after, mode, branch }, undo) => {
+                let current_branch = git::run(dir, &["symbolic-ref", "-q", "HEAD"]).stdout.trim().to_string();
+                let expected = if undo { after } else { before };
+                if &current_branch != branch || self.rev(dir, "HEAD") != *expected {
+                    return git::GitOut { ok: false, stdout: String::new(), stderr: "Return to the branch and commit where this reset was performed before undoing or redoing it.".into() };
+                }
+                // Replaying a hard reset must never destroy edits made since the original reset.
+                if mode == "--hard" {
+                    let status = git::run(dir, &["status", "--porcelain", "-uall"]);
+                    if !status.ok { return status; }
+                    if !status.stdout.is_empty() {
+                        return git::GitOut { ok: false, stdout: String::new(), stderr: "Stash or commit your changes before undoing or redoing a hard reset.".into() };
+                    }
+                }
+                self.git(dir, &["reset", "-q", mode, if undo { before } else { after }])
+            }
             (UndoRec::CreateTag { name, .. }, true) | (UndoRec::DeleteTag { name, .. }, false) => self.git(dir, &["tag", "-d", name]),
             (UndoRec::CreateTag { name, sha }, false) | (UndoRec::DeleteTag { name, sha }, true) => self.git(dir, &["tag", name, sha]),
             (UndoRec::Discard { stash }, true) => self.git(dir, &["stash", "apply", "-q", stash]),
@@ -936,6 +1026,7 @@ impl Engine {
             self.stacks.lock().unwrap().entry(repo.to_string()).or_default().redo.push(rec);
             ActionResult { ok: true, message: format!("Undo Successful: {label}") }
         } else {
+            self.stacks.lock().unwrap().entry(repo.to_string()).or_default().undo.push(rec);
             ActionResult { ok: false, message: format!("Undo Failed: {}", o.message()) }
         }
     }
@@ -954,6 +1045,7 @@ impl Engine {
             self.stacks.lock().unwrap().entry(repo.to_string()).or_default().undo.push(rec);
             ActionResult { ok: true, message: format!("Redo Successful: {label}") }
         } else {
+            self.stacks.lock().unwrap().entry(repo.to_string()).or_default().redo.push(rec);
             ActionResult { ok: false, message: format!("Redo Failed: {}", o.message()) }
         }
     }
@@ -963,6 +1055,163 @@ impl Engine {
 mod tests {
     use super::*;
     use std::fs;
+
+
+    #[test]
+    fn remote_tags_are_explicit_preserve_annotations_and_leave_local_tags() {
+        let d = temp_repo("remote-tag-audit");
+        let repo = d.to_string_lossy().to_string();
+        let e = Engine::default();
+        fs::write(d.join("f.txt"), "one\n").unwrap();
+        assert!(git::run(&d, &["add", "."]).ok);
+        assert!(git::run(&d, &["commit", "-qm", "one"]).ok);
+        assert!(git::run(&d, &["tag", "-a", "release", "-m", "Release annotation"]).ok);
+        assert!(git::run(&d, &["branch", "release"]).ok);
+        let object = git::run(&d, &["rev-parse", "refs/tags/release"]).stdout.trim().to_string();
+        let remote = d.join("remote.git");
+        assert!(git::run(&d, &["init", "--bare", &remote.to_string_lossy()]).ok);
+        assert!(git::run(&d, &["remote", "add", "origin", &remote.to_string_lossy()]).ok);
+        assert!(!e.perform(&repo, Action::PushTag { name: "release".into(), remote: "missing".into() }).ok);
+        let result = e.perform(&repo, Action::PushTag { name: "release".into(), remote: "origin".into() });
+        assert!(result.ok, "{}", result.message);
+        assert_eq!(git::run(&remote, &["rev-parse", "refs/tags/release"]).stdout.trim(), object);
+        assert!(!git::run(&remote, &["show-ref", "--verify", "refs/heads/release"]).ok);
+        assert!(e.perform(&repo, Action::DeleteRemoteTag { name: "release".into(), remote: "origin".into() }).ok);
+        assert!(!git::run(&remote, &["show-ref", "--verify", "refs/tags/release"]).ok);
+        assert_eq!(git::run(&d, &["rev-parse", "refs/tags/release"]).stdout.trim(), object);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn merge_commit_actions_require_and_use_the_selected_parent() {
+        let d = temp_repo("mainline-audit");
+        let repo = d.to_string_lossy().to_string();
+        let e = Engine::default();
+        fs::write(d.join("base.txt"), "base\n").unwrap();
+        assert!(git::run(&d, &["add", "."]).ok);
+        assert!(git::run(&d, &["commit", "-qm", "base"]).ok);
+        let base = head(&d);
+        assert!(git::run(&d, &["checkout", "-qb", "feature"]).ok);
+        fs::write(d.join("side.txt"), "side\n").unwrap();
+        assert!(git::run(&d, &["add", "."]).ok);
+        assert!(git::run(&d, &["commit", "-qm", "side"]).ok);
+        assert!(git::run(&d, &["checkout", "-q", "master"]).ok);
+        fs::write(d.join("main.txt"), "main\n").unwrap();
+        assert!(git::run(&d, &["add", "."]).ok);
+        assert!(git::run(&d, &["commit", "-qm", "main"]).ok);
+        assert!(git::run(&d, &["merge", "--no-ff", "-m", "merge", "feature"]).ok);
+        let merge = head(&d);
+        for mainline in [None, Some(0), Some(3)] {
+            assert!(!e.perform(&repo, Action::Revert { sha: merge.clone(), mainline }).ok);
+            assert_eq!(head(&d), merge);
+        }
+        assert!(e.perform(&repo, Action::Revert { sha: merge.clone(), mainline: Some(2) }).ok);
+        assert!(d.join("side.txt").exists());
+        assert!(!d.join("main.txt").exists());
+        assert!(git::run(&d, &["checkout", "-qb", "picked", &base]).ok);
+        let result = e.perform(&repo, Action::CherryPick { sha: merge, mainline: Some(2) });
+        assert!(result.ok, "{}", result.message);
+        assert!(d.join("main.txt").exists());
+        assert!(!d.join("side.txt").exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn reset_modes_keep_their_promises_and_retry_failed_undo() {
+        let d = temp_repo("reset-audit");
+        let repo = d.to_string_lossy().to_string();
+        let e = Engine::default();
+        fs::write(d.join("f.txt"), "one\n").unwrap();
+        assert!(git::run(&d, &["add", "."]).ok);
+        assert!(git::run(&d, &["commit", "-qm", "one"]).ok);
+        let first = head(&d);
+        fs::write(d.join("f.txt"), "two\n").unwrap();
+        assert!(git::run(&d, &["commit", "-qam", "two"]).ok);
+        let second = head(&d);
+        assert!(!e.perform(&repo, Action::Reset { sha: first.clone(), mode: "typo".into() }).ok);
+        assert_eq!(head(&d), second);
+        assert!(e.perform(&repo, Action::Reset { sha: first.clone(), mode: "soft".into() }).ok);
+        assert_eq!(git::status(&d).staged.len(), 1);
+        assert!(e.perform(&repo, Action::Undo).ok);
+        assert!(e.perform(&repo, Action::Reset { sha: first.clone(), mode: "mixed".into() }).ok);
+        assert!(git::status(&d).staged.is_empty());
+        assert_eq!(git::status(&d).unstaged.len(), 1);
+        assert!(e.perform(&repo, Action::Reset { sha: second.clone(), mode: "hard".into() }).ok);
+        // Current-HEAD hard reset is meaningful: it discards edits without moving the branch.
+        fs::write(d.join("f.txt"), "discard me\n").unwrap();
+        assert!(e.perform(&repo, Action::Reset { sha: second.clone(), mode: "hard".into() }).ok);
+        assert_eq!(fs::read_to_string(d.join("f.txt")).unwrap().replace("\r\n", "\n"), "two\n");
+        assert!(e.perform(&repo, Action::Reset { sha: first.clone(), mode: "hard".into() }).ok);
+        assert!(git::run(&d, &["checkout", "-qb", "other"]).ok);
+        assert!(!e.perform(&repo, Action::Undo).ok, "cannot undo a reset on another branch");
+        assert!(git::run(&d, &["checkout", "-q", "master"]).ok);
+        fs::write(d.join("f.txt"), "keep my new work\n").unwrap();
+        assert!(!e.perform(&repo, Action::Undo).ok);
+        assert_eq!(head(&d), first);
+        assert_eq!(fs::read_to_string(d.join("f.txt")).unwrap(), "keep my new work\n");
+        // The failed undo stays on the stack; saving the edit allows exactly the same undo to retry.
+        assert!(git::run(&d, &["stash", "push", "-qm", "save"]).ok);
+        assert!(e.perform(&repo, Action::Undo).ok);
+        assert_eq!(head(&d), second);
+        fs::write(d.join("new.txt"), "keep untracked\n").unwrap();
+        assert!(!e.perform(&repo, Action::Redo).ok);
+        fs::remove_file(d.join("new.txt")).unwrap();
+        assert!(e.perform(&repo, Action::Redo).ok);
+        assert_eq!(head(&d), first);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn annotated_tag_undo_retains_the_tag_object() {
+        let d = temp_repo("tag-audit");
+        let repo = d.to_string_lossy().to_string();
+        let e = Engine::default();
+        fs::write(d.join("f.txt"), "one\n").unwrap();
+        assert!(git::run(&d, &["add", "."]).ok);
+        assert!(git::run(&d, &["commit", "-qm", "one"]).ok);
+        assert!(e.perform(&repo, Action::CreateTag { name: "v1".into(), at: None, message: Some("Release note".into()) }).ok);
+        let object = git::run(&d, &["rev-parse", "refs/tags/v1"]).stdout;
+        assert!(e.perform(&repo, Action::Undo).ok);
+        assert!(e.perform(&repo, Action::Redo).ok);
+        assert_eq!(git::run(&d, &["rev-parse", "refs/tags/v1"]).stdout, object);
+        assert!(e.perform(&repo, Action::DeleteTag { name: "v1".into() }).ok);
+        assert!(e.perform(&repo, Action::Undo).ok);
+        assert_eq!(git::run(&d, &["rev-parse", "refs/tags/v1"]).stdout, object);
+        assert_eq!(git::run(&d, &["cat-file", "-t", "refs/tags/v1"]).stdout.trim(), "tag");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn push_selected_branch_and_create_worktree_at_selected_commit() {
+        let d = temp_repo("branch-audit");
+        let repo = d.to_string_lossy().to_string();
+        let e = Engine::default();
+        fs::write(d.join("f.txt"), "one\n").unwrap();
+        assert!(git::run(&d, &["add", "."]).ok);
+        assert!(git::run(&d, &["commit", "-qm", "one"]).ok);
+        let first = head(&d);
+        assert!(git::run(&d, &["branch", "feature"]).ok);
+        fs::write(d.join("f.txt"), "two\n").unwrap();
+        assert!(git::run(&d, &["commit", "-qam", "two"]).ok);
+        let second = head(&d);
+        // A local bare repository exercises pushing without contacting a service.
+        let remote = d.join("remote.git");
+        let remote_path = remote.to_string_lossy().to_string();
+        assert!(git::run(&d, &["init", "--bare", &remote_path]).ok);
+        assert!(git::run(&d, &["remote", "add", "origin", &remote_path]).ok);
+        let pushed = e.perform(&repo, Action::PushBranch { branch: "feature".into() });
+        assert!(pushed.ok, "{}", pushed.message);
+        assert_eq!(head(&d), second);
+        assert_eq!(git::run(&d, &["symbolic-ref", "--short", "HEAD"]).stdout.trim(), "master");
+        assert_eq!(git::run(&remote, &["rev-parse", "refs/heads/feature"]).stdout.trim(), first);
+        assert!(!git::run(&remote, &["rev-parse", "--verify", "refs/heads/master"]).ok);
+        let wt = d.join("selected-worktree").to_string_lossy().to_string();
+        let created = e.perform(&repo, Action::WorktreeAdd { path: wt.clone(), branch: "selected".into(), new_branch: true, start: Some(first.clone()) });
+        assert!(created.ok, "{}", created.message);
+        assert_eq!(head(Path::new(&wt)), first);
+        assert!(e.perform(&repo, Action::WorktreeRemove { path: wt, force: false }).ok);
+        let _ = fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn stash_names_follow_the_original() {
@@ -1015,6 +1264,53 @@ mod tests {
         assert!(!walk.iter().any(|r| r == "refs/tags/treetag"), "{walk:?}");
         assert!(walk.iter().any(|r| r == "refs/heads/master") && walk.iter().any(|r| r == "refs/remotes/origin/main"), "{walk:?}");
         assert_eq!(git::load(&d, 100).commits.len(), 1, "tree tag");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn merge_preview_and_actions_share_recovered_rename_rules() {
+        let d = temp_repo("merge-native-rules");
+        let repo = d.to_string_lossy().to_string();
+        let e = Engine::default();
+        let g = |args: &[&str]| {
+            let o = git::run(&d, args);
+            assert!(o.ok, "{args:?}: {}", o.message());
+        };
+        g(&["config", "core.autocrlf", "false"]);
+        let base: String = (1..=40).map(|i| format!("unique line {i:02} with enough text for similarity\n")).collect();
+        fs::write(d.join("old.txt"), &base).unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-q", "-m", "base"]);
+        g(&["checkout", "-q", "-b", "side"]);
+        g(&["mv", "old.txt", "new.txt"]);
+        fs::write(d.join("new.txt"), base.replace("line 02", "line two")).unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-q", "-m", "rename and edit"]);
+        g(&["checkout", "-q", "master"]);
+        fs::write(d.join("old.txt"), base.replace("line 35", "line thirty-five")).unwrap();
+        g(&["commit", "-q", "-am", "edit other end"]);
+        let before = head(&d);
+        g(&["config", "merge.renames", "false"]);
+        g(&["config", "merge.renamelimit", "-1"]);
+        g(&["config", "diff.renamelimit", "77"]);
+        let preview = crate::extras::conflict_check(&d, Some("side"));
+        assert!(preview.note.is_none(), "{:?}", preview.note);
+        assert!(preview.files.is_empty(), "{:?}", preview.files);
+        for squash in [false, true] {
+            let action = if squash {
+                Action::MergeSquash { branch: "side".into() }
+            } else {
+                Action::Merge { branch: "side".into() }
+            };
+            let result = e.perform(&repo, action);
+            assert!(result.ok, "{}", result.message);
+            assert!(!d.join("old.txt").exists());
+            let merged = fs::read_to_string(d.join("new.txt")).unwrap();
+            assert!(merged.contains("line two") && merged.contains("line thirty-five"), "{merged}");
+            g(&["reset", "--hard", &before]);
+        }
+        assert_eq!(git::run(&d, &["config", "--get", "merge.renames"]).stdout.trim(), "false");
+        assert_eq!(git::run(&d, &["config", "--get", "merge.renamelimit"]).stdout.trim(), "-1");
         let _ = fs::remove_dir_all(&d);
     }
 

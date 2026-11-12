@@ -143,6 +143,9 @@ const BUSY_LABEL: Partial<Record<Action["type"], string>> = {
   fetch: "Fetching…",
   pull: "Pulling…",
   push: "Pushing…",
+  pushBranch: "Pushing…",
+  pushTag: "Pushing tag…",
+  deleteRemoteTag: "Deleting remote tag…",
   commit: "Committing…",
   checkout: "Checking out…",
   merge: "Merging…",
@@ -207,7 +210,7 @@ async function runAct(path: string, action: Action, quiet: boolean): Promise<boo
   }
 }
 
-const NETWORK = new Set<Action["type"]>(["fetch", "pull", "push", "fetchRemote"]);
+const NETWORK = new Set<Action["type"]>(["fetch", "pull", "push", "pushBranch", "pushTag", "deleteRemoteTag", "fetchRemote"]);
 const MOVES_HEAD = new Set<Action["type"]>(["pull", "checkout", "checkoutRemote", "merge", "mergeSquash", "rebase", "interactiveRebase", "fastForward", "reset", "stashPop", "stashApply", "cherryPick"]);
 
 /** Preferences that act after a Git action finishes. */
@@ -360,15 +363,22 @@ export function promptBranch(path: string, at: string | null) {
   });
 }
 
-export function promptTag(path: string, at: string | null) {
+export function promptTag(path: string, at: string | null, annotated = false, initialName = "") {
   useStore.getState().setDialog({
     kind: "prompt",
-    title: "Create tag here",
+    title: annotated ? "Create annotated tag here" : "Create tag here",
     label: "Tag name",
-    value: "",
+    value: initialName,
     confirm: "Create Tag",
-    extraLabel: "Annotation message (optional, makes an annotated tag)",
-    onSubmit: (name, msg) => act(path, { type: "createTag", name, at, message: msg ?? null }),
+    extraLabel: annotated ? "Annotation message" : "Annotation message (optional, makes an annotated tag)",
+    onSubmit: (name, msg) => {
+      if (annotated && !msg?.trim()) {
+        useStore.getState().toast(false, "Enter an annotation message to create an annotated tag.");
+        promptTag(path, at, true, name);
+        return;
+      }
+      void act(path, { type: "createTag", name, at, message: msg ?? null });
+    },
   });
 }
 

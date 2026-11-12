@@ -24,8 +24,10 @@ const TAB_DRAG_EDGE = 32;
 /** Slide a tab from `fromX` px away into its place, metrics.tab_slide_ms (src/metrics.rs TAB_SLIDE_TIME_MS) long with an ease curve. */
 function slideTab(el: HTMLElement, fromX: number) {
   el.style.transition = "";
-  if (!fromX) return;
-  el.animate([{ transform: `translateX(${fromX}px)` }, { transform: "translateX(0)" }], { duration: useStore.getState().metrics.tab_slide_ms, easing: "ease" });
+  const inFlightX = new DOMMatrixReadOnly(getComputedStyle(el).transform).m41;
+  el.getAnimations().forEach((animation) => animation.cancel());
+  if (!fromX || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  el.animate([{ transform: `translateX(${fromX + inFlightX}px)` }, { transform: "translateX(0)" }], { duration: useStore.getState().metrics.tab_slide_ms, easing: "ease" });
 }
 
 type TabDrag = { id: string; pointerId: number; startX: number; originLeft: number; dx: number; active: boolean; scale: number; order: string[] };

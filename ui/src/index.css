@@ -175,11 +175,11 @@ body,
 
 /* Ref labels unfold without changing graph row heights or clipping inside the virtual scroller. */
 @keyframes commit-ref-unfold {
-  from { opacity: 0; transform: translateY(-4px) scaleY(0.85); }
-  to { opacity: 1; transform: translateY(0) scaleY(1); }
+  from { opacity: 0; transform: translateY(-2px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 .commit-ref-stack {
-  animation: commit-ref-unfold 160ms ease-out;
+  animation: commit-ref-unfold 120ms ease-out;
   box-shadow: 0 3px 8px rgb(0 0 0 / 0.18);
 }
 .commit-ref-label {
@@ -188,4 +188,45 @@ body,
 @media (prefers-reduced-motion: reduce) {
   .commit-ref-stack { animation: none; }
   .commit-ref-label { transition: none; }
+}
+
+/* Keep menus quick and text crisp: fade without scaling or moving the pointer target.
+   These short fades are GitCraft choices; see AUDIT.md. */
+@keyframes surface-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes surface-out { from { opacity: 1; } to { opacity: 0; } }
+.menu-content[data-state="open"] { animation: surface-in 100ms ease-out; }
+.menu-content[data-state="closed"] { animation: surface-out 70ms ease-in; pointer-events: none; }
+.dialog-surface, .dialog-overlay { animation: surface-in 200ms ease-out; }
+
+/* Include CSS and imperative tab motion in the accessibility policy. Loading labels stay visible. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* GitCraft motion estimates: preserve text size and avoid moving virtual graph rows. */
+.section-collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition: grid-template-rows 160ms ease-out, opacity 120ms ease-out;
+}
+.section-collapse[data-open="true"] { grid-template-rows: 1fr; opacity: 1; }
+button:focus-visible, [role="button"]:focus-visible, a:focus-visible {
+  outline: 1px solid var(--color-accent);
+  outline-offset: -1px;
+}
+.menu-item { overflow-wrap: anywhere; }
+@media (max-width: 760px) {
+  .start-layout { flex-direction: column; padding: 24px 20px; gap: 24px; }
+  .start-repositories { padding-right: 0; }
+  .start-divider { display: none; }
+  .start-integrations { padding-left: 0; min-width: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .section-collapse { transition: none; }
 }

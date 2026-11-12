@@ -126,7 +126,8 @@ pub fn gitflow_finish(dir: &Path, kind: &str, name: &str, keep: bool, tag_messag
         if !o.ok {
             return o;
         }
-        run(&["merge", "--no-ff", "--no-edit", &branch])
+        let args = crate::extras::merge_args(dir, "merge", &["--no-ff", "--no-edit", &branch]);
+        run(&args.iter().map(String::as_str).collect::<Vec<_>>())
     };
     if kind == "feature" {
         if !exists(dir, &cfg.develop) {

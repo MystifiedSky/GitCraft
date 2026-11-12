@@ -585,6 +585,7 @@ function CommitRow({
       <div
         className="absolute left-0 right-0 flex items-center"
         style={{ top, height: rowH, background: bg, opacity: dim ? m.min_alpha / 100 : undefined }}
+        onClick={(e) => onClick(c, index, e)}
         onMouseEnter={(e) => {
           onHoverRow(index);
           if (!bg) e.currentTarget.style.background = "rgba(77,136,255,0.10)";
@@ -600,7 +601,6 @@ function CommitRow({
           aria-pressed={selected}
           tabIndex={selected || index === 0 ? 0 : -1}
           className="absolute inset-0 focus-visible:outline focus-visible:-outline-offset-2 focus-visible:outline-accent"
-          onClick={(e) => onClick(c, index, e)}
         />
         {refW > 0 && (
           <div style={{ width: refW, paddingLeft: m.ref_margin_left, paddingRight: m.ref_margin_right }} className="shrink-0 h-full flex items-center min-w-0">

@@ -45,19 +45,19 @@ export function removeRemote(path: string, name: string) {
   );
 }
 
-export function addWorktree(repo: RepoView, branch?: string) {
+export function addWorktree(repo: RepoView, branch?: string, start?: string) {
   const parent = repo.path.replace(/[\\/][^\\/]+$/, "");
   const name = (branch ?? "worktree").replace(/[\\/]/g, "-");
   form(
     "Add a new worktree",
     [
-      { key: "path", label: "Folder for the worktree", value: `${parent}\\${repo.name}-${name}`, browse: true },
+      { key: "path", label: "Folder for the worktree", value: `${parent}${repo.path.includes("\\") ? "\\" : "/"}${repo.name}-${name}`, browse: true },
       { key: "branch", label: "Branch", value: branch ?? "", placeholder: "existing branch, or a new branch name" },
-      { key: "new", label: "Create this as a new branch from the checked-out commit", value: !branch, type: "checkbox" },
+      { key: "new", label: start ? `Create a new branch from ${start.slice(0, 8)}` : "Create this as a new branch from the checked-out commit", value: !branch, type: "checkbox" },
     ],
     "Create Worktree",
     async (v) => {
-      const ok = await act(repo.path, { type: "worktreeAdd", path: str(v.path), branch: str(v.branch), newBranch: !!v.new, start: null });
+      const ok = await act(repo.path, { type: "worktreeAdd", path: str(v.path), branch: str(v.branch), newBranch: !!v.new, start: start ?? null });
       if (ok) await openRepoPath(str(v.path));
     },
     "A worktree is a second working folder for the same repository, with its own branch checked out.",

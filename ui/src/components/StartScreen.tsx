@@ -32,8 +32,8 @@ export function StartScreen() {
 
   return (
     <div className="flex-1 min-h-0 overflow-auto bg-app">
-      <div className="flex min-h-full pl-[15%] pr-[8%] pt-[30px]">
-        <div className="flex-[2.6] min-w-0 pr-6">
+      <div className="start-layout flex min-h-full pl-[15%] pr-[8%] pt-[30px]">
+        <div className="start-repositories flex-[2.6] min-w-0 pr-6">
           <div className="text-[15px] text-white/90 mb-[12px]">Repositories</div>
           <div className="flex gap-2 mb-[12px]">
             <BigButton icon={<FolderOpen size={14} />} label="Open" title={`Open Repo (${MOD}+O)`} onClick={() => s.setDialog({ kind: "open" })} />
@@ -42,7 +42,7 @@ export function StartScreen() {
           </div>
           <div className="flex items-center h-[24px] bg-field rounded-[2px] border border-white/10 focus-within:border-accent mb-[14px]">
             <Search size={12} className="ml-1.5 mr-1 text-fg3" />
-            <input data-start-filter value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search repositories (Ctrl + Alt + F)" className="flex-1 bg-transparent outline-none text-[11.5px] placeholder:text-fg3" />
+            <input aria-label="Search repositories" data-start-filter value={q} onChange={(e) => setQ(e.target.value)} placeholder={`Search repositories (${MOD} + Alt + F)`} className="flex-1 min-w-0 bg-transparent outline-none text-[11.5px] placeholder:text-fg3" />
           </div>
           {s.settings.favorites.length > 0 && (
             <>
@@ -67,8 +67,8 @@ export function StartScreen() {
           </div>
           {recents.length === 0 && (
             <div className="text-[12.5px] text-fg3 py-1">
-              No recent repositories yet.{" "}
-              <button className="text-link hover:underline" onClick={openSample}>
+              {q.trim() ? `No repositories match “${q}”.` : "No recent repositories yet."}{" "}
+              <button disabled={busy} className="text-link hover:underline disabled:opacity-50" onClick={openSample}>
                 {busy ? "Preparing the sample project…" : "Try the sample project"}
               </button>
             </div>
@@ -82,8 +82,8 @@ export function StartScreen() {
             </div>
           ))}
         </div>
-        <div className="w-px bg-white/8 mx-3 shrink-0" />
-        <div className="flex-[1.15] min-w-[200px] pl-3">
+        <div className="start-divider w-px bg-white/8 mx-3 shrink-0" />
+        <div className="start-integrations flex-[1.15] min-w-[200px] pl-3">
           <div className="text-[15px] text-white/90 mb-[12px]">Connect More Integrations</div>
           <p className="text-[12px] text-fg leading-[16px] mb-[10px]">
             Connect GitHub or GitLab to see pull requests and issues in the left panel and on the Launchpad.

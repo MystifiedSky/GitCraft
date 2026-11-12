@@ -8,6 +8,10 @@ Expected next release: `0.1.6`.
 
 ### Added
 
+- Tag menus can push or delete one tag on a selected remote. Merge-commit cherry-pick and revert menus let you choose the parent, with a confirmation describing that choice.
+
+- Commit menus now include checkout choices, worktree creation from the selected commit, rebase onto the commit, a separate annotated-tag action, and branch visibility actions. Reset soft, mixed, and hard modes are also available on branch labels, including at the current commit.
+
 - Rename an existing commit with a “Write with AI” button that uses that commit’s saved changes. Review and edit the suggested message before saving, or restore the original.
 
 - Hovering a commit expands its grouped branches and tags into an animated stack of colored labels. Each label supports selection and its own right-click actions, with keyboard navigation and reduced-motion support.
@@ -16,10 +20,21 @@ Expected next release: `0.1.6`.
 
 ### Changed
 
+- Staging sections and commit options expand smoothly and respect reduced motion. The repository start screen stacks its columns in narrow windows, diff controls wrap, and keyboard focus is easier to see.
+
+- Menus and dialogs fade in smoothly; grouped labels expand without stretching text. Single branch labels stay stable on hover, rapid tab reorders keep one continuous slide, and reduced-motion preferences apply throughout the interface.
+
 - Commit menus now say “Rename commit”, keep common actions near the top, and group advanced history edits in a submenu. Menus use the darker background, rounded corners and full-width separators of the reference design.
 
 ### Fixed
 
+- Failed stashes keep their typed title. Copying staged file contents uses the index, comparisons use the displayed revision, and deleted files use their previous revision. Commit and comparison file lists show errors with Retry and explain empty results. Repository searches distinguish no matches from an empty recent list, and sample-project preparation ignores repeated clicks.
+
+- Clicking commit messages and graph details selects their row. Fast-forward suggestions now check ancestry rather than commit ordering.
+- Worktrees start from the selected commit and use the correct folder separator. Pull-request creation pushes the selected branch without checking it out or pushing a different branch.
+- Reset rejects unknown modes. Undo and redo of a hard reset protect newer edits, reset replay stays on its original branch and expected commit, and failed undo/redo remains available to retry. Annotated tags keep their annotation when restored through undo or redo.
+
+- Merge previews, normal and squash merges, merge pulls, and Gitflow finishes now share the original's rename detection settings. Personal Git settings no longer make the preview and merge use different rename rules.
 - Repository summaries now count each new file inside a folder, honor the same rename threshold as the file lists, and count a staged rename or a file changed in both staging and the working folder once.
 - Selecting a saved commit now keeps the working-directory file count and View Changes button visible. Files changed in both staging and the working folder are counted once.
 - Agents now groups Codex CLI and Claude Code sessions under worktree cards, with file counts, agent selection, resume actions, and loading/error states. Saved activity no longer claims an agent is running. Starting or resuming a session uses the correct worktree and configured CLI folder, and opening a hidden terminal no longer loses the launch request.

@@ -24,6 +24,7 @@ import { fileMenu } from "@/lib/menus";
 import { baseFor, dropCommits, headLine, openCherryPick, openRebase, squashCommits } from "@/lib/rewrite";
 import { CtxMenu } from "./ui/menu";
 import { Button } from "./ui/button";
+import { Collapsible } from "./ui/collapsible";
 import { Avatar, StatusIcon } from "./Icons";
 import { cn, fullDate, mix, MOD, withCoauthors } from "@/lib/utils";
 import { applyPatch, composeCommits, explainCommit, generateCommitMessage, generateStashTitle, patchName, savePatch } from "@/lib/ai";
@@ -406,7 +407,8 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
             </Button>
           )}
         </SectionHead>
-        {unstagedOpen && (
+        <Collapsible open={unstagedOpen}>
+          {unstaged.length === 0 && <div className="px-3 py-2 text-[12px] text-fg3">{total === 0 ? "Working directory clean" : "No unstaged changes"}</div>}
           <FileList
             files={unstaged}
             activeFile={ui.diff?.source.kind === "Unstaged" ? ui.diff.file : undefined}
@@ -418,7 +420,7 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
               </Button>
             )}
           />
-        )}
+        </Collapsible>
         <SectionHead open={stagedOpen} onToggle={() => setStagedOpen(!stagedOpen)} title={`Staged Files (${staged.length})`}>
           {staged.length > 0 && (
             <Button size="sm" variant="danger" onClick={() => act(repo.path, { type: "unstageAll" }, true)} title={`${MOD}+Shift+U`}>
@@ -426,7 +428,8 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
             </Button>
           )}
         </SectionHead>
-        {stagedOpen && (
+        <Collapsible open={stagedOpen}>
+          {staged.length === 0 && <div className="px-3 py-2 text-[12px] text-fg3">Stage files above to prepare a commit.</div>}
           <FileList
             files={staged}
             activeFile={ui.diff?.source.kind === "Staged" ? ui.diff.file : undefined}
@@ -438,7 +441,7 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
               </Button>
             )}
           />
-        )}
+        </Collapsible>
       </div>
       <div className="flex justify-center py-[8px] shrink-0">
         <div className="w-[100px] h-[4px] rounded bg-white/10" />
@@ -497,7 +500,7 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
               />
             </div>
             <div className="flex items-center">
-              <button onClick={() => setOptionsOpen(!optionsOpen)} className="flex items-center gap-1.5 text-[13.5px] text-white/70 hover:text-white">
+              <button aria-expanded={optionsOpen} onClick={() => setOptionsOpen(!optionsOpen)} className="flex items-center gap-1.5 text-[13.5px] text-white/70 hover:text-white">
                 {optionsOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />} Commit options
               </button>
               <div className="flex-1" />
@@ -505,13 +508,12 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
                 <Sparkles size={12} /> Compose with AI
               </Button>
             </div>
-            {optionsOpen && (
+            <Collapsible open={optionsOpen}>
+              <div className="flex flex-col gap-2">
               <label className="flex items-center gap-2 text-[12.5px] text-white/80 pl-5 cursor-pointer">
                 <input type="checkbox" checked={push} onChange={(e) => s.setSettings({ pushAfterCommit: e.target.checked })} className="accent-[#80B1EA]" />
                 Push after committing
               </label>
-            )}
-            {optionsOpen && (
               <label className="flex items-center gap-2 text-[12.5px] text-white/80 pl-5" title="Adds a Co-authored-by line for each person (separate several with commas)">
                 Co-authors:
                 <input
@@ -527,13 +529,12 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
                   ))}
                 </datalist>
               </label>
-            )}
-            {optionsOpen && (
               <label className="flex items-center gap-2 text-[12.5px] text-white/80 pl-5 cursor-pointer">
                 <input type="checkbox" checked={skipHooks} onChange={(e) => setSkipHooks(e.target.checked)} className="accent-[#80B1EA]" />
                 Skip Git hooks
               </label>
-            )}
+              </div>
+            </Collapsible>
           </>
         ) : tab === "patch" ? (
           <div className="bg-field rounded-[3px] border border-white/10 flex flex-col px-[10px] py-[8px] gap-2">
@@ -571,7 +572,7 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
             tab === "patch"
               ? savePatch(repo.path, [], patchName(draft.summary || branch))
               : tab === "stash"
-                ? act(repo.path, { type: "stash", message: stashMsg }).then(() => setStashMsg(""))
+                ? act(repo.path, { type: "stash", message: stashMsg }).then((ok) => { if (ok) setStashMsg(""); })
                 : doCommit(false)
           }
           className={cn(
@@ -590,8 +591,8 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
 function SectionHead({ open, onToggle, title, children }: { open: boolean; onToggle: () => void; title: string; children?: ReactNode }) {
   return (
     <div className="flex items-center h-[34px] pl-[6px] pr-[8px] gap-1 border-b border-white/5">
-      <button onClick={onToggle} className="flex items-center gap-1 text-[14px] text-white/90 flex-1 text-left">
-        {open ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+      <button aria-expanded={open} onClick={onToggle} className="flex items-center gap-1 text-[13px] text-white/90 flex-1 min-w-0 text-left">
+        <ChevronRight size={15} className={cn("shrink-0 transition-transform", open && "rotate-90")} />
         {title}
       </button>
       {children}
@@ -662,12 +663,16 @@ function CommitDetails({ repo, tabId, commit: c }: { repo: RepoView; tabId: stri
       </div>
       <ViewSwitch />
       <div className="flex-1 overflow-y-auto">
-        {files.isLoading && <div className="px-3 text-fg3 text-[12px]">Loading files…</div>}
+        {files.isLoading && <div className="px-3 text-fg3 text-[12px]" role="status">Loading files…</div>}
+        {files.isError && <div className="px-3 py-2 text-[12px] text-[#ef7a76]" role="alert">
+          {String(files.error)} <button className="text-link hover:underline" onClick={() => files.refetch()}>Retry</button>
+        </div>}
+        {files.isSuccess && files.data.length === 0 && <div className="px-3 py-2 text-[12px] text-fg3">No file changes to show.</div>}
         <FileList
           files={files.data ?? []}
           activeFile={ui.diff?.source.kind === "Commit" ? ui.diff.file : undefined}
           onOpen={(f) => s.setUi(tabId, { diff: { source: { kind: "Commit", sha: c.sha }, file: f.path, untracked: false, parent: c.parents[0] ?? null } })}
-          menu={(f) => fileMenu(repo, f.path, false, true, c.sha)}
+          menu={(f) => fileMenu(repo, f.path, false, true, f.status === "D" ? c.parents[0] : c.sha)}
         />
       </div>
     </div>
@@ -699,12 +704,16 @@ function ComparePanel({ repo, tabId, from, to }: { repo: RepoView; tabId: string
       </div>
       <ViewSwitch />
       <div className="flex-1 overflow-y-auto">
-        {files.isLoading && <div className="px-3 text-fg3 text-[12px]">Loading files…</div>}
+        {files.isLoading && <div className="px-3 text-fg3 text-[12px]" role="status">Loading files…</div>}
+        {files.isError && <div className="px-3 py-2 text-[12px] text-[#ef7a76]" role="alert">
+          {String(files.error)} <button className="text-link hover:underline" onClick={() => files.refetch()}>Retry</button>
+        </div>}
+        {files.isSuccess && files.data.length === 0 && <div className="px-3 py-2 text-[12px] text-fg3">No file changes to show.</div>}
         <FileList
           files={files.data ?? []}
           activeFile={ui.diff?.source.kind === "Range" ? ui.diff.file : undefined}
           onOpen={(f) => s.setUi(tabId, { diff: { source: { kind: "Range", sha: [from, to] }, file: f.path, untracked: false, parent: null } })}
-          menu={(f) => fileMenu(repo, f.path, false, true)}
+          menu={(f) => fileMenu(repo, f.path, false, true, f.status === "D" ? from : to === WORKDIR ? undefined : to)}
         />
       </div>
     </div>

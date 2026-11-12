@@ -613,7 +613,8 @@ pub fn file_text(dir: &Path, file: &str, rev: Option<&str>) -> Result<String, St
     let path = repo_file(dir, file)?;
     let bytes = match rev {
         Some(rev) if !rev.is_empty() => {
-            let spec = format!("{rev}:{}", file.replace('\\', "/"));
+            let file = file.replace('\\', "/");
+            let spec = if rev == ":" { format!(":{file}") } else { format!("{rev}:{file}") };
             let o = git::git_cmd(dir).args(["show", &spec]).output().map_err(|e| e.to_string())?;
             if !o.status.success() {
                 return Err(String::from_utf8_lossy(&o.stderr).trim().to_string());
@@ -637,6 +638,26 @@ pub fn file_text(dir: &Path, file: &str, rev: Option<&str>) -> Result<String, St
 #[cfg(test)]
 mod file_action_tests {
     use super::*;
+
+    #[test]
+    fn clipboard_contents_distinguish_index_worktree_and_saved_commit() {
+        let dir = std::env::temp_dir().join(format!("gitcraft-copy-index-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for args in [&["init", "-q"][..], &["config", "user.name", "Test"], &["config", "user.email", "t@example.com"], &["config", "commit.gpgsign", "false"]] {
+            assert!(git::run(&dir, args).ok);
+        }
+        std::fs::write(dir.join("a.txt"), "saved\n").unwrap();
+        assert!(git::run(&dir, &["add", "."]).ok);
+        assert!(git::run(&dir, &["commit", "-qm", "saved"]).ok);
+        std::fs::write(dir.join("a.txt"), "staged\n").unwrap();
+        assert!(git::run(&dir, &["add", "."]).ok);
+        std::fs::write(dir.join("a.txt"), "working\n").unwrap();
+        assert_eq!(file_text(&dir, "a.txt", Some(":")).unwrap().replace("\r\n", "\n"), "staged\n");
+        assert_eq!(file_text(&dir, "a.txt", None).unwrap().replace("\r\n", "\n"), "working\n");
+        assert_eq!(file_text(&dir, "a.txt", Some("HEAD")).unwrap().replace("\r\n", "\n"), "saved\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn repo_file_stays_inside_the_repository() {

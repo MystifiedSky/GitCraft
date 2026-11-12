@@ -234,9 +234,12 @@ export type Action =
   | { type: "renameBranch"; old: string; new: string }
   | { type: "createTag"; name: string; at: string | null; message: string | null }
   | { type: "deleteTag"; name: string }
+  | { type: "pushTag"; name: string; remote: string }
+  | { type: "deleteRemoteTag"; name: string; remote: string }
   | { type: "fetch" }
   | { type: "pull"; mode: string }
   | { type: "push"; force: boolean; lease?: boolean }
+  | { type: "pushBranch"; branch: string }
   | { type: "skipRebase" }
   | { type: "interactiveRebase"; base: string; items: TodoItem[] }
   | { type: "interactiveCherryPick"; items: TodoItem[] }
@@ -283,8 +286,8 @@ export type Action =
   | { type: "stashPop"; index: number }
   | { type: "stashApply"; index: number }
   | { type: "stashDrop"; index: number }
-  | { type: "cherryPick"; sha: string }
-  | { type: "revert"; sha: string }
+  | { type: "cherryPick"; sha: string; mainline?: number }
+  | { type: "revert"; sha: string; mainline?: number }
   | { type: "reset"; sha: string; mode: string }
   | { type: "merge"; branch: string }
   | { type: "rebase"; onto: string }

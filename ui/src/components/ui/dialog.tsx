@@ -23,11 +23,11 @@ export function Dialog({
   return (
     <D.Root open={open} onOpenChange={(o) => !o && onClose()}>
       <D.Portal>
-        <D.Overlay className="fixed inset-0 bg-black/50 z-50" />
+        <D.Overlay className="dialog-overlay fixed inset-0 bg-black/50 z-50" />
         <D.Content
           ref={content}
-          className="fixed left-1/2 top-[18%] -translate-x-1/2 z-50 bg-panel border border-white/12 rounded-md shadow-2xl flex flex-col max-h-[75vh]"
-          style={{ width }}
+          className="dialog-surface fixed left-1/2 top-[18%] -translate-x-1/2 z-50 bg-panel border border-white/12 rounded-md shadow-2xl flex flex-col max-h-[75vh]"
+          style={{ width, maxWidth: "calc(100vw - 32px)" }}
           aria-describedby={undefined}
           onOpenAutoFocus={(event) => {
             const initial = content.current?.querySelector<HTMLElement>("[data-dialog-initial-focus]");

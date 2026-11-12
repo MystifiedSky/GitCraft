@@ -12,10 +12,44 @@ import { editorName } from "@/components/TitleBar";
 
 const activeTab = () => useStore.getState().activeId;
 
+/** Shared by commit rows and branch labels so Reset is always discoverable. */
+export function resetMenu(repo: RepoView, sha: string): MenuEntry {
+  const head = repo.head_branch ?? "HEAD";
+  const reset = (mode: "soft" | "mixed" | "hard") => () => {
+    if (mode === "hard")
+      confirmThen(`Reset ${head} to this commit?`, "Hard reset throws away all uncommitted changes. Undo can move the branch back, but cannot restore discarded work.", "Reset Hard",
+        () => act(repo.path, { type: "reset", sha, mode }));
+    else void act(repo.path, { type: "reset", sha, mode });
+  };
+  return {
+    label: `Reset ${head} to this commit`,
+    children: [
+      { label: "Soft - keep all changes", onSelect: reset("soft") },
+      { label: "Mixed - keep working copy but reset index", onSelect: reset("mixed") },
+      { label: "Hard - discard all changes", danger: true, onSelect: reset("hard") },
+    ],
+  };
+}
+
 /** Which remote a remote-tracking name (origin/feature/x) belongs to; remote names can hold "/" too. */
 export function splitRemote(repo: RepoView, name: string): { remote: string; branch: string } | null {
   const remote = [...repo.remotes].sort((a, b) => b.length - a.length).find((r) => name.startsWith(r + "/"));
   return remote ? { remote, branch: name.slice(remote.length + 1) } : null;
+}
+
+/** Prove ancestry from loaded parents; display order alone does not prove a fast-forward is possible. */
+export function isLoadedAncestor(repo: RepoView, ancestor: string, tip: string): boolean {
+  const parents = new Map(repo.commits.map((c) => [c.sha, c.parents]));
+  const pending = [tip];
+  const seen = new Set<string>();
+  while (pending.length) {
+    const sha = pending.pop()!;
+    if (sha === ancestor) return true;
+    if (seen.has(sha)) continue;
+    seen.add(sha);
+    pending.push(...(parents.get(sha) ?? []));
+  }
+  return false;
 }
 
 /** Ask which remote branch a local branch should track ("Set Upstream"). */
@@ -55,9 +89,7 @@ export function branchMenu(repo: RepoView, ref: GitRef): MenuEntry[] {
     items.push({ label: `Rebase ${head} onto ${ref.name}`, onSelect: () => act(path, { type: "rebase", onto: ref.name }) });
     items.push({ label: `Interactive Rebase ${head} onto ${ref.name}`, onSelect: () => openRebase(activeTab(), path, ref.name, ref.name) });
     // Fast-forward the checked-out branch when the other ref is strictly ahead of it.
-    const headIdx = repo.commits.findIndex((c) => c.sha === repo.head_sha);
-    const refIdx = repo.commits.findIndex((c) => c.sha === ref.sha);
-    if (refIdx >= 0 && headIdx > refIdx) items.push({ label: `Fast-forward ${head} to ${ref.name}`, onSelect: () => act(path, { type: "fastForward", branch: head, to: ref.name }) });
+    if (ref.sha !== repo.head_sha && isLoadedAncestor(repo, repo.head_sha, ref.sha)) items.push({ label: `Fast-forward ${head} to ${ref.name}`, onSelect: () => act(path, { type: "fastForward", branch: head, to: ref.name }) });
   }
   items.push({ separator: true });
   if (isHead) items.push({ label: `Push ${ref.name}`, onSelect: () => act(path, { type: "push", force: false }) });
@@ -67,9 +99,10 @@ export function branchMenu(repo: RepoView, ref: GitRef): MenuEntry[] {
     items.push({ label: `Fast-forward ${ref.name} to ${ref.upstream}`, onSelect: () => act(path, { type: "fastForward", branch: ref.name, to: ref.upstream }) });
   if (ref.kind === "Local") items.push({ label: ref.upstream ? `Set Upstream (now ${ref.upstream})` : "Set Upstream", onSelect: () => promptUpstream(repo, ref) });
   items.push({ label: "Create branch here", onSelect: () => promptBranch(path, ref.sha) });
+  items.push(resetMenu(repo, ref.sha));
+  items.push({ label: `Create worktree from ${ref.name}`, onSelect: () => addWorktree(repo, undefined, ref.sha) });
   if (repo.head_branch && headLine(repo).includes(ref.sha))
     items.push({ label: "Rename commit", onSelect: () => rewordCommit(repo, ref.sha) });
-  if (ref.kind === "Local" && !isHead) items.push({ label: `Create worktree from ${ref.name}`, onSelect: () => addWorktree(repo, ref.name) });
   items.push({ label: "Create tag here", onSelect: () => promptTag(path, ref.sha) });
   items.push({ separator: true });
   if (ref.kind === "Local") {
@@ -124,6 +157,18 @@ export function tagMenu(repo: RepoView, ref: GitRef): MenuEntry[] {
     { label: `Checkout the commit at ${ref.name}`, onSelect: () => act(path, { type: "checkout", target: ref.name }) },
     { label: "Create branch here", onSelect: () => promptBranch(path, ref.sha) },
     { separator: true },
+    ...(repo.remotes.length ? [
+      { label: `Push ${ref.name} to remote`, children: repo.remotes.map((remote) => ({
+        label: remote, onSelect: () => act(path, { type: "pushTag" as const, name: ref.name, remote }),
+      })) },
+      { label: `Delete ${ref.name} from remote`, danger: true, children: repo.remotes.map((remote) => ({
+        label: remote, danger: true,
+        onSelect: () => confirmThen(`Delete ${ref.name} from ${remote}?`,
+          "This deletes the tag on the remote for everyone. Your local tag is kept.",
+          "Delete Remote Tag", () => act(path, { type: "deleteRemoteTag" as const, name: ref.name, remote })),
+      })) },
+      { separator: true },
+    ] : []),
     { label: `Delete ${ref.name} locally`, danger: true, onSelect: () => act(path, { type: "deleteTag", name: ref.name }) },
     { label: (useStore.getState().settings.hidden[path] ?? []).includes(ref.full) ? "Show in the graph" : "Hide in the graph", onSelect: () => toggleHidden(path, ref.full) },
     { separator: true },
@@ -132,34 +177,53 @@ export function tagMenu(repo: RepoView, ref: GitRef): MenuEntry[] {
   ];
 }
 
+/** For a merge, explain which parent's changes will be used instead of silently choosing parent one. */
+export function commitActionMenu(repo: RepoView, c: Commit, type: "cherryPick" | "revert", disabled = false): MenuEntry {
+  const label = type === "revert" ? "Revert commit" : "Cherry pick commit";
+  if (c.parents.length < 2) return { label, disabled, onSelect: () => act(repo.path, { type, sha: c.sha }) };
+  return { label, disabled, children: c.parents.map((sha, index) => {
+    const parent = repo.commits.find((p) => p.sha === sha);
+    return {
+      label: `Relative to parent ${index + 1}: ${sha.slice(0, useStore.getState().metrics.sha_len)}${parent ? " — " + parent.summary : ""}`,
+      onSelect: () => confirmThen(`${label} relative to parent ${index + 1}?`,
+        `${type === "revert" ? "Undo" : "Apply"} the merge's changes compared with parent ${index + 1} (${sha}).`,
+        type === "revert" ? "Revert" : "Cherry Pick",
+        () => act(repo.path, { type, sha: c.sha, mainline: index + 1 })),
+    };
+  }) };
+}
+
 export function commitMenu(repo: RepoView, c: Commit): MenuEntry[] {
   const path = repo.path;
   const head = repo.head_branch ?? "HEAD";
   const isHead = c.sha === repo.head_sha;
-  const reset = (mode: string, label: string) => () =>
-    mode === "hard"
-      ? confirmThen(`Reset ${head} to this commit?`, "Hard reset throws away all uncommitted changes. Undo can move the branch back, but not bring back uncommitted work.", "Reset Hard", () =>
-          act(path, { type: "reset", sha: c.sha, mode }),
-        )
-      : act(path, { type: "reset", sha: c.sha, mode }).then(() => void label);
   const canRename = !!repo.head_branch && headLine(repo).includes(c.sha);
   return [
-    { label: "Checkout this commit", onSelect: () => act(path, { type: "checkout", target: c.sha }) },
+    ...(repo.head_branch && !isHead ? [{ label: `Rebase ${head} onto this commit`, onSelect: () => act(path, { type: "rebase", onto: c.sha }) }] : []),
+    { label: "Checkout", children: [
+      ...repo.refs.filter((r) => r.sha === c.sha && r.kind !== "Tag").map((r) => ({
+        label: r.name, disabled: r.kind === "Local" && r.name === repo.head_branch,
+        onSelect: () => r.kind === "Remote" ? act(path, { type: "checkoutRemote", remoteBranch: r.name }) : act(path, { type: "checkout", target: r.name }),
+      })),
+      { label: "this commit (detached HEAD)", onSelect: () => act(path, { type: "checkout", target: c.sha }) },
+    ] },
+    { label: "Create worktree from", children: [
+      { label: "this commit", onSelect: () => addWorktree(repo, undefined, c.sha) },
+      ...repo.refs.filter((r) => r.sha === c.sha && r.kind !== "Tag").map((r) => ({
+        label: r.name, onSelect: () => addWorktree(repo, undefined, r.sha),
+      })),
+    ] },
     { label: "Create branch here", shortcut: "", onSelect: () => promptBranch(path, c.sha) },
     { separator: true },
-    { label: "Cherry pick commit", disabled: isHead, onSelect: () => act(path, { type: "cherryPick", sha: c.sha }) },
-    {
-      label: `Reset ${head} to this commit`,
-      disabled: isHead,
-      children: [
-        { label: "Soft - keep all changes", onSelect: reset("soft", "soft") },
-        { label: "Mixed - keep working copy but reset index", onSelect: reset("mixed", "mixed") },
-        { label: "Hard - discard all changes", danger: true, onSelect: reset("hard", "hard") },
-      ],
-    },
+    commitActionMenu(repo, c, "cherryPick", isHead),
+    resetMenu(repo, c.sha),
     { label: "Rename commit", disabled: !canRename, onSelect: () => rewordCommit(repo, c.sha) },
-    { label: "Revert commit", onSelect: () => act(path, { type: "revert", sha: c.sha }) },
-    { label: "Save commit as a patch file", onSelect: () => savePatch(path, [c.sha], patchName(c.summary)) },
+    commitActionMenu(repo, c, "revert"),
+    { label: "Create patch from commit", onSelect: () => savePatch(path, [c.sha], patchName(c.summary)) },
+    ...(repo.head_branch && repo.remotes.length ? [{ label: `Push ${head} and start a pull request`, onSelect: () => startPullRequest(path, head) }] : []),
+    ...(repo.refs.find((r) => r.sha === c.sha && r.kind !== "Tag") ? [
+      { label: "Explain Branch Changes (Preview)", onSelect: () => explainBranch(path, repo.refs.find((r) => r.sha === c.sha && r.kind !== "Tag")!.name) },
+    ] : []),
     { separator: true },
     {
       label: "Compare commit against working directory",
@@ -171,11 +235,17 @@ export function commitMenu(repo: RepoView, c: Commit): MenuEntry[] {
     { separator: true },
     { label: "Edit commit history", children: historyItems(repo, c) },
     { separator: true },
+    ...repo.refs.filter((r) => r.sha === c.sha && r.kind !== "Tag").flatMap((r): MenuEntry[] => [
+      { label: `Copy branch name: ${r.name}`, onSelect: () => copy(r.name) },
+      { label: useStore.getState().settings.pinned?.[path] === r.full ? `Unpin ${r.name} from Left` : `Pin to Left: ${r.name}`, onSelect: () => togglePinned(path, r.full) },
+      { label: `Solo: ${r.name}`, onSelect: () => toggleSolo(path, r.full) },
+    ]),
     { label: "Copy commit sha", onSelect: () => copy(c.sha) },
     { label: "Copy commit message", onSelect: () => copy(c.body ? `${c.summary}\n\n${c.body}` : c.summary) },
     ...linkItems(repo, "Copy link to this commit", { kind: "commit", sha: c.sha }),
     { separator: true },
     { label: "Create tag here", onSelect: () => promptTag(path, c.sha) },
+    { label: "Create annotated tag here", onSelect: () => promptTag(path, c.sha, true) },
   ];
 }
 
@@ -275,7 +345,7 @@ export function fileMenu(repo: RepoView, file: string, staged: boolean, inCommit
   items.push({
     label: "Copy file contents to clipboard",
     onSelect: () =>
-      api.fileText(path, file, inCommit && commitSha ? commitSha : undefined).then(copy, (e) => useStore.getState().toast(false, String(e))),
+      api.fileText(path, file, inCommit && commitSha ? commitSha : staged ? ":" : undefined).then(copy, (e) => useStore.getState().toast(false, String(e))),
   });
   const fail = (e: unknown) => useStore.getState().toast(false, String(e));
   items.push({ label: `Open in ${editorName(useStore.getState().settings.externalEditor)}`, onSelect: () => api.openInEditor(path, file).catch(fail) });

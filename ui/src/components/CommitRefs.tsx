@@ -31,6 +31,7 @@ export function CommitRefs({ repo, refs, color, hovered, selected, roomy, onSele
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState({ left: 0, top: 0, maxHeight: 0, width: 0, above: false });
   const first = refs[0];
+  const showPopup = open && refs.length > 1;
   const remoteSame = first.kind === "Local" && refs.some((r) => r.kind === "Remote" && r.name.endsWith("/" + first.name));
   const more = refs.length - 1 - (remoteSame ? 1 : 0);
   // Put tags immediately below the local label, as in the reference; remote refs remain accessible.
@@ -61,7 +62,7 @@ export function CommitRefs({ repo, refs, color, hovered, selected, roomy, onSele
   useEffect(() => cancelClose, []);
 
   useLayoutEffect(() => {
-    if (!open || !anchor.current) return;
+    if (!showPopup || !anchor.current) return;
     const r = anchor.current.getBoundingClientRect();
     const below = window.innerHeight - r.top - 8;
     const above = r.bottom - 8;
@@ -98,7 +99,7 @@ export function CommitRefs({ repo, refs, color, hovered, selected, roomy, onSele
       window.removeEventListener("resize", close);
       window.removeEventListener("keydown", escape, true);
     };
-  }, [open, expanded.length, m.row_inner]);
+  }, [showPopup, expanded.length, m.row_inner]);
 
   const icons = (r: GitRef, compact = false) => (
     <>
@@ -128,8 +129,8 @@ export function CommitRefs({ repo, refs, color, hovered, selected, roomy, onSele
           type="button"
           tabIndex={selected ? 0 : -1}
           aria-label={`${first.name}; ${refs.length} branch or tag labels`}
-          aria-expanded={open}
-          aria-controls={open ? id : undefined}
+          aria-expanded={refs.length > 1 ? showPopup : undefined}
+          aria-controls={showPopup ? id : undefined}
           onFocus={reveal}
           onBlur={closeSoon}
           onMouseEnter={() => { reveal(); onHover(true); }}
@@ -137,7 +138,7 @@ export function CommitRefs({ repo, refs, color, hovered, selected, roomy, onSele
           onClick={(e) => { e.stopPropagation(); onSelect(e); reveal(); }}
           onDoubleClick={(e) => { e.stopPropagation(); checkout(first); }}
           onKeyDown={(e) => {
-            if (e.key === "ArrowDown") {
+            if (e.key === "ArrowDown" && refs.length > 1) {
               e.preventDefault();
               e.stopPropagation();
               reveal();
@@ -145,12 +146,12 @@ export function CommitRefs({ repo, refs, color, hovered, selected, roomy, onSele
             }
           }}
           className={cn(labelClass, "z-[1]")}
-          style={{ background: mix(color, 0.45), height: m.row_inner, opacity: open ? 0 : 1 }}
+          style={{ background: mix(color, 0.45), height: m.row_inner, opacity: showPopup ? 0 : 1 }}
         >
           {icons(first, true)}
         </button>
       </CtxMenu>
-      {open && createPortal(
+      {showPopup && createPortal(
         <div
           id={id}
           ref={popup}

@@ -21,6 +21,9 @@ export function spinButtonFor(action: Action, quiet: boolean): SpinButton | null
     case "fetch":
       return quiet ? null : "pull";
     case "push":
+    case "pushBranch":
+    case "pushTag":
+    case "deleteRemoteTag":
       return "push";
     case "stash":
       return "stash";

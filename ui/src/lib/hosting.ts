@@ -113,14 +113,14 @@ export async function startPullRequest(path: string, branch: string, target?: st
     help: "The branch is pushed first if the remote doesn't have it yet.",
     onSubmit: async (v) => {
       if (!ref?.upstream || (ref.ahead ?? 0) > 0) {
-        const ok = await act(path, { type: "push", force: false }, true);
+        const ok = await act(path, { type: "pushBranch", branch }, true);
         if (!ok) return;
       }
       try {
         s.setBusy("Creating pull request…");
         const pr = await hosting.create(path, branch, String(v.target).trim(), String(v.title).trim(), String(v.body), !!v.draft);
         s.toast(true, `Created #${pr.number}: ${pr.title}`);
-        const tab = s.tabs.find((t) => t.id === s.activeId);
+        const tab = useStore.getState().tabs.find((t) => t.path === path);
         if (tab) s.setUi(tab.id, { pr: pr.number, issue: null, diff: null, history: null });
       } catch (e) {
         s.toast(false, String(e));

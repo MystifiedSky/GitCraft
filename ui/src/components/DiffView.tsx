@@ -178,7 +178,7 @@ export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: strin
           <X size={16} />
         </button>
       </div>
-      <div className="flex items-center gap-2 h-[32px] px-2 bg-app border-b border-white/5 shrink-0">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 min-h-[32px] py-1 px-2 bg-app border-b border-white/5 shrink-0">
         <div className="flex-1 flex items-center gap-1.5 min-w-0">
           {editable && !editing && (
             <Button size="sm" variant="primary" className="h-[22px]" onClick={() => (setEditing(true), setView("file"))} title="Edit the working-folder copy of this file">
@@ -232,7 +232,7 @@ export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: strin
 
 function IconToggle({ children, title, onClick, active }: { children: React.ReactNode; title: string; onClick: () => void; active?: boolean }) {
   return (
-    <button title={title} onClick={onClick} className={cn("w-[24px] h-[22px] rounded-[3px] flex items-center justify-center", active ? "bg-accent/30 text-white" : "text-fg2 hover:text-white hover:bg-white/10")}>
+    <button aria-label={title} aria-pressed={active} title={title} onClick={onClick} className={cn("w-[24px] h-[22px] rounded-[3px] flex items-center justify-center", active ? "bg-accent/30 text-white" : "text-fg2 hover:text-white hover:bg-white/10")}>
       {children}
     </button>
   );
@@ -249,7 +249,7 @@ function ImageDiff({ before, after }: { before: string | null; after: string | n
         {label}
       </span>
       <div className="flex-1 w-full flex items-center justify-center rounded border border-white/10 bg-[repeating-conic-gradient(#2a2d34_0%_25%,#22252b_0%_50%)] bg-[length:16px_16px] min-h-[120px]">
-        {src ? <img src={src} className="max-w-full max-h-[60vh] object-contain" /> : <span className="text-fg3 text-[12px]">No image</span>}
+        {src ? <img src={src} alt={`${label} version`} className="max-w-full max-h-[60vh] object-contain" /> : <span className="text-fg3 text-[12px]">No image</span>}
       </div>
     </div>
   );
