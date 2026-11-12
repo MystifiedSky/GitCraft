@@ -4,7 +4,13 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
-Expected next release: `0.1.4`.
+Expected next release: `0.1.5`.
+
+### Fixed
+
+- GitCraft checks for updates as soon as its saved preferences load, then hourly while it’s open. A downloaded update keeps its bottom-right restart notice until you install it.
+
+## [0.1.4] - 2026-11-11
 
 ### Added
 
@@ -62,7 +68,8 @@ Expected next release: `0.1.4`.
 - First public release of GitCraft, with Windows NSIS and MSI installers, a universal macOS DMG, and Linux AppImage, DEB, and RPM packages.
 - GitHub Actions builds installers for each push to `main` and publishes signed updates for installed copies.
 
-[Unreleased]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/MystifiedSky/GitCraft/releases/tag/v0.1.1

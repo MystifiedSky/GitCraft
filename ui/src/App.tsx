@@ -34,11 +34,11 @@ import { Dialogs, Toasts } from "./components/Dialogs";
 export default function App() {
   const s = usePanelStore();
   const active = s.tabs.find((t) => t.id === s.activeId) ?? s.tabs[0];
-  useStartup();
+  const settingsLoaded = useStartup();
   useShortcuts();
   useWatchers();
   useAutoFetch();
-  useUpdateChecks();
+  useUpdateChecks(settingsLoaded);
   const theme = useStore((x) => x.settings.theme);
   useEffect(() => applyTheme(theme), [theme]);
 
@@ -180,6 +180,7 @@ const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
 /** Load settings and open tabs; in --screenshot mode open the sample project and report when drawn. */
 function useStartup() {
   const done = useRef(false);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
   useEffect(() => {
     if (done.current) return;
     done.current = true;
@@ -257,7 +258,6 @@ function useStartup() {
       const savedPaths = useStore.getState().settings.rememberTabs ? [...new Set(saved?.tabs ?? [])] : [];
       if (savedPaths.length) restoreTabs(savedPaths, saved?.active ?? 0);
       startBackendSync();
-      await syncGitCredentials();
       // Persist settings and open tabs whenever they change.
       let timer: number | undefined;
       useStore.subscribe((st, prev) => {
@@ -274,15 +274,18 @@ function useStartup() {
           });
         }, 400);
       });
+      setSettingsLoaded(true);
+      await syncGitCredentials();
     })().catch((error) => useStore.getState().toast(false, "GitCraft could not finish starting: " + String(error)));
   }, []);
+  return settingsLoaded;
 }
 
-/** Look for GitCraft updates shortly after start-up and every few hours (not in screenshot mode). */
-function useUpdateChecks() {
+/** Start only once the saved preference is known. Changing it starts or stops the schedule. */
+function useUpdateChecks(settingsLoaded: boolean) {
   const screenshot = useStore((s) => s.screenshot);
   const auto = useStore((s) => s.settings.autoUpdate);
-  useEffect(() => (screenshot || !auto ? undefined : startUpdateChecks()), [screenshot, auto]);
+  useEffect(() => (settingsLoaded && !screenshot && auto ? startUpdateChecks() : undefined), [settingsLoaded, screenshot, auto]);
 }
 
 /** Auto-fetch every open repository every N minutes (0 = off), pruning if enabled. A failure is

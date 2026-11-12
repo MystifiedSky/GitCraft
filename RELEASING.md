@@ -8,7 +8,7 @@ Use **Re-run failed jobs** in Actions to retry a failed release with the same ve
 
 ## Updating installed copies
 
-GitCraft checks GitHub Releases shortly after startup and periodically after that. When it finds a newer version, it downloads the update and verifies the signature using the public key built into the app. Choose **Update Ready (Restart GitCraft)** to install it, or use **Help → Check for Update** to check manually. Background downloads can be turned off in Preferences.
+GitCraft checks GitHub Releases at startup and every hour while it’s open. When it finds a newer version, it downloads the update and verifies the signature using the public key built into the app. Choose **Update Ready (Restart GitCraft)** in the bottom right to install it. Turn off **Automatically download GitCraft updates** in **Preferences → General** to stop background checks and downloads. **File → Check for Update** still works with the setting off.
 
 Install a published release once if your current build predates the signing key. Linux AppImage builds can update in place; DEB and RPM installations should be upgraded using the matching package from GitHub.
 

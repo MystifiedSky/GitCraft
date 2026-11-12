@@ -20,9 +20,10 @@ interface UpdateState {
 
 export const useUpdates = create<UpdateState>(() => ({ phase: "idle", version: null, notes: "", percent: null, lastChecked: null, error: null }));
 
-/** First check after start-up, then every few hours while the app stays open. */
-export const FIRST_CHECK_MS = 10000;
-export const CHECK_EVERY_MS = 14400000;
+/** Check at launch and once an hour while the app stays open. */
+export const CHECK_EVERY_MS = 60 * 60 * 1000;
+const CHECK_TIMEOUT_MS = 30_000;
+const DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;
 export const RELEASES_URL = "https://github.com/MystifiedSky/GitCraft/releases";
 
 let pending: Update | null = null;
@@ -36,28 +37,42 @@ async function configured() {
   }
 }
 
+async function replacePending(update: Update | null) {
+  const previous = pending;
+  pending = update;
+  if (previous) await previous.close().catch(() => undefined);
+}
+
 /** Look for a newer release; when found, download it in the background (if allowed) so it is ready to install. */
 export async function checkForUpdates(manual: boolean) {
   const st = useStore.getState();
-  if (busy || st.screenshot) return;
-  if (!(await configured())) {
-    useUpdates.setState({ phase: "off" });
-    if (manual) st.toast(false, "Automatic updates aren't set up in this build. See RELEASING.md.");
-    return;
-  }
+  // A downloaded update is kept until restart, even if a scheduled check comes due.
+  if (busy || st.screenshot || (!manual && !st.settings.autoUpdate) || useUpdates.getState().phase === "ready") return;
   busy = true;
+  const { phase: previousPhase, error: previousError } = useUpdates.getState();
   useUpdates.setState({ phase: "checking", error: null });
   try {
-    const u = await check();
+    const canUpdate = await configured();
+    if (!manual && !useStore.getState().settings.autoUpdate) {
+      useUpdates.setState({ phase: previousPhase, error: previousError });
+      return;
+    }
+    if (!canUpdate) {
+      await replacePending(null);
+      useUpdates.setState({ phase: "off", version: null, notes: "", percent: null });
+      if (manual) st.toast(false, "Automatic updates aren't set up in this build. See RELEASING.md.");
+      return;
+    }
+    const u = await check({ timeout: CHECK_TIMEOUT_MS });
+    await replacePending(u);
     useUpdates.setState({ lastChecked: Date.now() });
     if (!u) {
-      useUpdates.setState({ phase: "none" });
+      useUpdates.setState({ phase: "none", version: null, notes: "", percent: null });
       if (manual) st.toast(true, `GitCraft ${st.version} is the newest version.`);
       return;
     }
-    pending = u;
-    useUpdates.setState({ phase: "available", version: u.version, notes: u.body ?? "" });
-    if (manual || st.settings.autoUpdate) await download();
+    useUpdates.setState({ phase: "available", version: u.version, notes: u.body ?? "", percent: null });
+    if (manual || useStore.getState().settings.autoUpdate) await downloadPending(u, manual);
   } catch (e) {
     useUpdates.setState({ phase: "error", error: String(e), lastChecked: Date.now() });
     if (manual) st.toast(false, `Could not check for updates: ${e}`);
@@ -68,7 +83,16 @@ export async function checkForUpdates(manual: boolean) {
 
 export async function download() {
   const u = pending;
-  if (!u) return;
+  if (!u || busy || useUpdates.getState().phase !== "available") return;
+  busy = true;
+  try {
+    await downloadPending(u, true);
+  } finally {
+    busy = false;
+  }
+}
+
+async function downloadPending(u: Update, manual: boolean) {
   let total = 0;
   let got = 0;
   useUpdates.setState({ phase: "downloading", percent: 0 });
@@ -79,29 +103,34 @@ export async function download() {
         got += ev.data.chunkLength;
         useUpdates.setState({ percent: total ? Math.min(100, Math.round((got / total) * 100)) : null });
       }
-    });
+    }, { timeout: DOWNLOAD_TIMEOUT_MS });
     useUpdates.setState({ phase: "ready", percent: 100 });
   } catch (e) {
     useUpdates.setState({ phase: "error", error: String(e) });
-    useStore.getState().toast(false, `The update could not be downloaded: ${e}`);
+    if (manual) useStore.getState().toast(false, `The update could not be downloaded: ${e}`);
   }
 }
 
 /** "Restart and Install Update". On Windows the installer closes GitCraft and opens it again by itself. */
 export async function installAndRestart() {
-  if (!pending) return;
+  const u = pending;
+  if (!u || busy || useUpdates.getState().phase !== "ready") return;
+  busy = true;
   try {
-    await pending.install();
+    await u.install();
     await relaunch();
   } catch (e) {
     useStore.getState().toast(false, `The update could not be installed: ${e}`);
+  } finally {
+    busy = false;
   }
 }
 
 /** Start the background schedule (called once from the app shell). */
 export function startUpdateChecks() {
-  if (useStore.getState().screenshot) return () => {};
-  const first = setTimeout(() => void checkForUpdates(false), FIRST_CHECK_MS);
+  const { screenshot, settings } = useStore.getState();
+  if (screenshot || !settings.autoUpdate) return () => {};
+  const first = setTimeout(() => void checkForUpdates(false), 0);
   const every = setInterval(() => void checkForUpdates(false), CHECK_EVERY_MS);
   return () => {
     clearTimeout(first);
