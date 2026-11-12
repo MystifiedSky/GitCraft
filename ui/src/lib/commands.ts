@@ -36,6 +36,16 @@ function cycleTab(dir: number) {
   s.setActive(s.tabs[(i + dir + s.tabs.length) % s.tabs.length].id);
 }
 
+/** Move the active tab one place left or right among the tabs in the strip. */
+function moveActiveTab(dir: -1 | 1) {
+  const s = st();
+  const shown = s.tabs.filter((x) => x.kind !== "launchpad");
+  const i = shown.findIndex((t) => t.id === s.activeId);
+  if (i < 0) return;
+  if (dir < 0 && i > 0) s.moveTab(shown[i].id, shown[i - 1].id);
+  if (dir > 0 && i < shown.length - 1) s.moveTab(shown[i].id, shown[i + 2]?.id ?? null);
+}
+
 function selectTab(n: number) {
   const s = st();
   const t = s.tabs.filter((x) => x.kind !== "launchpad")[n - 1];
@@ -96,7 +106,7 @@ export const COMMANDS: Command[] = [
       const u = t ? st().ui[t.id] : undefined;
       if (u?.conflict) return act(p!, { type: "externalMerge", file: u.conflict, tool: st().settings.mergeTool });
       if (!u?.diff) return st().toast(false, "Open a file's changes first");
-      act(p!, { type: "externalDiff", file: u.diff.file, staged: u.diff.source.kind === "Staged", tool: st().settings.diffTool });
+      return act(p!, { type: "externalDiff", file: u.diff.file, staged: u.diff.source.kind === "Staged", tool: st().settings.diffTool });
     },
   },
   { id: "repo:gitflow", label: "Configure Gitflow", group: "Repo Actions", repo: true, run: (p) => initGitflow(p!) },
@@ -120,6 +130,8 @@ export const COMMANDS: Command[] = [
   { id: "nav:reopenTab", label: "Reopen Closed Tab", group: "Navigation", keys: "Ctrl+Shift+T", inInputs: true, run: () => st().reopenTab() },
   { id: "nav:nextTab", label: "Jump to the next open tab", group: "Navigation", keys: "Ctrl+Tab", inInputs: true, run: () => cycleTab(1) },
   { id: "nav:prevTab", label: "Jump to the previous open tab", group: "Navigation", keys: "Ctrl+Shift+Tab", inInputs: true, run: () => cycleTab(-1) },
+  { id: "nav:moveTabLeft", label: "Move Tab Left", group: "Navigation", keys: "Ctrl+Shift+PageUp", inInputs: true, keywords: "reorder rearrange", run: () => moveActiveTab(-1) },
+  { id: "nav:moveTabRight", label: "Move Tab Right", group: "Navigation", keys: "Ctrl+Shift+PageDown", inInputs: true, keywords: "reorder rearrange", run: () => moveActiveTab(1) },
   ...[1, 2, 3, 4, 5, 6, 7, 8, 9].map(
     (n): Command => ({ id: `nav:tab${n}`, label: `Select Tab ${n}`, group: "Navigation", keys: `Ctrl+${n}`, inInputs: true, run: () => selectTab(n) }),
   ),

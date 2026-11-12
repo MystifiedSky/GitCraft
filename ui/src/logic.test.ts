@@ -8,6 +8,8 @@ import { todo } from "./lib/rewrite";
 import { timeSince, withCoauthors } from "./lib/utils";
 import { indexOnly, predictStatus, queryClient, refresh, refreshStatus, signInProblem } from "./lib/repo";
 import { globMatch } from "./lib/conflict";
+import { patchName } from "./lib/ai";
+import { formatDate } from "./lib/integrations";
 import { DEFAULT_METRICS, useStore, type RebasePlan } from "./lib/store";
 
 describe("merge tool", () => {
@@ -63,6 +65,24 @@ describe("time format (the original's timeSince)", () => {
     expect(timeSince(now - 2 * 604800, units, now).text).toBe("2w");
     expect(timeSince(now - 31556736, units, now).text).toBe("1y");
     expect(timeSince(now - 5, units, now).text).toBe("5s");
+  });
+});
+
+describe("custom date formats and patch names", () => {
+  const date = new Date(2026, 10, 11, 17, 5, 6);
+
+  it("keeps bracketed literals and expands tokens outside them", () => {
+    expect(formatDate(date, "[YYYY] YYYY-MM-DD [at] h:mm A [open [DD]")).toBe("YYYY 2026-11-11 at 5:05 PM open [DD");
+  });
+
+  it("still expands date tokens after an unmatched opening bracket", () => {
+    const unclosed = "[".repeat(100_000);
+    expect(formatDate(date, "[ok] " + unclosed + "YYYY")).toBe("ok " + unclosed + "2026");
+  });
+
+  it("trims punctuation from patch names and falls back for empty names", () => {
+    expect(patchName("...Fix / the UI!!!")).toBe("fix-the-ui.patch");
+    expect(patchName("?!")).toBe("changes.patch");
   });
 });
 
@@ -172,5 +192,78 @@ describe("shortcut ownership", () => {
     } finally {
       useStore.setState({ dialog: before });
     }
+  });
+});
+
+describe("toolbar busy spinner", () => {
+  it("spins Pull, Push, Stash and Pop for their own actions only", async () => {
+    const { spinButtonFor } = await import("./lib/spin");
+    expect(spinButtonFor({ type: "pull", mode: "ff" }, false)).toBe("pull");
+    expect(spinButtonFor({ type: "fetch" }, false)).toBe("pull");
+    expect(spinButtonFor({ type: "fetch" }, true)).toBe(null);
+    expect(spinButtonFor({ type: "push", force: false }, false)).toBe("push");
+    expect(spinButtonFor({ type: "stash", message: "" }, false)).toBe("stash");
+    expect(spinButtonFor({ type: "stashPop", index: 0 }, false)).toBe("pop");
+    expect(spinButtonFor({ type: "stageAll" }, false)).toBe(null);
+  });
+
+  it("keeps the circle for at least one turn without holding back the answer", async () => {
+    vi.useFakeTimers();
+    try {
+      const { withSpin, isSpinning, SPIN_MIN_MS } = await import("./lib/spin");
+      const result = await withSpin("C:/r", "stash", async () => {
+        expect(isSpinning("C:/r", "stash")).toBe(true);
+        return 7;
+      });
+      expect(result).toBe(7); // answered at once
+      expect(isSpinning("C:/r", "stash")).toBe(true); // circle still showing
+      expect(isSpinning("C:/r", "pull")).toBe(false);
+      vi.advanceTimersByTime(SPIN_MIN_MS + 1);
+      expect(isSpinning("C:/r", "stash")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("web links to commits, branches and tags", () => {
+  it("turns ssh and https remotes into web pages", async () => {
+    const { webBase, webLink } = await import("./lib/weblinks");
+    expect(webBase("git@github.com:me/app.git")).toBe("https://github.com/me/app");
+    expect(webBase("https://user@github.com/me/app.git")).toBe("https://github.com/me/app");
+    expect(webBase("ssh://git@gitlab.example.com:2222/group/sub/app.git")).toBe("https://gitlab.example.com/group/sub/app");
+    expect(webBase("https://git.example.com:8443/team/app")).toBe("https://git.example.com:8443/team/app");
+    expect(webBase("git@ssh.dev.azure.com:v3/org/proj/app")).toBe("https://dev.azure.com/org/proj/_git/app");
+    expect(webBase("C:/repos/app")).toBe(null);
+    expect(webLink("git@github.com:me/app.git", { kind: "commit", sha: "abc" })).toBe("https://github.com/me/app/commit/abc");
+    expect(webLink("git@github.com:me/app.git", { kind: "branch", name: "feature/x y" })).toBe("https://github.com/me/app/tree/feature/x%20y");
+    expect(webLink("git@gitlab.com:me/app.git", { kind: "tag", name: "v1" })).toBe("https://gitlab.com/me/app/-/tags/v1");
+    expect(webLink("git@bitbucket.org:me/app.git", { kind: "commit", sha: "abc" })).toBe("https://bitbucket.org/me/app/commits/abc");
+    expect(webLink("https://dev.azure.com/org/proj/_git/app", { kind: "branch", name: "main" })).toBe("https://dev.azure.com/org/proj/_git/app?version=GBmain");
+  });
+});
+
+describe("tab order", () => {
+  it("moves a tab before another or to the end", () => {
+    const tabs = ["a", "b", "c", "d"].map((id) => ({ id, kind: "repo" as const, title: id, path: id }));
+    useStore.setState({ tabs });
+    const order = () => useStore.getState().tabs.map((t) => t.id).join("");
+    useStore.getState().moveTab("d", "b");
+    expect(order()).toBe("adbc");
+    useStore.getState().moveTab("a", null);
+    expect(order()).toBe("dbca");
+    useStore.getState().moveTab("b", "b");
+    expect(order()).toBe("dbca");
+  });
+});
+
+describe("start-up tab restore", () => {
+  it("brings every saved tab back at once with the saved one active", async () => {
+    const { restoreTabs } = await import("./lib/store");
+    useStore.setState({ tabs: [{ id: "s", kind: "start", title: "New Tab" }], activeId: "s" });
+    restoreTabs(["C:/r/alpha", String.raw`C:\r\beta`, "C:/r/gamma"], 1);
+    const st = useStore.getState();
+    expect(st.tabs.map((t) => t.title)).toEqual(["alpha", "beta", "gamma"]);
+    expect(st.tabs.find((t) => t.id === st.activeId)?.title).toBe("beta");
   });
 });

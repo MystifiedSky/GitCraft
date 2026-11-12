@@ -99,10 +99,12 @@ export function CommandPalette() {
 
   if (!mode) return null;
   return (
-    <div className="fixed inset-0 z-[65]" onMouseDown={close}>
-      <div className="absolute left-1/2 top-[64px] -translate-x-1/2 w-[560px] max-w-[90vw] bg-[var(--menu-bg)] border border-white/15 rounded-md shadow-2xl overflow-hidden" onMouseDown={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-[65]">
+      <button type="button" tabIndex={-1} aria-label="Close command palette" className="absolute inset-0 cursor-default" onClick={close} />
+      <div className="absolute left-1/2 top-[64px] -translate-x-1/2 w-[560px] max-w-[90vw] bg-[var(--menu-bg)] border border-white/15 rounded-md shadow-2xl overflow-hidden">
         <input
           ref={input}
+          aria-label={PLACEHOLDER[mode]}
           value={q}
           placeholder={PLACEHOLDER[mode]}
           onChange={(e) => (setQ(e.target.value), setSel(0))}

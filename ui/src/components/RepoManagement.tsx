@@ -28,7 +28,7 @@ export function toggleFavorite(path: string) {
 /** "Open Favorite Repo N" (Favorites menu in the original). */
 export function openFavorite(n: number) {
   const p = useStore.getState().settings.favorites[n - 1];
-  if (p) openRepoPath(p);
+  if (p) void openRepoPath(p);
   else useStore.getState().toast(false, `There is no favorite repository ${n}. Star one in Repository Management.`);
 }
 
@@ -62,7 +62,7 @@ export function RepoManagementDialog({ onClose }: { onClose: () => void }) {
       if (!r.ok) {
         failed++;
         s.toast(false, `${name(p)}: ${r.message}`);
-      } else refresh(p);
+      } else await refresh(p);
     }
     s.setBusy(null);
     summaries.forEach((x) => x.refetch());
@@ -76,7 +76,7 @@ export function RepoManagementDialog({ onClose }: { onClose: () => void }) {
       <div className="flex items-center gap-2 mb-3">
         <div className="flex-1 flex items-center h-[26px] bg-field rounded-[2px] border border-white/10 focus-within:border-accent">
           <Search size={12} className="ml-1.5 mr-1 text-fg3" />
-          <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search repositories" className="flex-1 bg-transparent outline-none text-[12.5px] placeholder:text-fg3" />
+          <input data-dialog-initial-focus aria-label="Search repositories" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search repositories" className="flex-1 bg-transparent outline-none text-[12.5px] placeholder:text-fg3" />
         </div>
         <ToolBtn title="Fetch all repositories" onClick={() => runAll(all, "fetch")} icon={<CloudDownload size={14} />} label="Fetch all" />
         <ToolBtn title="Pull all repositories" onClick={() => runAll(all, "pull")} icon={<Download size={14} />} label="Pull all" />

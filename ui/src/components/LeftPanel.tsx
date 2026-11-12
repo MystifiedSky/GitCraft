@@ -6,7 +6,6 @@ import {
   Check,
   Cloud,
   CloudCog,
-  FlaskConical,
   Folder,
   GitPullRequest,
   Laptop,
@@ -24,7 +23,9 @@ import {
 import { useMemo, useRef, useState, type ReactNode } from "react";
 import type { GitRef, RepoView } from "@/lib/api";
 import { useStore, usePanelStore } from "@/lib/store";
-import { act, openRepoPath, toggleHidden } from "@/lib/repo";
+import { act, openRepoPath, setHiddenMany, toggleHidden } from "@/lib/repo";
+import type { MenuEntry } from "./ui/menu";
+import { openWebLink } from "@/lib/weblinks";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import {
@@ -91,21 +92,21 @@ export function LeftPanel({ repo, tabId, onSelectSha }: { repo: RepoView | undef
           }
           className={isHead ? "bg-good/20 text-white" : undefined}
           title={isHead ? "Checked out" : "Double-click to checkout"}
+          action={repo && (
+            <button
+              title={hiddenList.includes(r.full) ? "Show in the graph" : "Hide in the graph"}
+              onClick={() => toggleHidden(repo.path, r.full)}
+              className={cn("shrink-0 text-fg2 hover:text-white", hiddenList.includes(r.full) ? "opacity-100 text-warn" : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100")}
+            >
+              {hiddenList.includes(r.full) ? <EyeOff size={13} /> : <Eye size={13} />}
+            </button>
+          )}
         >
           {isHead ? <Check size={13} className="shrink-0 text-good" /> : r.kind === "Local" ? <Laptop size={13} className="shrink-0 opacity-60" /> : <Cloud size={13} className="shrink-0 opacity-60" />}
           <span className={cn("truncate flex-1", isHead && "font-semibold")}>{label}</span>
           {soloList.includes(r.full) && <Badge title="Soloing">solo</Badge>}
           {r.ahead > 0 && <Badge title={`${r.ahead} ahead`}>{r.ahead}↑</Badge>}
           {r.behind > 0 && <Badge title={`${r.behind} behind`}>{r.behind}↓</Badge>}
-          {repo && (
-            <button
-              title={hiddenList.includes(r.full) ? "Show in the graph" : "Hide in the graph"}
-              onClick={(e) => (e.stopPropagation(), toggleHidden(repo.path, r.full))}
-              className={cn("shrink-0 text-fg2 hover:text-white", hiddenList.includes(r.full) ? "opacity-100 text-warn" : "opacity-0 group-hover:opacity-100")}
-            >
-              {hiddenList.includes(r.full) ? <EyeOff size={13} /> : <Eye size={13} />}
-            </button>
-          )}
         </Row>
       </CtxMenu>
     );
@@ -146,6 +147,7 @@ export function LeftPanel({ repo, tabId, onSelectSha }: { repo: RepoView | undef
           count={locals.length}
           open={isOpen("local")}
           onToggle={() => toggle("local")}
+          menu={hideAllMenu(repo, locals, "local branches")}
           actions={<SectionAction title="Clean up local branches" onClick={openCleanup} icon={<Brush size={12} />} />}
         >
           {localTree.map((g) =>
@@ -168,6 +170,7 @@ export function LeftPanel({ repo, tabId, onSelectSha }: { repo: RepoView | undef
           count={byRemote.size}
           open={isOpen("remote")}
           onToggle={() => toggle("remote")}
+          menu={hideAllMenu(repo, [...byRemote.values()].flat(), "remotes")}
           actions={repo && <SectionAction title="Add a remote" onClick={() => addRemote(repo.path)} icon={<Plus size={13} />} />}
         >
           {[...byRemote.entries()].map(([rem, refs]) => (
@@ -178,6 +181,10 @@ export function LeftPanel({ repo, tabId, onSelectSha }: { repo: RepoView | undef
                     ? [
                         { label: `Fetch ${rem}`, onSelect: () => act(repo.path, { type: "fetchRemote", remote: rem }) },
                         { label: `Edit ${rem}`, onSelect: () => editRemote(repo.path, rem) },
+                        // The original's "Open Remote: {0}" - the remote's page on its hosting site.
+                        { label: `Open Remote: ${rem}`, onSelect: () => openWebLink(repo.path, rem, { kind: "repo" }) },
+                        { separator: true },
+                        ...hideAllMenu(repo, refs, `${rem} branches`)(),
                         { separator: true },
                         { label: `Remove ${rem}`, danger: true, onSelect: () => removeRemote(repo.path, rem) },
                       ]
@@ -265,7 +272,7 @@ export function LeftPanel({ repo, tabId, onSelectSha }: { repo: RepoView | undef
           {repo ? <ConflictCheckRows repo={repo} /> : <Note>Open a repository to check it for conflicts with its main branch.</Note>}
         </Section>
         {tags.length > 0 && (
-          <Section title="TAGS" icon={<Tag size={14} />} count={tags.length} open={isOpen("tags")} onToggle={() => toggle("tags")}>
+          <Section title="TAGS" icon={<Tag size={14} />} count={tags.length} open={isOpen("tags")} onToggle={() => toggle("tags")} menu={hideAllMenu(repo, tags, "tags")}>
             {tags.map((t) => (
               <CtxMenu key={t.full} items={() => (repo ? branchMenu(repo, t) : [])}>
                 <Row indent={1} onClick={() => onSelectSha(t.sha)}>
@@ -288,7 +295,6 @@ export function LeftPanel({ repo, tabId, onSelectSha }: { repo: RepoView | undef
             <Submodules repo={repo} />
           </Section>
         )}
-        {false && <FlaskConical />}
       </div>
     </Shell>
   );
@@ -338,6 +344,7 @@ function Section({
   onToggle,
   children,
   actions,
+  menu,
 }: {
   title: string;
   icon: ReactNode;
@@ -346,19 +353,40 @@ function Section({
   onToggle: () => void;
   children?: ReactNode;
   actions?: ReactNode;
+  /** Right-click menu of the section header. */
+  menu?: () => MenuEntry[];
 }) {
-  return (
-    <div>
-      <div className="group w-full flex items-center h-[30px] pl-[8px] pr-[14px] text-[12.5px] font-semibold text-fg hover:bg-white/5 tracking-[0.01em] cursor-default" onClick={onToggle}>
+  const header = (
+    <div className="group w-full flex items-center h-[30px] pr-[14px] text-[12.5px] font-semibold text-fg hover:bg-white/5 tracking-[0.01em]">
+      <button type="button" aria-expanded={open} onClick={onToggle} className="flex h-full flex-1 items-center pl-[8px] text-left cursor-default">
         <ChevronRight size={14} className={cn("mr-[7px] transition-transform text-white/70", open && "rotate-90")} />
         <span className="mr-[6px] text-white/75">{icon}</span>
-        <span className="flex-1 text-left">{title}</span>
-        {actions && <span className="opacity-0 group-hover:opacity-100 mr-2 flex items-center" onClick={(e) => e.stopPropagation()}>{actions}</span>}
-        {count !== undefined && <span className="font-normal text-fg">{count}</span>}
-      </div>
+        {title}
+      </button>
+      {actions && <span className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 mr-2 flex items-center">{actions}</span>}
+      {count !== undefined && <span className="font-normal text-fg">{count}</span>}
+    </div>
+  );
+  return (
+    <div>
+      {menu ? <CtxMenu items={menu}>{header}</CtxMenu> : header}
       {open && <div className="pb-1">{children}</div>}
     </div>
   );
+}
+
+/** "Hide all <what>" / "Show all <what>" for a section's refs, like the original (the checked-out branch stays). */
+function hideAllMenu(repo: RepoView | undefined, refs: GitRef[], what: string): () => MenuEntry[] {
+  return () => {
+    if (!repo || refs.length === 0) return [];
+    const hidden = useStore.getState().settings.hidden[repo.path] ?? [];
+    const hideable = refs.filter((r) => !(r.kind === "Local" && r.name === repo.head_branch)).map((r) => r.full);
+    const fulls = refs.map((r) => r.full);
+    return [
+      { label: `Hide all ${what}`, disabled: hideable.every((f) => hidden.includes(f)), onSelect: () => setHiddenMany(repo.path, hideable, true) },
+      { label: `Show all ${what}`, disabled: !fulls.some((f) => hidden.includes(f)), onSelect: () => setHiddenMany(repo.path, fulls, false) },
+    ];
+  };
 }
 
 function Row({
@@ -368,6 +396,7 @@ function Row({
   onDoubleClick,
   className,
   title,
+  action,
 }: {
   children: ReactNode;
   indent: number;
@@ -375,16 +404,28 @@ function Row({
   onDoubleClick?: () => void;
   className?: string;
   title?: string;
+  action?: ReactNode;
 }) {
   return (
     <div
       title={title}
-      onClick={onClick}
-      onDoubleClick={onDoubleClick}
       className={cn("group flex items-center gap-[7px] h-[24px] pr-3 text-[13px] text-fg hover:bg-hoverrow cursor-default", className)}
       style={{ paddingLeft: 12 + indent * 16 }}
     >
-      {children}
+      {onClick || onDoubleClick ? (
+        <button
+          type="button"
+          onClick={(e) => {
+            if (onClick) onClick();
+            else if (e.detail === 0) onDoubleClick?.();
+          }}
+          onDoubleClick={onDoubleClick}
+          className="flex flex-1 min-w-0 self-stretch items-center gap-[7px] text-left cursor-default"
+        >
+          {children}
+        </button>
+      ) : children}
+      {action}
     </div>
   );
 }

@@ -38,7 +38,7 @@ export function Avatar({ name, email, size = 22 }: { name: string; email: string
   useEffect(() => {
     let live = true;
     setSrc(null);
-    if (!initialsOnly && email && !missing.has(email)) gravatar(email, size).then((u) => live && setSrc(u));
+    if (!initialsOnly && email && !missing.has(email)) gravatar(email, size).then((u) => live && setSrc(u), () => undefined);
     return () => {
       live = false;
     };

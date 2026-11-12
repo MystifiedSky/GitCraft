@@ -5,6 +5,7 @@ import {
   ChevronRight,
   Download,
   GitBranch,
+  LoaderCircle,
   Redo2,
   Search,
   SquareTerminal,
@@ -20,6 +21,7 @@ import { act, openRepoPath, promptBranch } from "@/lib/repo";
 import { DropMenu, type MenuEntry } from "./ui/menu";
 import { addSubmodule, addWorktree, initGitflow, openCleanup } from "@/lib/manage";
 import { cn, MOD } from "@/lib/utils";
+import { SPIN_TURN_MS, useSpinning } from "@/lib/spin";
 
 const PULL_LABELS: Record<string, string> = {
   fetch: "Fetch All",
@@ -38,6 +40,10 @@ export function Toolbar({ repo, tabId }: { repo: RepoView | undefined; tabId: st
   // Commits to pull / push for the checked-out branch (shown as small counts like the original).
   const head = repo?.refs.find((r) => r.kind === "Local" && r.name === repo.head_branch);
   const hasChanges = !!repo && repo.status.unstaged.length + repo.status.staged.length > 0;
+  const pulling = useSpinning(path, "pull");
+  const pushing = useSpinning(path, "push");
+  const stashing = useSpinning(path, "stash");
+  const popping = useSpinning(path, "pop");
 
   const repoMenu: MenuEntry[] = [
     { heading: "Open Repositories" },
@@ -132,6 +138,7 @@ export function Toolbar({ repo, tabId }: { repo: RepoView | undefined; tabId: st
           disabled={!repo || (detached && s.settings.pullMode !== "fetch")}
           onClick={() => path && act(path, { type: "pull", mode: s.settings.pullMode })}
           badge={head?.behind}
+          spinning={pulling}
         >
           <ArrowDownToLine size={19} />
         </TB>
@@ -139,22 +146,23 @@ export function Toolbar({ repo, tabId }: { repo: RepoView | undefined; tabId: st
           items={pullMenu}
           trigger={
             // styles.css .toolbar-pull-button button:nth-child(2){margin-left:0;width:14px} (+2 px right margin)
-            <button className="w-[14px] mr-[2px] flex items-start pt-[13px] justify-center hover:bg-white/5 outline-none" title="Pull options">
+            // While pulling the original disables the options too (dropdownDisabled: isPulling || ...).
+            <button disabled={pulling} className="w-[14px] mr-[2px] flex items-start pt-[13px] justify-center hover:bg-white/5 disabled:opacity-35 outline-none" title="Pull options">
               <ChevronDown size={13} />
             </button>
           }
         />
       </div>
-      <TB label="Push" labels={labels} title={detached ? "Push is not available when in a detached HEAD state" : "Push"} disabled={!repo || detached} onClick={() => path && act(path, { type: "push", force: false })} badge={head?.ahead}>
+      <TB label="Push" labels={labels} title={detached ? "Push is not available when in a detached HEAD state" : "Push"} disabled={!repo || detached} onClick={() => path && act(path, { type: "push", force: false })} badge={head?.ahead} spinning={pushing}>
         <ArrowUpFromLine size={19} />
       </TB>
       <TB label="Branch" labels={labels} title={`Create branch (${MOD}+B)`} disabled={!repo} onClick={() => path && promptBranch(path, null)}>
         <GitBranch size={19} />
       </TB>
-      <TB label="Stash" labels={labels} title="Stash changes" disabled={!hasChanges} onClick={() => path && act(path, { type: "stash", message: "" })}>
+      <TB label="Stash" labels={labels} title="Stash changes" disabled={!hasChanges && !stashing} spinning={stashing} onClick={() => path && act(path, { type: "stash", message: "" })}>
         <Download size={19} />
       </TB>
-      <TB label="Pop" labels={labels} title="Pop the latest stash" disabled={!repo?.stashes.length} onClick={() => path && act(path, { type: "stashPop", index: 0 })}>
+      <TB label="Pop" labels={labels} title="Pop the latest stash" disabled={!repo?.stashes.length && !popping} spinning={popping} onClick={() => path && act(path, { type: "stashPop", index: 0 })}>
         <Upload size={19} />
       </TB>
       <div className="w-px h-[34px] bg-white/20 mx-1" />
@@ -197,6 +205,7 @@ function TB({
   disabled,
   className,
   badge,
+  spinning,
 }: {
   children: ReactNode;
   label: string;
@@ -206,17 +215,22 @@ function TB({
   disabled?: boolean;
   className?: string;
   badge?: number;
+  /** The button's action is running: a spinning circle replaces the icon (like the original's circle-notch). */
+  spinning?: boolean;
 }) {
   return (
     <button
       title={title}
-      onClick={onClick}
+      // While it spins, another press does nothing (the original locks Pull the same way).
+      onClick={spinning ? undefined : onClick}
       disabled={disabled}
-      className={cn("flex flex-col items-center justify-center w-[52px] h-full hover:bg-white/5 disabled:opacity-35 outline-none", className)}
+      aria-busy={spinning || undefined}
+      className={cn("flex flex-col items-center justify-center w-[52px] h-full hover:bg-white/5 disabled:opacity-35 outline-none", spinning && "cursor-default", className)}
     >
-      {labels && <span className="text-[11px] text-white/75 leading-none mb-[5px]">{label}</span>}
+      {/* The original shows the label while spinning even when toolbar labels are off: getLabel(showLabels || spinAction). */}
+      {(labels || spinning) && <span className="text-[11px] text-white/75 leading-none mb-[5px]">{label}</span>}
       <span className="relative">
-        {children}
+        {spinning ? <LoaderCircle size={19} style={{ animation: `spin ${SPIN_TURN_MS}ms linear infinite` }} /> : children}
         {!!badge && badge > 0 && (
           <span className="absolute -top-[5px] -right-[11px] min-w-[15px] h-[14px] px-[3px] rounded-full bg-accent text-white text-[9.5px] font-bold leading-[14px] text-center">
             {badge}

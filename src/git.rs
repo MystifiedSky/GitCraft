@@ -239,6 +239,43 @@ pub fn smart_refs(dir: &Path) -> Vec<String> {
     v
 }
 
+/// Refs under refs/heads, refs/remotes and refs/tags that lead to a commit: `for-each-ref` skips the ones it can't
+/// read (missing or invalid), and a tag of a tree or blob is left out by its peeled type, so the list holds only what
+/// the original's pattern walk keeps (see load_view).
+pub fn walkable_refs(dir: &Path) -> Vec<String> {
+    use std::io::Write;
+    // Names only: asking for object types makes for-each-ref stop at a ref whose object is missing.
+    let names: Vec<String> = run(dir, &["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes", "refs/tags"])
+        .stdout
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if names.is_empty() {
+        return names;
+    }
+    // One answer per ref: "<sha>" when it peels to a commit, "<input> missing" when it doesn't (or is broken).
+    let Ok(mut child) = git_cmd(dir)
+        .args(["cat-file", "--batch-check=%(objectname)"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return Vec::new();
+    };
+    let input: String = names.iter().map(|n| format!("{n}^{{commit}}\n")).collect();
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(input.as_bytes());
+    }
+    let Ok(out) = child.wait_with_output() else { return Vec::new() };
+    let answers = String::from_utf8_lossy(&out.stdout).into_owned();
+    names.into_iter().zip(answers.lines()).filter(|(_, a)| !a.ends_with(" missing") && !a.trim().is_empty()).map(|(n, _)| n).collect()
+}
+
+/// Leaves the remotes' HEAD pointers (origin/HEAD...) out of `git log --remotes`.
+pub const REMOTE_HEAD_EXCLUDE: &str = "--exclude=*/HEAD";
+
 /// Arguments for `git log` that select the commits the graph should show.
 pub fn log_revs(view: &RefView) -> Vec<String> {
     if !view.solo.is_empty() {
@@ -251,6 +288,12 @@ pub fn log_revs(view: &RefView) -> Vec<String> {
             if let Some(short) = h.strip_prefix(prefix) {
                 out.push(format!("--exclude={short}"));
             }
+        }
+        // A remote's HEAD only points at one of its branches (already listed, and never shown as a label). When it
+        // points nowhere (an empty or stale refs/remotes/origin/HEAD), `git log --remotes` stops with
+        // "fatal: bad object origin/HEAD" and the graph came up empty, so leave it out.
+        if flag == "--remotes" {
+            out.push(REMOTE_HEAD_EXCLUDE.to_string());
         }
         out.push(flag.to_string());
     }
@@ -336,6 +379,33 @@ pub fn load_view(dir: &Path, max_commits: usize, view: &RefView) -> RepoData {
         d.head_branch = Some(head.stdout.trim().to_string());
     }
     d.head_sha = head_sha.stdout.trim().to_string();
+
+    // Another broken ref (a branch file that is empty or names a missing commit) still stops the whole log. Then read
+    // the history again from only the refs `for-each-ref` could read (it skips broken ones with a warning), so one
+    // damaged ref never hides the rest of the history. Hidden refs stay hidden.
+    // The original's rule (nodegit git_revwalk_push_glob -> FUN_1802cf840 / FUN_1802cf550): a ref reached through a
+    // pattern is skipped when it is missing, has an invalid name, or doesn't lead to a commit (GIT_ENOTFOUND -3,
+    // GIT_EINVALIDSPEC -12, GIT_EPEEL -19); every other ref is walked.
+    let log = if log.ok || !view.solo.is_empty() {
+        log
+    } else {
+        let mut start: Vec<String> = walkable_refs(dir).into_iter().filter(|r| !view.hidden.contains(r)).collect();
+        // Windows limits a command line to 32767 characters; with that many refs keep the branches and HEAD.
+        if start.iter().map(|s| s.len() + 3).sum::<usize>() > 24_000 {
+            start.retain(|r| r.starts_with("refs/heads/"));
+        }
+        if head_sha.ok {
+            start.push("HEAD".into());
+        }
+        if start.is_empty() {
+            log
+        } else {
+            let mut args: Vec<&str> = vec!["log"];
+            args.extend(start.iter().map(|s| s.as_str()));
+            args.extend(["--date-order", n.as_str(), "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%s%x1f%b%x1e", "--"]);
+            run(dir, &args)
+        }
+    };
 
     for rec in log.stdout.split('\x1e') {
         let rec = rec.trim_start_matches(['\n', '\r']);

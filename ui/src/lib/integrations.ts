@@ -222,5 +222,17 @@ export function formatDate(d: Date, fmt: string, locale = "en-US"): string {
     A: () => (d.getHours() < 12 ? "AM" : "PM"),
     a: () => (d.getHours() < 12 ? "am" : "pm"),
   };
-  return fmt.replace(/\[([^\]]*)\]|YYYY|YY|MMMM|MMM|MM|M|dddd|ddd|DD|D|HH|H|hh|h|mm|ss|A|a/g, (m, lit) => (lit !== undefined ? lit : tokens[m]()));
+  const formatTokens = (part: string) => part.replace(/YYYY|YY|MMMM|MMM|MM|M|dddd|ddd|DD|D|HH|H|hh|h|mm|ss|A|a/g, (m) => tokens[m]());
+  let result = "";
+  let start = 0;
+  // Bracketed text is literal. Stop looking for literals once an opening bracket has no closer.
+  for (;;) {
+    const open = fmt.indexOf("[", start);
+    if (open === -1) break;
+    const close = fmt.indexOf("]", open + 1);
+    if (close === -1) break;
+    result += formatTokens(fmt.slice(start, open)) + fmt.slice(open + 1, close);
+    start = close + 1;
+  }
+  return result + formatTokens(fmt.slice(start));
 }

@@ -125,7 +125,7 @@ export function squashCommits(repo: RepoView, shas: string[]) {
   const old = oldest(repo, shas);
   const target = line[line.indexOf(old) + 1];
   if (!target) return useStore.getState().toast(false, "There is no older commit to squash into.");
-  quick(repo.path, baseFor(repo, target), (items) => items.map((i) => (shas.includes(i.sha) ? { ...i, action: "squash" } : i)));
+  void quick(repo.path, baseFor(repo, target), (items) => items.map((i) => (shas.includes(i.sha) ? { ...i, action: "squash" } : i)));
 }
 
 /** Move a commit one place newer (up) or older (down). */
@@ -135,7 +135,7 @@ export function moveCommit(repo: RepoView, sha: string, dir: "up" | "down") {
   const other = dir === "up" ? line[i - 1] : line[i + 1];
   if (!other) return;
   const lower = dir === "up" ? sha : other;
-  quick(repo.path, baseFor(repo, lower), (items) => {
+  void quick(repo.path, baseFor(repo, lower), (items) => {
     const a = items.findIndex((x) => x.sha === sha);
     const b = items.findIndex((x) => x.sha === other);
     const out = [...items];

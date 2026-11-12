@@ -288,7 +288,7 @@ const MONO_FONTS = ["Cascadia Code", "Cascadia Mono", "Consolas", "Courier New",
 const OTHER_FONTS = ["Arial", "Calibri", "Open Sans", "Segoe UI", "Tahoma", "Verdana"];
 
 function FontSelect({ value, onChange, monoOnly }: { value: string; onChange: (v: string) => void; monoOnly: boolean }) {
-  const fonts = monoOnly ? MONO_FONTS : [...MONO_FONTS, ...OTHER_FONTS].sort();
+  const fonts = (monoOnly ? [...MONO_FONTS] : [...MONO_FONTS, ...OTHER_FONTS]).sort((a, b) => a.localeCompare(b));
   return <Select value={value} onChange={onChange} options={[["", "Default"], ...fonts.map((f) => [f, f] as [string, string])]} />;
 }
 
@@ -522,7 +522,7 @@ export function CommitSection() {
 export function ExperimentalSection() {
   const { set, put } = useSet();
   const v = useQuery({ queryKey: ["toolVersions", set.gitPath], queryFn: () => tools.versions("gpg") });
-  const ver = /(\d+\.\d+\.\d+)/.exec(v.data?.git ?? "")?.[1];
+  const ver = /(?:^|\D)(\d+\.\d+\.\d+)/.exec(v.data?.git ?? "")?.[1];
   const old = ver && ver.localeCompare("2.40.0", undefined, { numeric: true }) < 0;
   return (
     <>

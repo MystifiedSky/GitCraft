@@ -33,7 +33,7 @@ export function themeBg() {
 
 /** Mix a #rrggbb colour with the app background. */
 export function mix(hex: string, amount: number, bg = themeBg()) {
-  const p = (h: string, i: number) => parseInt(h.slice(i, i + 2), 16);
+  const p = (h: string, i: number) => Number.parseInt(h.slice(i, i + 2), 16);
   const r = Math.round(p(hex, 1) * amount + p(bg, 1) * (1 - amount));
   const g = Math.round(p(hex, 3) * amount + p(bg, 3) * (1 - amount));
   const b = Math.round(p(hex, 5) * amount + p(bg, 5) * (1 - amount));

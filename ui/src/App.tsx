@@ -6,9 +6,10 @@ import { listen } from "@tauri-apps/api/event";
 import { ChevronRight } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
-import { DEFAULT_METRICS, DEFAULT_SETTINGS, newId, tabUi, useStore, usePanelStore, type Profile, type Settings, type Tab } from "@/lib/store";
+import { DEFAULT_METRICS, DEFAULT_SETTINGS, newId, restoreTabs, tabUi, useStore, usePanelStore, type Profile, type Settings, type Tab } from "@/lib/store";
 import { act, openRepoPath, promptBranch, queryClient, refresh, repoData, useRepo } from "@/lib/repo";
 import { resetZoom, setZoom, stepZoom } from "@/lib/zoom";
+import { withSpin } from "@/lib/spin";
 import { MenuBar, TitleBar } from "./components/TitleBar";
 import { CommandPalette } from "./components/CommandPalette";
 import { dispatchKey } from "@/lib/commands";
@@ -48,7 +49,7 @@ export default function App() {
       <TabsBar />
       {s.tabs.filter((tab) => tab.kind === "repo").map((tab) => (
         <div key={tab.id} data-active-repository={tab.id === active.id ? "true" : undefined} className={tab.id === active.id ? "flex-1 flex flex-col min-h-0" : "hidden"}>
-          <RepoScreen tab={tab} active={tab.id === active.id} />
+          <LazyRepoScreen tab={tab} active={tab.id === active.id} />
         </div>
       ))}
       {active.kind === "launchpad" ? <LaunchpadScreen /> : active.kind === "start" ? <StartScreen /> : null}
@@ -58,6 +59,15 @@ export default function App() {
       <Toasts />
     </div>
   );
+}
+
+/** A repository tab reads its repository the first time it is shown, then stays loaded (and watched) like before. */
+function LazyRepoScreen({ tab, active }: { tab: Tab; active: boolean }) {
+  const [shown, setShown] = useState(active);
+  useEffect(() => {
+    if (active) setShown(true);
+  }, [active]);
+  return shown || active ? <RepoScreen tab={tab} active={active} /> : null;
 }
 
 function RepoScreen({ tab, active }: { tab: Tab; active: boolean }) {
@@ -206,6 +216,12 @@ function useStartup() {
           else if (opts.shot_view === "prefs") st.setDialog({ kind: "prefs" });
           else if (opts.shot_view === "integrations") st.setDialog({ kind: "prefs", section: "integrations" });
           else if (opts.shot_view === "light" || opts.shot_view === "dark-hc") st.setSettings({ theme: opts.shot_view });
+          else if (opts.shot_view === "spinner") {
+            // Hold Pull and Push mid-action so the picture shows their busy circles.
+            const hold = () => new Promise<void>((r) => setTimeout(r, 60000));
+            void withSpin(repo.path, "pull", hold);
+            void withSpin(repo.path, "push", hold);
+          }
           else if (opts.shot_view === "terminal") {
             st.setSettings({ showTerminal: true });
             await new Promise((r) => setTimeout(r, 2500));
@@ -235,13 +251,13 @@ function useStartup() {
       if (saved?.settings) useStore.setState({ settings: { ...DEFAULT_SETTINGS, ...saved.settings } });
       if (saved?.profiles?.length) useStore.setState({ profiles: saved.profiles, activeProfile: saved.activeProfile ?? saved.profiles[0].id });
       if (saved?.settings?.zoom && saved.settings.zoom !== 1) setZoom(saved.settings.zoom);
+      // General > Remember tabs. Like the original, every saved tab comes back at once, in its order, with the last
+      // active one showing; a tab reads its repository the first time it is shown (LazyRepoScreen), so start-up
+      // doesn't open each repository in turn and flash through them.
+      const savedPaths = useStore.getState().settings.rememberTabs ? [...new Set(saved?.tabs ?? [])] : [];
+      if (savedPaths.length) restoreTabs(savedPaths, saved?.active ?? 0);
       startBackendSync();
       await syncGitCredentials();
-      // General > Remember tabs.
-      if (useStore.getState().settings.rememberTabs) for (const p of saved?.tabs ?? []) await openRepoPath(p);
-      const tabs = useStore.getState().tabs;
-      const repoTabs = tabs.filter((t) => t.kind === "repo");
-      if (saved?.active !== undefined && repoTabs[saved.active]) useStore.getState().setActive(repoTabs[saved.active].id);
       // Persist settings and open tabs whenever they change.
       let timer: number | undefined;
       useStore.subscribe((st, prev) => {
@@ -258,7 +274,7 @@ function useStartup() {
           });
         }, 400);
       });
-    })();
+    })().catch((error) => useStore.getState().toast(false, "GitCraft could not finish starting: " + String(error)));
   }, []);
 }
 
@@ -291,7 +307,7 @@ function useAutoFetch() {
         const r = await api.run(p, { type: "autoFetch", prune }).catch(() => ({ ok: false, message: "Autofetch failed" }));
         if (r.ok) {
           warned.current.delete(p);
-          refresh(p);
+          await refresh(p);
         } else if (!warned.current.has(p)) {
           warned.current.add(p);
           useStore.getState().toast(false, r.message);
@@ -352,6 +368,9 @@ function useShortcuts() {
         f();
       };
 
+      if (e.key === "Escape" && (st.dialog?.kind === "prefs" || st.dialog?.kind === "accounts"))
+        return run(() => st.setDialog(null));
+
       // Every Ctrl / Alt / F-key shortcut comes from the command list (and the person's own keys).
       if (dispatchKey(e, typing)) return;
       if (typing || mod || e.altKey || st.palette) return;
@@ -373,12 +392,16 @@ function useShortcuts() {
         if (tabUi(tab.id).diff || tabUi(tab.id).history || tabUi(tab.id).rebase || tabUi(tab.id).conflict) return; // keys belong to the open view
         const down = e.key === "ArrowDown" || k === "j";
         const up = e.key === "ArrowUp" || k === "k";
-        if (down || up) {
+        // The original's "Select First Item" / "Select Last Item" (Home / End; End goes to the last loaded commit).
+        const first = e.key === "Home";
+        const last = e.key === "End";
+        if (down || up || first || last) {
           const wip = repo.status.unstaged.length + repo.status.staged.length > 0;
           const u = tabUi(tab.id);
           const ids: (string | null)[] = [...(wip ? [null] : []), ...repo.commits.map((c) => c.sha)];
+          if (ids.length === 0) return;
           const cur = u.selection.type === "wip" ? (wip ? 0 : -1) : ids.indexOf(u.selection.sha);
-          const next = Math.min(ids.length - 1, Math.max(0, cur + (down ? 1 : -1)));
+          const next = first ? 0 : last ? ids.length - 1 : Math.min(ids.length - 1, Math.max(0, cur + (down ? 1 : -1)));
           const id = ids[next];
           return run(() => st.setUi(tab.id, { selection: id === null || id === undefined ? { type: "wip" } : { type: "commit", sha: id }, diff: null, multi: [], compareWorkdir: null }));
         }

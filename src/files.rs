@@ -593,3 +593,59 @@ world
         assert!(!r.contains("-b"));
     }
 }
+
+/// A file inside the repository's working folder. Refuses absolute paths and `..`, so the file actions below never
+/// reach outside the repository.
+pub fn repo_file(dir: &Path, file: &str) -> Result<std::path::PathBuf, String> {
+    let rel = Path::new(file);
+    if file.is_empty() || rel.is_absolute() || rel.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+        return Err(format!("\"{file}\" is not a file in this repository"));
+    }
+    Ok(dir.join(rel))
+}
+
+/// Largest file "Copy file contents" puts on the clipboard.
+pub const COPY_CONTENTS_MAX: usize = 10 * 1024 * 1024;
+
+/// The text of a file, from the working folder or (with `rev`) as it was in a commit, for "Copy file contents".
+/// Binary files are refused by the same rule as the diff view (is_binary).
+pub fn file_text(dir: &Path, file: &str, rev: Option<&str>) -> Result<String, String> {
+    let path = repo_file(dir, file)?;
+    let bytes = match rev {
+        Some(rev) if !rev.is_empty() => {
+            let spec = format!("{rev}:{}", file.replace('\\', "/"));
+            let o = git::git_cmd(dir).args(["show", &spec]).output().map_err(|e| e.to_string())?;
+            if !o.status.success() {
+                return Err(String::from_utf8_lossy(&o.stderr).trim().to_string());
+            }
+            o.stdout
+        }
+        _ => std::fs::read(&path).map_err(|e| e.to_string())?,
+    };
+    if bytes.len() > COPY_CONTENTS_MAX {
+        return Err("This file is too large to copy.".into());
+    }
+    if is_binary(&bytes) {
+        return Err("This is a binary file, so it can't be copied as text.".into());
+    }
+    Ok(match crate::prefs::encoding_for(dir) {
+        Some(e) => crate::prefs::decode(&bytes, e),
+        None => String::from_utf8_lossy(&bytes).into_owned(),
+    })
+}
+
+#[cfg(test)]
+mod file_action_tests {
+    use super::*;
+
+    #[test]
+    fn repo_file_stays_inside_the_repository() {
+        let dir = Path::new("C:/repo");
+        assert!(repo_file(dir, "src/main.rs").is_ok());
+        assert!(repo_file(dir, "../secret.txt").is_err());
+        assert!(repo_file(dir, "src/../../x").is_err());
+        assert!(repo_file(dir, "").is_err());
+        assert!(repo_file(dir, "C:/Windows/win.ini").is_err());
+        assert!(repo_file(dir, "/etc/passwd").is_err());
+    }
+}

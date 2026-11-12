@@ -227,8 +227,8 @@ export function SparseSection({ path }: { path: string }) {
 export function SubmodulesSection({ path }: { path: string }) {
   const q = useQuery({ queryKey: ["submodulesList", path], queryFn: () => api.submodulesList(path) });
   const after = () => {
-    q.refetch();
-    refresh(path);
+    void q.refetch();
+    void refresh(path);
   };
   const label = { "in-sync": "in sync", "out-of-sync": "out of sync", uninitialized: "not initialized", conflict: "conflict" } as const;
   return (

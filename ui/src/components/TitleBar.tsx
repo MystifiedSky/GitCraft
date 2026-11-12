@@ -136,6 +136,6 @@ export function MenuBar() {
 }
 
 /** "Open Repo in {0}" (menuStrings OpenRepoInNamedExternalEditor). */
-function editorName(tool: string) {
+export function editorName(tool: string) {
   return EDITORS.find(([id]) => id === tool)?.[1] ?? "External Editor";
 }

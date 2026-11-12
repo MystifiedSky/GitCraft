@@ -5,9 +5,7 @@ export function globMatch(pattern: string, name: string) {
   const re = pattern
     .trim()
     .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*\*/g, "\u0000")
-    .replace(/\*/g, "[^/]*")
-    .replace(/\u0000/g, ".*");
+    .replace(/\*\*?/g, (wildcard) => (wildcard === "**" ? ".*" : "[^/]*"));
   return new RegExp(`^${re}$`).test(name);
 }
 

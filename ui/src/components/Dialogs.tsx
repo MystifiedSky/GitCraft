@@ -2,6 +2,7 @@ import { SERVICES, integrations } from "@/lib/integrations";
 import { PreferencesScreen } from "./prefs/Preferences";
 import { RepoManagementDialog } from "./RepoManagement";
 import { useQuery } from "@tanstack/react-query";
+import { X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
@@ -31,9 +32,8 @@ export function Dialogs() {
           title={d.title}
           footer={
             <>
-              <Button onClick={close}>Cancel</Button>
+              <Button data-dialog-initial-focus onClick={close}>Cancel</Button>
               <Button
-                autoFocus
                 variant={d.danger ? "danger" : "primary"}
                 onClick={() => {
                   close();
@@ -167,7 +167,7 @@ function PromptDialog({
       }
     >
       <Field label={label}>
-        <input autoFocus className={inputClass} value={v} onChange={(e) => setV(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
+        <input data-dialog-initial-focus className={inputClass} value={v} onChange={(e) => setV(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
       </Field>
       {extraLabel && (
         <Field label={extraLabel}>
@@ -206,12 +206,12 @@ function OpenDialog({ onClose }: { onClose: () => void }) {
   };
   useEffect(() => {
     // Go straight to the system folder picker, like the original's Open Repo.
-    api.pickFolder("Open a Git repository").then((r) => {
+    api.pickFolder("Open a Git repository").then(async (r) => {
       if (r) {
         onClose();
-        openRepoPath(r);
+        await openRepoPath(r);
       }
-    });
+    }).catch((error) => useStore.getState().toast(false, String(error)));
   }, []);
   return (
     <Dialog
@@ -275,7 +275,7 @@ function CloneDialog({ onClose }: { onClose: () => void }) {
     >
       <HostedRepoPicker onPick={setUrl} />
       <Field label="URL">
-        <input autoFocus className={inputClass} value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://github.com/owner/project.git" />
+        <input data-dialog-initial-focus className={inputClass} value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://github.com/owner/project.git" />
       </Field>
       <FolderField label="Where to clone to" value={dir} onChange={setDir} title="Choose where to clone to" />
       {url && dir && <div className="text-[12px] text-fg3 -mt-1 mb-2">Full path: {dir.replace(/[\\/]$/, "")}\{url.replace(/\/$/, "").split(/[/\\:]/).pop()?.replace(/\.git$/, "")}</div>}
@@ -371,7 +371,7 @@ function InitDialog({ onClose }: { onClose: () => void }) {
       }
     >
       <Field label="Name">
-        <input autoFocus className={inputClass} value={name} onChange={(e) => setName(e.target.value)} placeholder="my-project" />
+        <input data-dialog-initial-focus className={inputClass} value={name} onChange={(e) => setName(e.target.value)} placeholder="my-project" />
       </Field>
       <FolderField label="Initialize in" value={dir} onChange={setDir} title="Choose a parent folder" />
       <Field label="Default branch name">
@@ -471,7 +471,7 @@ function ShortcutsDialog({ onClose }: { onClose: () => void }) {
   const usedBy = (keys: string, id: string) => COMMANDS.find((c) => c.id !== id && keys && keysOf(c).toUpperCase() === keys.toUpperCase());
   return (
     <Dialog open onClose={onClose} title="Keyboard Shortcuts" width={600}>
-      <input autoFocus className={cn(inputClass, "w-full mb-3")} placeholder={`Filter shortcuts (${MOD} + F)`} value={filter} onChange={(e) => setFilter(e.target.value)} />
+      <input data-dialog-initial-focus aria-label="Filter shortcuts" className={cn(inputClass, "w-full mb-3")} placeholder={`Filter shortcuts (${MOD} + F)`} value={filter} onChange={(e) => setFilter(e.target.value)} />
       {groups.map((g) => {
         const list = COMMANDS.filter((c) => c.group === g && (!f || c.label.toLowerCase().includes(f) || keysOf(c).toLowerCase().includes(f)));
         if (!list.length) return null;
@@ -709,7 +709,7 @@ function FormDialog({
           <Field key={f.key} label={f.label}>
             <div className="flex gap-2">
               <input
-                autoFocus={i === 0}
+                data-dialog-initial-focus={i === 0 ? "" : undefined}
                 className={cn(inputClass, "flex-1")}
                 value={String(v[f.key] ?? "")}
                 placeholder={f.placeholder}
@@ -773,7 +773,7 @@ function CleanupDialog({ onClose }: { onClose: () => void }) {
             onClick={() => {
               onClose();
               const ups = picked.map((p) => (q.data ?? []).find((b) => b.name === p)?.upstream).filter((u): u is string => !!u && remotes.includes(u));
-              act(path, { type: "deleteBranches", names: picked, remotes: ups });
+              void act(path, { type: "deleteBranches", names: picked, remotes: ups });
             }}
           >
             Delete {picked.length} branch{picked.length === 1 ? "" : "es"}
@@ -855,7 +855,7 @@ function MessageDialog({ title, label, value, confirm, help, onSubmit, onClose }
     >
       <Field label={label}>
         <textarea
-          autoFocus
+          data-dialog-initial-focus
           value={v}
           onChange={(e) => setV(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && (e.ctrlKey || e.metaKey) && submit()}
@@ -887,7 +887,8 @@ function FileFinder({ onClose }: { onClose: () => void }) {
       {path && (
         <>
           <input
-            autoFocus
+            data-dialog-initial-focus
+            aria-label="Filter files"
             className={cn(inputClass, "w-full mb-2")}
             placeholder="Type part of a file name"
             value={text}
@@ -933,14 +934,37 @@ export function Toasts() {
       {toasts.map((t) => (
         <div
           key={t.id}
-          onClick={() => drop(t.id)}
           className={cn("pointer-events-auto rounded-md px-3 py-2 text-[12.5px] shadow-xl border bg-[var(--menu-bg)] whitespace-pre-wrap break-words max-h-[160px] overflow-auto", t.ok ? "border-good/60" : "border-bad/80")}
         >
-          <span className={t.ok ? "text-good" : "text-[#ef7a76]"}>{t.ok ? "✓ " : "✗ "}</span>
-          {t.text}
+          <div className="flex items-start gap-2">
+            <div className="flex-1 min-w-0" role={t.ok ? "status" : "alert"}>
+              <span aria-hidden="true" className={t.ok ? "text-good" : "text-[#ef7a76]"}>{t.ok ? "✓ " : "✗ "}</span>
+              {t.text}
+            </div>
+            <button type="button" className="shrink-0 text-fg2 hover:text-white" aria-label="Dismiss notification" onClick={() => drop(t.id)}>
+              <X size={14} />
+            </button>
+          </div>
+          {!t.ok && <CopyErrorButton text={t.text} />}
         </div>
       ))}
     </div>
+  );
+}
+
+/** The original's "Copy error message to clipboard" on an error notice. */
+function CopyErrorButton({ text }: { text: string }) {
+  const [done, setDone] = useState(false);
+  return (
+    <button
+      className="block mt-1 text-[11.5px] text-link hover:underline"
+      title="Copy error message to clipboard"
+      onClick={() => {
+        navigator.clipboard.writeText(text).then(() => setDone(true), () => undefined);
+      }}
+    >
+      {done ? "Copied" : "Copy error message"}
+    </button>
   );
 }
 
@@ -965,7 +989,7 @@ function SparseDialog({ onClose }: { onClose: () => void }) {
               variant="danger"
               onClick={() => {
                 onClose();
-                act(path, { type: "sparseDisable" });
+                void act(path, { type: "sparseDisable" });
               }}
             >
               Turn Off
@@ -976,7 +1000,7 @@ function SparseDialog({ onClose }: { onClose: () => void }) {
             variant="primary"
             onClick={() => {
               onClose();
-              act(path, { type: "sparseSet", patterns: value.split(/\r?\n/).map((x) => x.trim()).filter(Boolean) });
+              void act(path, { type: "sparseSet", patterns: value.split(/\r?\n/).map((x) => x.trim()).filter(Boolean) });
             }}
           >
             {q.data?.enabled ? "Update" : "Turn On"}
@@ -1176,7 +1200,7 @@ function WorkspacesDialog({ onClose }: { onClose: () => void }) {
             variant="primary"
             onClick={() => {
               onClose();
-              openWorkspace(w.id);
+              void openWorkspace(w.id);
             }}
           >
             Open all

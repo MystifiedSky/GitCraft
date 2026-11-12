@@ -3,7 +3,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Commit, GitRef, RepoView, Stats } from "@/lib/api";
 import { api } from "@/lib/api";
 import { DEFAULT_COLUMNS, useStore, useTabUi, type GraphColumns } from "@/lib/store";
-import { act, clearSolo, showAllRefs, toggleHidden } from "@/lib/repo";
+import { act, clearSolo, showAllRefs, toggleHidden, WIP_COMMIT_EVENT } from "@/lib/repo";
 import { branchMenu, commitMenu } from "@/lib/menus";
 import { CtxMenu, DropMenu, type MenuEntry } from "./ui/menu";
 import { Button } from "./ui/button";
@@ -36,6 +36,10 @@ export function GraphView({ repo, tabId }: Props) {
   const setUi = useStore((s) => s.setUi);
   const scrollRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const searchInput = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (ui.searchOpen) searchInput.current?.focus();
+  }, [ui.searchOpen]);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewH, setViewH] = useState(400);
   const [paneW, setPaneW] = useState(300);
@@ -340,15 +344,14 @@ export function GraphView({ repo, tabId }: Props) {
           key="wip"
           className={cn("absolute left-0 right-0 flex items-center", sel ? "bg-selrow" : "hover:bg-white/[0.03]")}
           style={{ top: d * ROW, height: ROW }}
-          onClick={() => select({ type: "wip" })}
         >
+          <button type="button" aria-label="Select working changes" aria-pressed={sel} className="absolute inset-0 focus-visible:outline focus-visible:-outline-offset-2 focus-visible:outline-accent" onClick={() => select({ type: "wip" })} />
           <div style={{ width: refW + graphW }} className="shrink-0" />
-          <div
-            className="flex-1 min-w-0 flex items-center gap-3 mr-[4px] rounded-[2px] border border-dashed border-white/30 bg-panel text-[13px] text-white/85"
-            style={{ height: m.row_inner, paddingLeft: m.summary_margin }}
-          >
-            <span className="italic whitespace-nowrap">// WIP</span>
-            <span className="flex items-center gap-2 text-[12px] font-semibold whitespace-nowrap overflow-hidden">
+          {/* The original's WorkDirMessageInput: a "// WIP" box to type the commit summary in, sized to its text,
+              with the change counts beside it (not inside it). */}
+          <div className="flex-1 min-w-0 flex items-center gap-[10px] mr-[4px] text-[13px]" style={{ height: m.row_inner, paddingLeft: m.summary_margin }}>
+            <WipInput path={repo.path} onFocus={() => select({ type: "wip" })} />
+            <span className="flex items-center gap-[10px] text-[13px] font-semibold whitespace-nowrap overflow-hidden shrink-0">
               {mod > 0 && <span className="text-[#de9b43]">✎ {mod}</span>}
               {add > 0 && <span className="text-good">+ {add}</span>}
               {del > 0 && <span className="text-[#ef7a76]">− {del}</span>}
@@ -479,7 +482,8 @@ export function GraphView({ repo, tabId }: Props) {
       {ui.searchOpen && (
         <div className="flex items-center gap-2 h-[34px] px-2 bg-panel border-b border-black/30 shrink-0">
           <input
-            autoFocus
+            ref={searchInput}
+            aria-label="Search commits"
             value={ui.search}
             onChange={(e) => setUi(tabId, { search: e.target.value })}
             onKeyDown={(e) => {
@@ -581,7 +585,6 @@ function CommitRow({
       <div
         className="absolute left-0 right-0 flex items-center"
         style={{ top, height: rowH, background: bg, opacity: dim ? m.min_alpha / 100 : undefined }}
-        onClick={(e) => onClick(c, index, e)}
         onMouseEnter={(e) => {
           onHoverRow(index);
           if (!bg) e.currentTarget.style.background = "rgba(77,136,255,0.10)";
@@ -591,6 +594,14 @@ function CommitRow({
           if (!bg) e.currentTarget.style.background = "";
         }}
       >
+        <button
+          type="button"
+          aria-label={c.summary}
+          aria-pressed={selected}
+          tabIndex={selected || index === 0 ? 0 : -1}
+          className="absolute inset-0 focus-visible:outline focus-visible:-outline-offset-2 focus-visible:outline-accent"
+          onClick={(e) => onClick(c, index, e)}
+        />
         {refW > 0 && (
           <div style={{ width: refW, paddingLeft: m.ref_margin_left, paddingRight: m.ref_margin_right }} className="shrink-0 h-full flex items-center min-w-0">
             {!first && ghost && (
@@ -604,16 +615,19 @@ function CommitRow({
             )}
             {first && (
               <CtxMenu items={() => branchMenu(repo, first)}>
-                <div
+                <button
+                  type="button"
+                  tabIndex={selected ? 0 : -1}
+                  onClick={(e) => onClick(c, index, e)}
                   onMouseEnter={() => onHoverRef(index)}
                   onMouseLeave={() => onHoverRef(null)}
                   onDoubleClick={(e) => {
                     e.stopPropagation();
-                    if (first.kind === "Local" && !isHead) act(repo.path, { type: "checkout", target: first.name });
-                    if (first.kind === "Remote") act(repo.path, { type: "checkoutRemote", remoteBranch: first.name });
+                    if (first.kind === "Local" && !isHead) void act(repo.path, { type: "checkout", target: first.name });
+                    if (first.kind === "Remote") void act(repo.path, { type: "checkoutRemote", remoteBranch: first.name });
                   }}
                   title={refs!.slice(0, m.ref_max).map((r) => r.name).join("\n")}
-                  className="flex items-center gap-[4px] px-[5px] rounded-[3px] min-w-0 max-w-full text-[12.5px] text-white"
+                  className="relative z-[1] flex items-center gap-[4px] px-[5px] rounded-[3px] min-w-0 max-w-full text-[12.5px] text-white"
                   style={{ background: mix(color, 0.45), height: m.row_inner }}
                 >
                   {isHead && <Check size={13} strokeWidth={3} className="shrink-0" />}
@@ -628,7 +642,7 @@ function CommitRow({
                       {first.behind > 0 && `↓${first.behind}`}
                     </span>
                   )}
-                </div>
+                </button>
               </CtxMenu>
             )}
           </div>
@@ -713,5 +727,64 @@ function StateBanner({ repo }: { repo: RepoView }) {
         {merging ? "Abort Merge" : "Abort Rebase"}
       </Button>
     </div>
+  );
+}
+
+/** Extra width beside the typed text: work-dir-input wrapper = text width + 35 px (render.bundle.js). */
+const WIP_INPUT_PAD = 35;
+/** gitkraken-components styles.css .work-dir-input{min-width:100px; max-width:calc(100% - 75px)}, input height 22px. */
+const WIP_INPUT_MIN = 100;
+const WIP_INPUT_HEIGHT = 22;
+
+/**
+ * The "// WIP" row's box: types the commit summary (the same text as the Commit panel's summary), grows with the text
+ * like the original, Ctrl+Enter commits (the app's shortcut), and other keys stay in the box.
+ */
+function WipInput({ path, onFocus }: { path: string; onFocus: () => void }) {
+  const summary = useStore((s) => s.drafts[path]?.summary ?? "");
+  const setDraft = useStore((s) => s.setDraft);
+  const measure = useRef<HTMLSpanElement>(null);
+  const box = useRef<HTMLSpanElement>(null);
+  const [width, setWidth] = useState(WIP_INPUT_MIN);
+  // max-width: the row's message area minus metrics.wip_stats_space (src/metrics.rs WIP_BOX_STATS_SPACE), kept up to date as panels are resized.
+  const [maxWidth, setMaxWidth] = useState<number | undefined>(undefined);
+  useLayoutEffect(() => {
+    setWidth(Math.max(WIP_INPUT_MIN, (measure.current?.offsetWidth ?? 0) + WIP_INPUT_PAD));
+  }, [summary]);
+  useLayoutEffect(() => {
+    const area = box.current?.parentElement;
+    if (!area) return;
+    const fit = () => setMaxWidth(Math.max(WIP_INPUT_MIN, area.clientWidth - useStore.getState().metrics.wip_stats_space));
+    fit();
+    const ro = new ResizeObserver(fit);
+    ro.observe(area);
+    return () => ro.disconnect();
+  }, []);
+  return (
+    <span ref={box} className="relative z-[1] inline-block shrink min-w-0" style={{ width, minWidth: WIP_INPUT_MIN, maxWidth }}>
+      <input
+        value={summary}
+        aria-label="Commit summary for working changes"
+        placeholder="// WIP"
+        spellCheck={false}
+        onFocus={onFocus}
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
+        onChange={(e) => setDraft(path, { summary: e.target.value })}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") (e.currentTarget.blur(), e.stopPropagation());
+          else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+            e.preventDefault();
+            e.stopPropagation();
+            window.dispatchEvent(new CustomEvent(WIP_COMMIT_EVENT, { detail: { path, all: e.shiftKey } }));
+          } else e.stopPropagation();
+        }}
+        className="block w-[calc(100%-3px)] ml-[3px] px-[6px] rounded-[3px] bg-field border border-line2 text-[12.5px] tracking-[0.02em] text-fg placeholder:text-fg3 outline-none focus:border-accent focus:shadow-[0_0_0_1px_var(--color-accent)]"
+        style={{ height: WIP_INPUT_HEIGHT }}
+      />
+      <span ref={measure} aria-hidden className="absolute invisible whitespace-pre text-[12.5px] tracking-[0.02em] px-[6px]">
+        {summary}
+      </span>
+    </span>
   );
 }

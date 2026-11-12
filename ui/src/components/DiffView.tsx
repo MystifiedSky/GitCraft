@@ -301,7 +301,9 @@ function HunkView({
   const staged = target.source.kind === "Staged";
 
   const run = (op: PatchOp, hunk: number, picked: number[] | null) => {
-    const go = () => act(repo.path, { type: "patch", file: target.file, untracked: target.untracked, op, hunk, lines: picked }).then(() => setSel(null));
+    const go = () => {
+      void act(repo.path, { type: "patch", file: target.file, untracked: target.untracked, op, hunk, lines: picked }).then(() => setSel(null));
+    };
     if (op === "discard")
       confirmThen(
         picked ? `Discard ${picked.length} line${picked.length === 1 ? "" : "s"}?` : "Discard this hunk?",
@@ -359,9 +361,10 @@ function HunkView({
                   size="sm"
                   className="h-[20px] text-[11px]"
                   title="Apply the inverse of this hunk to your working directory"
-                  onClick={() => {
+                  onClick={async () => {
                     const sha = (target.source as { kind: "Commit"; sha: string }).sha;
-                    act(repo.path, { type: "revertHunk", sha, parent: target.parent, file: target.file, hunk: hi, lines: n ? picked : null }).then(() => setSel(null));
+                    await act(repo.path, { type: "revertHunk", sha, parent: target.parent, file: target.file, hunk: hi, lines: n ? picked : null });
+                    setSel(null);
                   }}
                 >
                   {n ? `Revert ${n} Line${n === 1 ? "" : "s"}` : "Revert Hunk"}

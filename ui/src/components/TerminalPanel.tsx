@@ -108,11 +108,12 @@ export function TerminalPanel({ cwd, visible }: { cwd: string; visible: boolean 
         {tabs.map((t) => (
           <div
             key={t.key}
-            onClick={() => setActive(t.key)}
-            className={cn("group flex items-center gap-1 h-full pl-2.5 pr-1 border-r border-black/30 cursor-default", active === t.key ? "bg-black text-white" : "text-fg2 hover:text-white")}
+            className={cn("group flex items-center gap-1 h-full pr-1 border-r border-black/30 cursor-default", active === t.key ? "bg-black text-white" : "text-fg2 hover:text-white")}
           >
-            {t.title}
-            <button className="opacity-60 hover:opacity-100 p-0.5" onClick={(e) => (e.stopPropagation(), close(t.key))} title="Close terminal tab">
+            <button type="button" className="h-full pl-2.5" aria-pressed={active === t.key} onClick={() => setActive(t.key)}>
+              {t.title}
+            </button>
+            <button type="button" className="opacity-60 hover:opacity-100 focus-visible:opacity-100 p-0.5" onClick={() => close(t.key)} title="Close terminal tab">
               <X size={11} />
             </button>
           </div>

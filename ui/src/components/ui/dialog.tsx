@@ -1,6 +1,6 @@
 import * as D from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
-import type { ReactNode } from "react";
+import { useRef, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
 // shadcn-style dialog on Radix.
@@ -19,18 +19,27 @@ export function Dialog({
   footer?: ReactNode;
   width?: number;
 }) {
+  const content = useRef<HTMLDivElement>(null);
   return (
     <D.Root open={open} onOpenChange={(o) => !o && onClose()}>
       <D.Portal>
         <D.Overlay className="fixed inset-0 bg-black/50 z-50" />
         <D.Content
+          ref={content}
           className="fixed left-1/2 top-[18%] -translate-x-1/2 z-50 bg-panel border border-white/12 rounded-md shadow-2xl flex flex-col max-h-[75vh]"
           style={{ width }}
           aria-describedby={undefined}
+          onOpenAutoFocus={(event) => {
+            const initial = content.current?.querySelector<HTMLElement>("[data-dialog-initial-focus]");
+            if (initial) {
+              event.preventDefault();
+              initial.focus();
+            }
+          }}
         >
           <div className="flex items-center h-10 px-4 border-b border-line">
             <D.Title className="text-[14px] font-semibold text-white flex-1">{title}</D.Title>
-            <D.Close className="text-fg2 hover:text-white">
+            <D.Close aria-label="Close dialog" className="text-fg2 hover:text-white">
               <X size={16} />
             </D.Close>
           </div>

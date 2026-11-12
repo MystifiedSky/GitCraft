@@ -7,8 +7,16 @@ import { addWorktree } from "./manage";
 import { startPullRequest } from "./hosting";
 import { explainBranch, patchName, savePatch } from "./ai";
 import { baseFor, dropCommits, headLine, moveCommit, openRebase, rewordCommit, squashCommits } from "./rewrite";
+import { linkItems } from "./weblinks";
+import { editorName } from "@/components/TitleBar";
 
 const activeTab = () => useStore.getState().activeId;
+
+/** Which remote a remote-tracking name (origin/feature/x) belongs to; remote names can hold "/" too. */
+export function splitRemote(repo: RepoView, name: string): { remote: string; branch: string } | null {
+  const remote = [...repo.remotes].sort((a, b) => b.length - a.length).find((r) => name.startsWith(r + "/"));
+  return remote ? { remote, branch: name.slice(remote.length + 1) } : null;
+}
 
 /** Ask which remote branch a local branch should track ("Set Upstream"). */
 export function promptUpstream(repo: RepoView, ref: GitRef) {
@@ -102,6 +110,9 @@ export function branchMenu(repo: RepoView, ref: GitRef): MenuEntry[] {
   items.push({ separator: true });
   items.push({ label: "Copy branch name", onSelect: () => copy(ref.name) });
   items.push({ label: "Copy commit sha", onSelect: () => copy(ref.sha) });
+  // The original's "Copy link to branch" (getCopyDeepLinkForBranchItems): for a remote branch or a local branch's upstream.
+  const onRemote = splitRemote(repo, ref.kind === "Remote" ? ref.name : ref.upstream);
+  if (onRemote) items.push(...linkItems(repo, "Copy link to branch", { kind: "branch", name: onRemote.branch }, [onRemote.remote]));
   return items;
 }
 
@@ -115,6 +126,7 @@ export function tagMenu(repo: RepoView, ref: GitRef): MenuEntry[] {
     { label: (useStore.getState().settings.hidden[path] ?? []).includes(ref.full) ? "Show in the graph" : "Hide in the graph", onSelect: () => toggleHidden(path, ref.full) },
     { separator: true },
     { label: "Copy tag name", onSelect: () => copy(ref.name) },
+    ...linkItems(repo, "Copy link to this tag", { kind: "tag", name: ref.name }),
   ];
 }
 
@@ -158,6 +170,7 @@ export function commitMenu(repo: RepoView, c: Commit): MenuEntry[] {
     { separator: true },
     { label: "Copy commit sha", onSelect: () => copy(c.sha) },
     { label: "Copy commit message", onSelect: () => copy(c.body ? `${c.summary}\n\n${c.body}` : c.summary) },
+    ...linkItems(repo, "Copy link to this commit", { kind: "commit", sha: c.sha }),
   ];
 }
 
@@ -254,7 +267,16 @@ export function fileMenu(repo: RepoView, file: string, staged: boolean, inCommit
     items.push({ label: "Open in External Merge Tool", onSelect: () => act(path, { type: "externalMerge", file, tool: useStore.getState().settings.mergeTool }) });
   items.push({ separator: true });
   items.push({ label: "Copy file path", onSelect: () => copy(file) });
-  items.push({ label: "Open in File Manager", onSelect: () => api.openFileManager(`${path}\\${file.replace(/\/[^/]*$/, "").replace(/\//g, "\\")}`) });
+  // The original's file menu: "Copy file contents to clipboard" (the version shown: working copy, or the commit's).
+  items.push({
+    label: "Copy file contents to clipboard",
+    onSelect: () =>
+      api.fileText(path, file, inCommit && commitSha ? commitSha : undefined).then(copy, (e) => useStore.getState().toast(false, String(e))),
+  });
+  const fail = (e: unknown) => useStore.getState().toast(false, String(e));
+  items.push({ label: `Open in ${editorName(useStore.getState().settings.externalEditor)}`, onSelect: () => api.openInEditor(path, file).catch(fail) });
+  items.push({ label: "Open file in default program", onSelect: () => api.openDefault(path, file).catch(fail) });
+  items.push({ label: "Open in File Manager", onSelect: () => api.revealFile(path, file).catch(fail) });
   items.push({ separator: true });
   items.push({ label: "File History", onSelect: () => openHistory(file, "history") });
   items.push({ label: "Blame", onSelect: () => openHistory(file, "blame") });

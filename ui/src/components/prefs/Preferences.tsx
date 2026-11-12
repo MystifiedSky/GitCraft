@@ -79,7 +79,7 @@ export function PreferencesScreen({ onClose, section }: { onClose: () => void; s
     </button>
   );
   return (
-    <div className="fixed left-0 right-0 top-[56px] bottom-0 z-[45] flex bg-app" onKeyDown={(e) => e.key === "Escape" && onClose()}>
+    <section aria-label="Preferences" className="fixed left-0 right-0 top-[56px] bottom-0 z-[45] flex bg-app">
       <div className="w-[250px] shrink-0 bg-panel border-r border-black/30 overflow-y-auto pb-4">
         <div className="flex items-center h-[48px] px-4 text-[16px] font-semibold text-white">Preferences</div>
         {GENERAL.map(nav)}
@@ -99,7 +99,7 @@ export function PreferencesScreen({ onClose, section }: { onClose: () => void; s
       <button title="Exit Preferences (Esc)" onClick={onClose} className="absolute top-3 right-4 h-[30px] px-3 rounded-[3px] border border-white/10 bg-white/[0.06] text-[12.5px] text-fg hover:bg-white/10 flex items-center gap-1.5">
         <X size={14} /> Exit Preferences
       </button>
-    </div>
+    </section>
   );
 }
 

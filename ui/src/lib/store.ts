@@ -474,6 +474,8 @@ export const DEFAULT_METRICS: Metrics = {
   summary_counter: 72,
   toolbar_left_max: 369,
   toolbar_center: 461,
+  tab_slide_ms: 250,
+  wip_stats_space: 75,
   auto_fetch_min: 1,
   zoom_factors: [3, 2.5, 2, 1.75, 1.5, 1.4, 1.3, 1.2, 1.1, 1, 0.9, 0.8],
   default_zoom: 1,
@@ -512,6 +514,8 @@ interface Store {
   closeTab: (id: string) => void;
   reopenTab: () => void;
   setActive: (id: string) => void;
+  /** Move a tab so it sits just before `beforeId` (null: at the end). Dragging tabs and Move Tab Left / Right use it. */
+  moveTab: (id: string, beforeId: string | null) => void;
   replaceTab: (id: string, tab: Tab) => void;
   setUi: (id: string, patch: Partial<TabUi>) => void;
   setDraft: (path: string, patch: Partial<Draft>) => void;
@@ -612,6 +616,15 @@ export const useStore = create<Store>((set, get) => {
       get().openRepoTab(last.path!, last.title);
     },
     setActive: (id) => set({ activeId: id }),
+    moveTab: (id, beforeId) =>
+      set((s) => {
+        const tab = s.tabs.find((t) => t.id === id);
+        if (!tab || id === beforeId) return {};
+        const rest = s.tabs.filter((t) => t.id !== id);
+        const at = beforeId ? rest.findIndex((t) => t.id === beforeId) : -1;
+        const tabs = at < 0 ? [...rest, tab] : [...rest.slice(0, at), tab, ...rest.slice(at)];
+        return tabs.every((t, i) => t === s.tabs[i]) ? {} : { tabs };
+      }),
     replaceTab: (id, tab) => set((s) => ({ tabs: s.tabs.map((t) => (t.id === id ? tab : t)), activeId: tab.id, ui: { ...s.ui, [tab.id]: defaultUi() } })),
     setUi: (id, patch) => set((s) => ({ ui: { ...s.ui, [id]: { ...(s.ui[id] ?? defaultUi()), ...patch } } })),
     setDraft: (path, patch) =>
@@ -627,6 +640,19 @@ export const useStore = create<Store>((set, get) => {
     setBusy: (busy) => set({ busy }),
   };
 });
+
+/** Bring back the saved repository tabs in one step (start-up, General > Remember tabs): names from the alias or the
+ *  folder, the saved active tab showing. Nothing is read here; each tab loads its repository when first shown. */
+export function restoreTabs(paths: string[], active: number) {
+  const st = useStore.getState();
+  const tabs: Tab[] = paths.map((path) => ({ id: newId(), kind: "repo", path, title: st.settings.aliases?.[path] || path.split(/[\\/]/).filter(Boolean).pop() || path }));
+  if (tabs.length === 0) return;
+  const ui = { ...st.ui };
+  for (const t of tabs) ui[t.id] = defaultUi();
+  // The empty "New Tab" shown before start-up finished is replaced; anything else stays after the restored tabs.
+  const keep = st.tabs.filter((t) => t.kind !== "start");
+  useStore.setState({ tabs: [...tabs, ...keep], ui, activeId: (tabs[active] ?? tabs[0]).id });
+}
 
 export function tabUi(id: string): TabUi {
   return useStore.getState().ui[id] ?? defaultUi();

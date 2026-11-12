@@ -84,11 +84,15 @@ jobs:
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Third-party actions are pinned to a full commit hash, so a moved tag or branch can't change what runs in the
+      # release build. To update: look up the new commit (for example `gh api repos/dtolnay/rust-toolchain/commits/stable`)
+      # and change the hash and the comment together.
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           targets: ${{ matrix.rust-targets }}
 
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.target }}
 
@@ -98,7 +102,9 @@ jobs:
         shell: bash
         run: |
           node ui/scripts/set-version.mjs "$VERSION"
-          npm --prefix ui ci
+          # --ignore-scripts: dependencies' install scripts don't run in the release build. The build doesn't need
+          # them (esbuild ships its own program; fsevents is only a macOS dev-server extra).
+          npm --prefix ui ci --ignore-scripts
           npm --prefix ui run build
 
       - name: Build installers and sign updates

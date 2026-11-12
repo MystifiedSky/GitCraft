@@ -6,14 +6,17 @@
 //! - Agents: Claude Code sessions that worked in this repository.
 
 use crate::git;
-use crate::metrics::{MERGE_RENAME_LIMIT, MERGE_RENAME_THRESHOLD, PATCH_START_NUMBER, PATCH_SUBJECT_PREFIX};
+use crate::metrics::{DIFF_CONTEXT_LINES, DIFF_INTERHUNK_LINES, MERGE_RENAME_LIMIT, MERGE_RENAME_THRESHOLD, PATCH_START_NUMBER, PATCH_SUBJECT_PREFIX};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 /// A patch of uncommitted changes (`wip`) or of the given commits (oldest first, mailbox format).
 pub fn make_patch(dir: &Path, shas: &[String]) -> Result<String, String> {
+    // nodegit.node FUN_180107360: preserve the recovered hunk boundaries in every export.
+    let context = format!("-U{DIFF_CONTEXT_LINES}");
+    let interhunk = format!("--inter-hunk-context={DIFF_INTERHUNK_LINES}");
     if shas.is_empty() {
-        let o = git::run(dir, &["diff", "HEAD", "--binary", "--no-color", "--no-ext-diff"]);
+        let o = git::run(dir, &["diff", "HEAD", "--binary", "--no-color", "--no-ext-diff", &context, &interhunk]);
         if !o.ok {
             return Err(o.message());
         }
@@ -29,7 +32,7 @@ pub fn make_patch(dir: &Path, shas: &[String]) -> Result<String, String> {
     let prefix = format!("--subject-prefix={PATCH_SUBJECT_PREFIX}");
     let start = format!("--start-number={PATCH_START_NUMBER}");
     for (i, sha) in shas.iter().enumerate() {
-        let o = git::run(dir, &["format-patch", "-1", "--stdout", "--binary", &prefix, "--no-numbered", "--no-cover-letter", &start, sha]);
+        let o = git::run(dir, &["format-patch", "-1", "--stdout", "--binary", &context, &interhunk, &prefix, "--no-numbered", "--no-cover-letter", &start, sha]);
         if !o.ok {
             return Err(o.message());
         }
@@ -149,8 +152,10 @@ pub struct ConflictCheck {
 /// The branch to compare with: the remote's default branch (origin/HEAD), else origin/main or origin/master.
 pub fn default_target(dir: &Path) -> Option<String> {
     let o = git::run(dir, &["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"]);
-    if o.ok && !o.stdout.trim().is_empty() {
-        return Some(o.stdout.trim().to_string());
+    let named = o.stdout.trim();
+    // origin/HEAD can name a branch the remote has since deleted; only use it when it still exists.
+    if o.ok && !named.is_empty() && git::run(dir, &["rev-parse", "--verify", "-q", &format!("{named}^{{commit}}")]).ok {
+        return Some(named.to_string());
     }
     ["origin/main", "origin/master", "main", "master"]
         .iter()
@@ -287,6 +292,36 @@ mod tests {
         fs::write(d.join("a.txt"), "wip\n").unwrap();
         assert!(make_patch(&d, &[]).unwrap().contains("+wip"));
         let _ = fs::remove_file(&pf);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn patch_exports_use_recovered_hunk_boundaries() {
+        let d = std::env::temp_dir().join(format!("gitcraft-patch-context-{}", std::process::id()));
+        fs::create_dir_all(&d).unwrap();
+        let g = |a: &[&str]| assert!(git::run(&d, a).ok, "{a:?}");
+        g(&["init", "-q", "-b", "main"]);
+        g(&["config", "user.name", "T"]);
+        g(&["config", "user.email", "t@e.x"]);
+        g(&["config", "commit.gpgsign", "false"]);
+        let base: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+        fs::write(d.join("context.txt"), &base).unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-q", "-m", "base"]);
+        // These settings would remove context and join both changes without explicit overrides.
+        g(&["config", "diff.context", "0"]);
+        g(&["config", "diff.interHunkContext", "100"]);
+        let changed = base.replace("line 5\n", "changed 5\n").replace("line 15\n", "changed 15\n");
+        fs::write(d.join("context.txt"), changed).unwrap();
+        let check = |patch: String| {
+            assert_eq!(patch.lines().filter(|l| l.starts_with("@@ ")).count(), 2, "{patch}");
+            assert!(patch.contains("@@ -2,7 +2,7 @@"), "{patch}");
+            assert!(patch.contains("@@ -12,7 +12,7 @@"), "{patch}");
+        };
+        check(make_patch(&d, &[]).unwrap());
+        g(&["commit", "-q", "-am", "two changes"]);
+        let sha = git::run(&d, &["rev-parse", "HEAD"]).stdout.trim().to_string();
+        check(make_patch(&d, &[sha]).unwrap());
         let _ = fs::remove_dir_all(&d);
     }
 

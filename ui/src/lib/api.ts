@@ -323,6 +323,10 @@ export interface Metrics {
   summary_counter: number;
   toolbar_left_max: number;
   toolbar_center: number;
+  /** Tab slide time when tabs make room for a dragged tab (ms). */
+  tab_slide_ms: number;
+  /** Width the "// WIP" box leaves for the change counts (px). */
+  wip_stats_space: number;
   auto_fetch_min: number;
   zoom_factors: number[];
   default_zoom: number;
@@ -397,6 +401,12 @@ export const api = {
     return invoke<void>("open_terminal", { path, tool: t.externalTerminal, exe: t.terminalPath, args: t.terminalArgs });
   },
   openFileManager: (path: string) => invoke<void>("open_file_manager", { path }),
+  /** Open a repository file with the system's usual app for it. */
+  openDefault: (path: string, file: string) => invoke<void>("open_default", { path, file }),
+  /** Show a repository file selected in the file manager. */
+  revealFile: (path: string, file: string) => invoke<void>("reveal_file", { path, file }),
+  /** A file's text from the working folder, or as it was in `rev`. */
+  fileText: (path: string, file: string, rev?: string) => invoke<string>("file_text", { path, file, rev: rev ?? null }),
   loadSettings: () => invoke<unknown>("load_settings"),
   saveSettings: (settings: unknown) => invoke<void>("save_settings", { settings }),
   watchRepo: (path: string) => invoke<void>("watch_repo", { path }),

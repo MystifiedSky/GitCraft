@@ -16,6 +16,7 @@ mod manage;
 mod rewrite;
 mod metrics;
 mod sample;
+mod shell;
 mod shot;
 mod terminal;
 mod watch;
@@ -417,16 +418,8 @@ fn open_url(url: String) -> Result<(), String> {
     if !(url.starts_with("https://") || url.starts_with("http://")) {
         return Err("Only web links can be opened".into());
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", &url]).creation_flags(0x0800_0000).spawn().map_err(err)?;
-    }
-    #[cfg(target_os = "macos")]
-    std::process::Command::new("open").arg(&url).spawn().map_err(err)?;
-    #[cfg(all(unix, not(target_os = "macos")))]
-    std::process::Command::new("xdg-open").arg(&url).spawn().map_err(err)?;
-    Ok(())
+    // The original's shell.openExternal (gitkraken.exe FUN_140466fb0): ShellExecuteExW "open".
+    shell::open_external(&url)
 }
 
 #[tauri::command]
@@ -481,15 +474,17 @@ async fn ai_compose(path: String) -> Result<Vec<ai::ComposedCommit>, String> {
 /// Save a patch (uncommitted changes when `shas` is empty, else those commits) to a file the person picks.
 #[tauri::command]
 async fn save_patch(path: String, shas: Vec<String>, name: String) -> Result<Option<String>, String> {
-    blocking(move || {
+    let patch = blocking(move || -> Result<_, String> {
         let text = extras::make_patch(Path::new(&path), &shas)?;
-        let Some(file) = rfd::FileDialog::new().set_title("Save patch").set_file_name(&name).add_filter("Patch", &["patch", "diff"]).save_file() else {
-            return Ok(None);
-        };
-        std::fs::write(&file, text).map_err(err)?;
-        Ok(Some(file.to_string_lossy().into_owned()))
+        let file = rfd::FileDialog::new().set_title("Save patch").set_file_name(&name).add_filter("Patch", &["patch", "diff"]).save_file();
+        Ok(file.map(|file| (file, text)))
     })
-    .await?
+    .await??;
+    let Some((file, text)) = patch else {
+        return Ok(None);
+    };
+    tokio::fs::write(&file, text).await.map_err(err)?;
+    Ok(Some(file.to_string_lossy().into_owned()))
 }
 
 #[tauri::command]
@@ -623,9 +618,9 @@ async fn pick_folder(title: String) -> Result<Option<String>, String> {
 #[tauri::command]
 async fn init_repo(parent: String, name: String, options: Option<manage::InitOptions>, state: State<'_, AppState>) -> Result<String, String> {
     let engine = state.engine.clone();
+    let dir = PathBuf::from(parent).join(name.trim());
+    tokio::fs::create_dir_all(&dir).await.map_err(err)?;
     blocking(move || {
-        let dir = PathBuf::from(&parent).join(name.trim());
-        std::fs::create_dir_all(&dir).map_err(err)?;
         let opts = options.unwrap_or_default();
         let branch = if opts.branch.trim().is_empty() { "main".to_string() } else { opts.branch.trim().to_string() };
         let o = engine.git(&dir, &["init", "-b", &branch]);
@@ -645,10 +640,10 @@ async fn init_repo(parent: String, name: String, options: Option<manage::InitOpt
 #[tauri::command]
 async fn clone_repo(url: String, parent: String, depth: Option<u32>, state: State<'_, AppState>) -> Result<String, String> {
     let engine = state.engine.clone();
+    let parent = PathBuf::from(parent);
+    tokio::fs::create_dir_all(&parent).await.map_err(err)?;
     blocking(move || {
         let name = url.trim_end_matches('/').rsplit(['/', '\\', ':']).next().unwrap_or("repo").trim_end_matches(".git").to_string();
-        let parent = PathBuf::from(&parent);
-        std::fs::create_dir_all(&parent).map_err(err)?;
         let dest = parent.join(&name);
         // Shallow clone: only the newest `depth` commits.
         let depth_arg = depth.filter(|d| *d > 0).map(|d| format!("--depth={d}"));
@@ -677,13 +672,37 @@ fn open_terminal(path: String, tool: Option<String>, exe: Option<String>, args: 
 
 #[tauri::command]
 fn open_file_manager(path: String) -> Result<(), String> {
-    #[cfg(windows)]
-    std::process::Command::new("explorer").arg(&path).spawn().map_err(err)?;
-    #[cfg(target_os = "macos")]
-    std::process::Command::new("open").arg(&path).spawn().map_err(err)?;
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    std::process::Command::new("xdg-open").arg(&path).spawn().map_err(err)?;
-    Ok(())
+    // A folder opens with the "explore" verb, like the original's shell.openPath (gitkraken.exe FUN_140466d50).
+    shell::open_path(Path::new(&path))
+}
+
+/// File menu "Open file in default program" (the original's label): the system opens it with its usual app.
+#[tauri::command]
+fn open_default(path: String, file: String) -> Result<(), String> {
+    let p = files::repo_file(Path::new(&path), &file)?;
+    // The original's shell.openPath (gitkraken.exe FUN_140466d50): default action, "Failed to open path" on failure.
+    if !p.exists() {
+        return Err(shell::OPEN_PATH_FAILED.into());
+    }
+    shell::open_path(&p)
+}
+
+/// File menu "Show in File Manager": opens the folder with the file selected (its folder when the file is gone).
+#[tauri::command]
+fn reveal_file(path: String, file: String) -> Result<(), String> {
+    let p = files::repo_file(Path::new(&path), &file)?;
+    // The original's shell.showItemInFolder (gitkraken.exe FUN_140466720: SHOpenFolderAndSelectItems). For a file
+    // that is gone the original does nothing; GitCraft opens the folder it was in instead (MECHANICS.md).
+    if !p.exists() {
+        return shell::open_path(p.parent().unwrap_or(Path::new(&path)));
+    }
+    shell::show_item_in_folder(&p)
+}
+
+/// File menu "Copy file contents to clipboard": the working copy, or the file as it was in `rev`.
+#[tauri::command]
+async fn file_text(path: String, file: String, rev: Option<String>) -> Result<String, String> {
+    blocking(move || files::file_text(Path::new(&path), &file, rev.as_deref())).await?
 }
 
 fn settings_file() -> PathBuf {
@@ -896,6 +915,9 @@ fn main() {
             clone_repo,
             open_terminal,
             open_file_manager,
+            open_default,
+            reveal_file,
+            file_text,
             load_settings,
             save_settings,
             watch_repo,

@@ -6,6 +6,23 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
+/// Git's answer when there is nothing to stash; the original's toolbar Stash throws it as an error
+/// (render.bundle.js gitStashAllCriticalSection: `if ("No local changes to save" === result) throw`).
+pub const STASH_NOTHING: &str = "No local changes to save";
+
+/// A stash's name as the original gives it (render.bundle.js getStashMessageOrDefault, en-us.json
+/// WorkInProgressOnBranchAbbr "WIP on {0}"; nodegit git_stash_save_with_opts 0x1802d3760 (message path 0x1802d3848) builds the same "WIP on %s"
+/// when no message is given): the typed message trimmed, else "WIP on <short branch>", or "WIP on (no branch)" when
+/// HEAD is detached.
+pub fn stash_message(message: &str, branch: &str) -> String {
+    let typed = message.trim();
+    if !typed.is_empty() {
+        return typed.to_string();
+    }
+    let branch = branch.trim();
+    format!("WIP on {}", if branch.is_empty() || branch == "HEAD" { "(no branch)" } else { branch })
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Action {
@@ -454,11 +471,20 @@ impl Engine {
                 done(o, &format!("Pushed {branch}"))
             }
             Action::Stash { message } => {
-                let o = if message.trim().is_empty() {
-                    self.git(dir, &["stash", "push", "--include-untracked"])
-                } else {
-                    self.git(dir, &["stash", "push", "--include-untracked", "-m", message.trim()])
-                };
+                // Like the original's gitStashAllCriticalSection (render.bundle.js): stage everything (new files
+                // too), then `stash push` without --include-untracked, named by stash_message. See MECHANICS.md
+                // "Toolbar Stash and Pop".
+                let add = self.git(dir, &["add", "-A"]);
+                if !add.ok {
+                    return done(add, "");
+                }
+                let branch = git::run(dir, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim().to_string();
+                let msg = stash_message(&message, &branch);
+                let o = self.git(dir, &["stash", "push", "-m", &msg]);
+                // The original throws when Git answers "No local changes to save" (nodegit: "there is nothing to stash.").
+                if o.ok && o.stdout.trim() == STASH_NOTHING {
+                    return ActionResult { ok: false, message: STASH_NOTHING.into() };
+                }
                 done(o, "Stashed changes")
             }
             Action::StashPop { index } => done(self.git(dir, &["stash", "pop", "-q", &format!("stash@{{{index}}}")]), "Popped stash"),
@@ -938,6 +964,14 @@ mod tests {
     use super::*;
     use std::fs;
 
+    #[test]
+    fn stash_names_follow_the_original() {
+        assert_eq!(stash_message("", "main"), "WIP on main");
+        assert_eq!(stash_message("  fix later \n", "main"), "fix later");
+        assert_eq!(stash_message("", ""), "WIP on (no branch)");
+        assert_eq!(stash_message("", "feature/x"), "WIP on feature/x");
+    }
+
     fn temp_repo(name: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("gitcraft-test-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
@@ -950,6 +984,38 @@ mod tests {
 
     fn head(d: &Path) -> String {
         git::run(d, &["rev-parse", "HEAD"]).stdout.trim().to_string()
+    }
+
+    /// A person's repository showed no history: its refs/remotes/origin/HEAD file was blank, so
+    /// `git log --remotes` stopped with "fatal: bad object origin/HEAD".
+    #[test]
+    fn history_loads_with_a_broken_remote_head_or_branch() {
+        let d = temp_repo("broken-ref");
+        fs::write(d.join("a.txt"), "a\n").unwrap();
+        assert!(git::run(&d, &["add", "-A"]).ok);
+        assert!(git::run(&d, &["commit", "-q", "-m", "first"]).ok);
+        let sha = head(&d);
+        fs::create_dir_all(d.join(".git/refs/remotes/origin")).unwrap();
+        fs::write(d.join(".git/refs/remotes/origin/main"), format!("{sha}\n")).unwrap();
+        // 1. Blank pointer file, as in the person's repository.
+        fs::write(d.join(".git/refs/remotes/origin/HEAD"), "                              \n").unwrap();
+        let r = git::load(&d, 100);
+        assert_eq!(r.commits.len(), 1, "blank origin/HEAD");
+        assert!(r.refs.iter().any(|x| x.name == "origin/main"));
+        // 2. Pointer to a branch the remote deleted: also skipped, and not used as the default target.
+        fs::write(d.join(".git/refs/remotes/origin/HEAD"), "ref: refs/remotes/origin/gone\n").unwrap();
+        assert_eq!(git::load(&d, 100).commits.len(), 1, "stale origin/HEAD");
+        assert_eq!(crate::extras::default_target(&d).as_deref(), Some("origin/main"));
+        // 3. A damaged local branch file: the rest of the history still shows.
+        fs::write(d.join(".git/refs/heads/damaged"), "0000000000000000000000000000000000000001\n").unwrap();
+        assert_eq!(git::load(&d, 100).commits.len(), 1, "damaged branch");
+        // 4. A tag of a tree (not a commit) is skipped like the original's GIT_EPEEL case; real refs stay.
+        assert!(git::run(&d, &["tag", "treetag", "HEAD^{tree}"]).ok);
+        let walk = git::walkable_refs(&d);
+        assert!(!walk.iter().any(|r| r == "refs/tags/treetag"), "{walk:?}");
+        assert!(walk.iter().any(|r| r == "refs/heads/master") && walk.iter().any(|r| r == "refs/remotes/origin/main"), "{walk:?}");
+        assert_eq!(git::load(&d, 100).commits.len(), 1, "tree tag");
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -993,7 +1059,20 @@ mod tests {
         assert_eq!(git::load(&d, 100).stashes.len(), 1);
         assert!(git::status(&d).unstaged.is_empty());
         assert!(e.perform(&repo, Action::StashPop { index: 0 }).ok);
-        assert_eq!(git::status(&d).unstaged.len(), 1);
+        // The original stages everything before stashing, so a new file comes back staged (git stash pop re-adds it).
+        let st = git::status(&d);
+        assert_eq!(st.unstaged.len() + st.staged.len(), 1);
+        assert_eq!(st.staged.len(), 1);
+        // With nothing to stash the original reports an error instead of success.
+        assert!(e.perform(&repo, Action::StageAll).ok);
+        assert!(e.perform(&repo, Action::Stash { message: String::new() }).ok);
+        let named = git::run(&d, &["stash", "list", "--format=%s"]).stdout;
+        assert!(named.lines().next().unwrap_or("").ends_with("WIP on master"), "default stash name: {named}");
+        let none = e.perform(&repo, Action::Stash { message: String::new() });
+        assert!(!none.ok && none.message == STASH_NOTHING, "{}", none.message);
+        assert!(e.perform(&repo, Action::StashPop { index: 0 }).ok);
+        assert_eq!(git::status(&d).staged.len(), 1);
+        assert!(e.perform(&repo, Action::UnstageAll).ok);
 
         // Discard is undoable
         assert!(e.perform(&repo, Action::DiscardAll).ok);

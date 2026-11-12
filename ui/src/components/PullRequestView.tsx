@@ -48,7 +48,7 @@ export function PullRequestView({ repo, tabId, number }: { repo: RepoView; tabId
         await hosting.merge(repo.path, number, method);
         s.toast(true, `Merged #${number}`);
         qc.invalidateQueries({ queryKey: ["prs", repo.path] });
-        act(repo.path, { type: "fetch" }, true);
+        void act(repo.path, { type: "fetch" }, true);
         close();
       } catch (e) {
         s.toast(false, String(e));

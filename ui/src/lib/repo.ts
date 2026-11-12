@@ -2,6 +2,7 @@ import { QueryClient, useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { api, type Action, type FileChange, type GitRef, type RefView, type RepoView } from "./api";
 import { useStore } from "./store";
+import { spinButtonFor, withSpin } from "./spin";
 
 export const queryClient = new QueryClient({
   defaultOptions: { queries: { refetchOnWindowFocus: true, staleTime: 2000, retry: false } },
@@ -162,6 +163,13 @@ export async function act(path: string, action: Action, quiet = false): Promise<
   }
   // Commit > Remove comments from commit messages.
   if (action.type === "commit" && set.stripComments) action = { ...action, stripComments: true };
+  // Pull / Push / Stash / Pop show a spinning circle on their toolbar button while this runs (lib/spin.ts).
+  const run = action;
+  return withSpin(path, spinButtonFor(run, quiet), () => runAct(path, run, quiet));
+}
+
+async function runAct(path: string, action: Action, quiet: boolean): Promise<boolean> {
+  const st = useStore.getState();
   const wasMerging = !!latest.get(path)?.state_note;
   st.setBusy(BUSY_LABEL[action.type] ?? "Working…");
   const light = indexOnly(action);
@@ -399,6 +407,17 @@ export function toggleHidden(path: string, full: string) {
   const st = useStore.getState();
   const cur = st.settings.hidden[path] ?? [];
   const next = cur.includes(full) ? cur.filter((x) => x !== full) : [...cur, full];
+  st.setSettings({ hidden: { ...st.settings.hidden, [path]: next } });
+}
+
+/** Sent by the graph's "// WIP" box on Ctrl+Enter ({ path, all }); the Commit panel commits. */
+export const WIP_COMMIT_EVENT = "gitcraft:wip-commit";
+
+/** The original's "Hide all local branches / remotes / tags" and "Show all ..." for a whole left-panel section. */
+export function setHiddenMany(path: string, fulls: string[], hide: boolean) {
+  const st = useStore.getState();
+  const cur = st.settings.hidden[path] ?? [];
+  const next = hide ? [...new Set([...cur, ...fulls])] : cur.filter((x) => !fulls.includes(x));
   st.setSettings({ hidden: { ...st.settings.hidden, [path]: next } });
 }
 

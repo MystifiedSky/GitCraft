@@ -20,7 +20,7 @@ export function addRemote(path: string) {
     async (v) => {
       const ok = await act(path, { type: "addRemote", name: str(v.name), url: str(v.url) });
       if (ok && str(v.push)) await act(path, { type: "remoteEdit", name: str(v.name), newName: "", url: str(v.url), pushUrl: str(v.push) }, true);
-      if (ok) act(path, { type: "fetchRemote", remote: str(v.name) }, true);
+      if (ok) await act(path, { type: "fetchRemote", remote: str(v.name) }, true);
     },
   );
 }
@@ -58,7 +58,7 @@ export function addWorktree(repo: RepoView, branch?: string) {
     "Create Worktree",
     async (v) => {
       const ok = await act(repo.path, { type: "worktreeAdd", path: str(v.path), branch: str(v.branch), newBranch: !!v.new, start: null });
-      if (ok) openRepoPath(str(v.path));
+      if (ok) await openRepoPath(str(v.path));
     },
     "A worktree is a second working folder for the same repository, with its own branch checked out.",
   );

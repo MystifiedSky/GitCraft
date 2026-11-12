@@ -101,4 +101,4 @@ export async function applyPatch(path: string) {
 }
 
 export const patchName = (summary: string) =>
-  (summary.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 52) || "changes") + ".patch";
+  (summary.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 52) || "changes") + ".patch";

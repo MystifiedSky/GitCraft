@@ -19,7 +19,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type { Commit, FileChange, RepoView } from "@/lib/api";
 import { api, WORKDIR } from "@/lib/api";
 import { useStore, useTabUi, type DiffTarget, usePanelStore } from "@/lib/store";
-import { act, confirmThen, copy } from "@/lib/repo";
+import { act, confirmThen, copy, WIP_COMMIT_EVENT } from "@/lib/repo";
 import { fileMenu } from "@/lib/menus";
 import { baseFor, dropCommits, headLine, openCherryPick, openRebase, squashCommits } from "@/lib/rewrite";
 import { CtxMenu } from "./ui/menu";
@@ -109,14 +109,15 @@ function FileList({
   const row = (f: FileChange, indent: number, label: string) => (
     <CtxMenu key={f.path} items={() => menu(f)}>
       <div
-        onClick={() => onOpen(f)}
         className={cn("group flex items-center gap-[6px] h-[24px] pr-2 text-[12.5px] cursor-default hover:bg-hoverrow", activeFile === f.path && "bg-selrow")}
         style={{ paddingLeft: 12 + indent * 14 }}
         title={f.path}
       >
-        <StatusIcon status={f.status} />
-        <span className="truncate flex-1 text-white/85">{label}</span>
-        {action && <span className="opacity-0 group-hover:opacity-100">{action(f)}</span>}
+        <button type="button" onClick={() => onOpen(f)} className="flex flex-1 min-w-0 self-stretch items-center gap-[6px] text-left cursor-default">
+          <StatusIcon status={f.status} />
+          <span className="truncate flex-1 text-white/85">{label}</span>
+        </button>
+        {action && <span className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">{action(f)}</span>}
       </div>
     </CtxMenu>
   );
@@ -134,9 +135,11 @@ function FileList({
       const closed = !!collapsed[d.path];
       const counts = countFiles(d);
       out.push(
-        <div
+        <button
+          type="button"
           key={"d:" + d.path}
-          className="flex items-center gap-[6px] h-[24px] pr-2 text-[12.5px] text-fg2 hover:bg-hoverrow cursor-default"
+          aria-expanded={!closed}
+          className="flex w-full items-center gap-[6px] h-[24px] pr-2 text-left text-[12.5px] text-fg2 hover:bg-hoverrow cursor-default"
           style={{ paddingLeft: 10 + depth * 14 }}
           onClick={() => setCollapsed((c) => ({ ...c, [d.path]: !c[d.path] }))}
         >
@@ -150,7 +153,7 @@ function FileList({
               {counts.D ? <span className="text-[#ef7a76]">− {counts.D}</span> : null}
             </span>
           )}
-        </div>,
+        </button>,
       );
       if (!closed) out.push(...render(d, depth + 1));
     }
@@ -289,6 +292,18 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
     commitLabel = `Commit Changes to ${staged.length} File${staged.length === 1 ? "" : "s"}` + (push ? " and Push" : "");
   }
 
+  // Ctrl+Enter / Ctrl+Shift+Enter in the graph's "// WIP" box commit through this panel, with the same checks.
+  const onWipCommit = (e: Event) => {
+    const d = (e as CustomEvent<{ path: string; all: boolean }>).detail;
+    if (d?.path !== repo.path || tab !== "commit") return;
+    if (d.all) void doCommit(true);
+    else if (commitEnabled) void doCommit(false);
+  };
+  useEffect(() => {
+    window.addEventListener(WIP_COMMIT_EVENT, onWipCommit);
+    return () => window.removeEventListener(WIP_COMMIT_EVENT, onWipCommit);
+  });
+
   return (
     <div className="h-full flex flex-col bg-panel min-w-0">
       <PanelHeader>
@@ -340,17 +355,17 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
                     ]}
                   >
                     <div
-                      onClick={() => s.setUi(tabId, { conflict: f.path, diff: null })}
                       className={cn("group flex items-center gap-[6px] h-[24px] px-2 text-[12.5px] cursor-default hover:bg-hoverrow", ui.conflict === f.path && "bg-selrow")}
-                      title="Open in the merge tool"
                     >
-                      <StatusIcon status="U" />
-                      <span className="truncate flex-1 text-white/85">{f.path}</span>
-                      <span className="opacity-0 group-hover:opacity-100 flex gap-1">
-                        <Button size="sm" className="h-5 px-1.5 text-[11px]" title={`Take current (${cur})`} onClick={(e) => (e.stopPropagation(), act(repo.path, { type: "takeSide", paths: [f.path], side: "ours" }))}>
+                      <button type="button" onClick={() => s.setUi(tabId, { conflict: f.path, diff: null })} className="flex flex-1 min-w-0 self-stretch items-center gap-[6px] text-left cursor-default" title="Open in the merge tool">
+                        <StatusIcon status="U" />
+                        <span className="truncate flex-1 text-white/85">{f.path}</span>
+                      </button>
+                      <span className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 flex gap-1">
+                        <Button size="sm" className="h-5 px-1.5 text-[11px]" title={`Take current (${cur})`} onClick={() => act(repo.path, { type: "takeSide", paths: [f.path], side: "ours" })}>
                           Current
                         </Button>
-                        <Button size="sm" className="h-5 px-1.5 text-[11px]" title={`Take incoming (${inc})`} onClick={(e) => (e.stopPropagation(), act(repo.path, { type: "takeSide", paths: [f.path], side: "theirs" }))}>
+                        <Button size="sm" className="h-5 px-1.5 text-[11px]" title={`Take incoming (${inc})`} onClick={() => act(repo.path, { type: "takeSide", paths: [f.path], side: "theirs" })}>
                           Incoming
                         </Button>
                       </span>
@@ -437,8 +452,7 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
                       e.preventDefault();
-                      if (e.shiftKey) doCommit(true);
-                      else if (commitEnabled) doCommit(false);
+                      if (e.shiftKey || commitEnabled) void doCommit(e.shiftKey);
                     }
                   }}
                 />
@@ -454,8 +468,7 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
                     e.preventDefault();
-                    if (e.shiftKey) doCommit(true);
-                    else if (commitEnabled) doCommit(false);
+                    if (e.shiftKey || commitEnabled) void doCommit(e.shiftKey);
                   }
                 }}
               />
