@@ -506,6 +506,12 @@ fn parse_track(s: &str) -> (usize, usize) {
     (a, b)
 }
 
+/// Shared status rules: recurse into untracked folders and use the recovered rename similarity.
+/// nodegit.node git_status_list_new 0x1802d7b00 and FUN_1802807a0.
+pub fn status_options() -> [String; 2] {
+    ["-uall".into(), format!("--find-renames={}%", crate::metrics::STATUS_RENAME_THRESHOLD)]
+}
+
 pub fn status(dir: &Path) -> WorkStatus {
     let mut w = WorkStatus::default();
     // --no-optional-locks: don't rewrite the index while reading it, so a status check never
@@ -515,8 +521,8 @@ pub fn status(dir: &Path) -> WorkStatus {
     // -uall = untracked files inside untracked folders; --find-renames=50% = rename detection at libgit2's
     // default similarity, whatever status.renames says in the person's Git config. libgit2 re-reads the index
     // but only writes it back with UPDATE_INDEX (0x2000), which the original doesn't pass: --no-optional-locks.
-    let renames = format!("--find-renames={}%", crate::metrics::STATUS_RENAME_THRESHOLD);
-    let o = run(dir, &["--no-optional-locks", "status", "--porcelain=v1", "-z", "-uall", &renames]);
+    let options = status_options();
+    let o = run(dir, &["--no-optional-locks", "status", "--porcelain=v1", "-z", &options[0], &options[1]]);
     let mut parts = o.stdout.split('\0').peekable();
     while let Some(entry) = parts.next() {
         if entry.len() < 4 {

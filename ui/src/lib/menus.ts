@@ -67,6 +67,8 @@ export function branchMenu(repo: RepoView, ref: GitRef): MenuEntry[] {
     items.push({ label: `Fast-forward ${ref.name} to ${ref.upstream}`, onSelect: () => act(path, { type: "fastForward", branch: ref.name, to: ref.upstream }) });
   if (ref.kind === "Local") items.push({ label: ref.upstream ? `Set Upstream (now ${ref.upstream})` : "Set Upstream", onSelect: () => promptUpstream(repo, ref) });
   items.push({ label: "Create branch here", onSelect: () => promptBranch(path, ref.sha) });
+  if (repo.head_branch && headLine(repo).includes(ref.sha))
+    items.push({ label: "Rename commit", onSelect: () => rewordCommit(repo, ref.sha) });
   if (ref.kind === "Local" && !isHead) items.push({ label: `Create worktree from ${ref.name}`, onSelect: () => addWorktree(repo, ref.name) });
   items.push({ label: "Create tag here", onSelect: () => promptTag(path, ref.sha) });
   items.push({ separator: true });
@@ -140,10 +142,10 @@ export function commitMenu(repo: RepoView, c: Commit): MenuEntry[] {
           act(path, { type: "reset", sha: c.sha, mode }),
         )
       : act(path, { type: "reset", sha: c.sha, mode }).then(() => void label);
+  const canRename = !!repo.head_branch && headLine(repo).includes(c.sha);
   return [
     { label: "Checkout this commit", onSelect: () => act(path, { type: "checkout", target: c.sha }) },
     { label: "Create branch here", shortcut: "", onSelect: () => promptBranch(path, c.sha) },
-    { label: "Create tag here", onSelect: () => promptTag(path, c.sha) },
     { separator: true },
     { label: "Cherry pick commit", disabled: isHead, onSelect: () => act(path, { type: "cherryPick", sha: c.sha }) },
     {
@@ -155,6 +157,7 @@ export function commitMenu(repo: RepoView, c: Commit): MenuEntry[] {
         { label: "Hard - discard all changes", danger: true, onSelect: reset("hard", "hard") },
       ],
     },
+    { label: "Rename commit", disabled: !canRename, onSelect: () => rewordCommit(repo, c.sha) },
     { label: "Revert commit", onSelect: () => act(path, { type: "revert", sha: c.sha }) },
     { label: "Save commit as a patch file", onSelect: () => savePatch(path, [c.sha], patchName(c.summary)) },
     { separator: true },
@@ -166,11 +169,13 @@ export function commitMenu(repo: RepoView, c: Commit): MenuEntry[] {
       },
     },
     { separator: true },
-    ...historyItems(repo, c),
+    { label: "Edit commit history", children: historyItems(repo, c) },
     { separator: true },
     { label: "Copy commit sha", onSelect: () => copy(c.sha) },
     { label: "Copy commit message", onSelect: () => copy(c.body ? `${c.summary}\n\n${c.body}` : c.summary) },
     ...linkItems(repo, "Copy link to this commit", { kind: "commit", sha: c.sha }),
+    { separator: true },
+    { label: "Create tag here", onSelect: () => promptTag(path, c.sha) },
   ];
 }
 
@@ -178,7 +183,7 @@ export function commitMenu(repo: RepoView, c: Commit): MenuEntry[] {
 function historyItems(repo: RepoView, c: Commit): MenuEntry[] {
   const line = headLine(repo);
   const pos = line.indexOf(c.sha);
-  if (pos < 0 || !repo.head_branch) return [{ label: "Reword, squash and drop work on commits of the checked-out branch", disabled: true }];
+  if (pos < 0 || !repo.head_branch) return [{ label: "Select a commit on the checked-out branch", disabled: true }];
   const children = pos; // commits newer than this one on the line
   const head = repo.head_branch;
   const items: MenuEntry[] = [];
@@ -188,7 +193,6 @@ function historyItems(repo: RepoView, c: Commit): MenuEntry[] {
       onSelect: () => openRebase(activeTab(), repo.path, c.sha, c.sha.slice(0, useStore.getState().metrics.sha_len)),
     });
   items.push({ label: `Interactive Rebase ${head} from here`, onSelect: () => openRebase(activeTab(), repo.path, baseFor(repo, c.sha), head) });
-  items.push({ label: "Reword commit", onSelect: () => rewordCommit(repo, c.sha) });
   if (pos + 1 < line.length) items.push({ label: "Squash into the commit below", onSelect: () => squashCommits(repo, [c.sha]) });
   items.push({ label: "Drop commit", danger: true, onSelect: () => dropCommits(repo, [c.sha]) });
   if (pos > 0) items.push({ label: "Move commit up", onSelect: () => moveCommit(repo, c.sha, "up") });

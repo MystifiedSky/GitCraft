@@ -105,7 +105,7 @@ export type DialogState =
   | { kind: "choice"; title: string; text: string; choices: { label: string; variant?: "primary" | "danger" | "default"; onSelect: () => void }[] }
   | { kind: "info"; title: string; text: string }
   | { kind: "repoManagement" }
-  | { kind: "message"; title: string; label: string; value: string; confirm: string; help?: string; onSubmit: (v: string) => void };
+  | { kind: "message"; title: string; label: string; value: string; confirm: string; help?: string; generate?: () => Promise<string>; onSubmit: (v: string) => void };
 
 export interface Settings {
   showLeft: boolean;

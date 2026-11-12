@@ -75,7 +75,7 @@ export function LeftPanel({ repo, tabId, onSelectSha }: { repo: RepoView | undef
   if (s.settings.leftView === "agents" && s.settings.showAgentsView !== false) {
     return (
       <Shell tabId={tabId}>
-        <AgentsView repo={repo} />
+        <AgentsView repo={repo} tabId={tabId} />
       </Shell>
     );
   }

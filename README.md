@@ -23,7 +23,7 @@ GitCraft is a desktop Git client for exploring repository history and managing e
 - **AI helpers (optional).** Use a ChatGPT or Claude subscription through the installed Codex CLI or Claude Code, or connect an API provider or local server. The helpers write commit and stash messages, compose commits, explain changes, draft pull requests, and help resolve conflicts. One default model serves every helper, with optional per-feature overrides.
 - **Manage many repositories.** Repository Management lists open, favorite, and recent repositories with their branch and uncommitted changes, and fetches or pulls them all at once.
 - **Stays up to date.** Installed copies check GitHub Releases, download signed updates in the background, and install them on restart. See [RELEASING.md](RELEASING.md) to publish a version.
-- **Share and stay ahead of conflicts.** Save or apply .patch files, see early whether your branch would conflict with the main branch, and list the Claude Code sessions that worked in a repository.
+- **Share and stay ahead of conflicts.** Save or apply .patch files, see early whether your branch would conflict with the main branch, and browse worktree cards with file counts and saved Codex CLI or Claude Code sessions. Start or resume a session in its own worktree.
 
 ## Under the hood
 

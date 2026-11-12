@@ -1,13 +1,16 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, Bot, CheckCircle2, FileDown, FileUp } from "lucide-react";
-import type { RepoView } from "@/lib/api";
-import { ai, applyPatch, patchName, savePatch } from "@/lib/ai";
-import { act, copy } from "@/lib/repo";
+import { AlertTriangle, Bot, CheckCircle2, ChevronDown, FileDown, FileUp, Folder, GitBranch, House, MoreVertical, Plug, Search, Plus } from "lucide-react";
+import { api, type RepoView } from "@/lib/api";
+import { ai, applyPatch, patchName, savePatch, type AgentSession } from "@/lib/ai";
+import { act, copy, openRepoPath } from "@/lib/repo";
 import { conflictTarget } from "@/lib/conflict";
 import { runInTerminal } from "./TerminalPanel";
 import { useStore } from "@/lib/store";
 import { cn, timeSince } from "@/lib/utils";
-import { CtxMenu } from "./ui/menu";
+import { CtxMenu, DropMenu } from "./ui/menu";
+import { AGENT_LABEL, AGENT_COMMAND, agentConnection, agentLaunch, sameFolder } from "@/lib/agents";
+import { workingChanges } from "@/lib/working-changes";
 
 /** Key that changes whenever HEAD or any remote branch moves, so the check re-runs after commits and fetches. */
 const refsKey = (repo: RepoView) => repo.head_sha + repo.refs.filter((r) => r.kind === "Remote").map((r) => r.sha.slice(0, 8)).join("");
@@ -87,79 +90,140 @@ export function PatchRows({ repo }: { repo: RepoView }) {
   );
 }
 
-/** Agents view: Claude Code sessions that worked in this repository (read from ~/.claude/projects). */
-const AGENT_COMMAND: Record<string, string> = { claude: "claude", codex: "codex", copilot: "copilot", opencode: "opencode", gemini: "gemini" };
+/** Start in the requested folder, including linked worktrees and resumed sessions. */
+function launchAgent(path: string, agent: string, resume?: string, setup: string[] = []) {
+  const st = useStore.getState();
+  try {
+    const { command, env } = agentLaunch(st.settings, agent, resume);
+    const sep = st.settings.termShell === "cmd" ? " && " : "; ";
+    runInTerminal([...setup, command].join(sep), AGENT_LABEL[agent], path, env);
+  } catch (e) { st.toast(false, String(e)); }
+}
 
-/** Start the coding agent chosen in Preferences > External Tools in the in-app terminal; in a new worktree the
- *  Agents > Setup commands run first. */
 async function startAgent(repo: RepoView, worktree: boolean) {
   const st = useStore.getState();
   const set = st.settings;
-  const cmd = AGENT_COMMAND[set.codingAgent];
-  if (!cmd) return st.setDialog({ kind: "prefs", section: "tools" });
-  const agent = [cmd, set.agentArgs.trim()].filter(Boolean).join(" ");
-  const sep = set.termShell === "cmd" ? " && " : "; ";
-  if (!worktree) return runInTerminal(agent, AGENT_LABEL[set.codingAgent] ?? cmd);
+  if (!AGENT_COMMAND[set.codingAgent]) return st.setDialog({ kind: "prefs", section: "tools" });
+  if (!worktree) return launchAgent(repo.path, set.codingAgent);
   st.setDialog({
     kind: "prompt",
     title: "Start an agent session in a new worktree",
     label: "New branch name",
-    value: `agent/${new Date().toISOString().slice(0, 10)}`,
+    value: `agent/${new Date().toISOString().replace(/[-:]/g, "").slice(0, 15)}`,
     confirm: "Start",
     onSubmit: async (branch) => {
       const parent = repo.path.replace(/[\\/][^\\/]+$/, "");
       const folder = `${parent}${repo.path.includes("\\") ? "\\" : "/"}${repo.name}-${branch.replace(/[^\w.-]+/g, "-")}`;
       const ok = await act(repo.path, { type: "worktreeAdd", path: folder, branch, newBranch: true, start: null });
-      if (!ok) return;
-      const setup = set.agentSetup.split("\n").map((l) => l.trim()).filter(Boolean);
-      runInTerminal([`cd "${folder}"`, ...setup, agent].join(sep), `${AGENT_LABEL[set.codingAgent] ?? cmd} (${branch})`);
+      if (ok) launchAgent(folder, set.codingAgent, undefined, set.agentSetup.split("\n").map((l) => l.trim()).filter(Boolean));
     },
   });
 }
 
-const AGENT_LABEL: Record<string, string> = { claude: "Claude Code", codex: "Codex", copilot: "Copilot CLI", opencode: "OpenCode", gemini: "Gemini CLI" };
+const sessionStatus = (a?: AgentSession) => !a ? "No saved sessions" : a.status === "recent" ? "Recent activity" : a.status === "finished" ? "Last turn finished" : "No recent activity";
 
-export function AgentsView({ repo }: { repo: RepoView | undefined }) {
-  const units = useStore((s) => s.metrics.time_units);
-  const agentName = useStore((s) => AGENT_LABEL[s.settings.codingAgent]);
-  const q = useQuery({ queryKey: ["agents", repo?.path], queryFn: () => ai.agents(repo!.path), enabled: !!repo, refetchInterval: 10000 });
-  if (!repo) return <Note>Open a repository to see the AI coding sessions that worked in it.</Note>;
+export function AgentsView({ repo, tabId }: { repo: RepoView | undefined; tabId: string }) {
+  const settings = useStore((s) => s.settings);
+  const setSettings = useStore((s) => s.setSettings);
+  const [filter, setFilter] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const worktrees = [...(repo?.worktrees ?? [])];
+  if (repo && !worktrees.some((w) => sameFolder(w.path, repo.path))) worktrees.unshift({ path: repo.path, branch: repo.head_branch ?? "", locked: false });
+  const roots = worktrees.map((w) => w.path);
+  const claudeDir = agentConnection(settings, "claude")?.cliConfigDir ?? "";
+  const codexDir = agentConnection(settings, "codex")?.cliConfigDir ?? "";
+  const q = useQuery({
+    queryKey: ["agents", repo?.path, roots.join("\n"), claudeDir, codexDir],
+    queryFn: () => ai.agents(repo!.path, roots, claudeDir, codexDir),
+    enabled: !!repo,
+    refetchInterval: 10000,
+  });
+  if (!repo) return <Note>Open a repository to see its worktrees and saved coding sessions.</Note>;
+  const agentName = AGENT_LABEL[settings.codingAgent];
   const list = q.data ?? [];
+  const visible = worktrees.filter((w) => [w.path, w.branch, ...list.filter((a) => sameFolder(a.path, w.path)).map((a) => a.title)].join(" ").toLowerCase().includes(filter.toLowerCase()));
+  const agentItems = Object.entries(AGENT_LABEL).map(([key, name]) => ({
+    label: (settings.codingAgent === key ? "✓ " : "") + name,
+    onSelect: () => setSettings({ codingAgent: key }),
+  }));
   return (
-    <div className="flex-1 overflow-y-auto pt-2">
-      <div className="flex gap-2 px-3 pb-2">
-        <button className="flex-1 h-[26px] rounded-[3px] border border-accent/70 bg-accent/20 text-[12.5px] text-white hover:bg-accent/30" onClick={() => startAgent(repo, false)} title="In this repository, in the in-app terminal">
-          {agentName ? `Start ${agentName}` : "Choose a coding agent"}
+    <div className="flex-1 overflow-y-auto px-3 pt-2 pb-3">
+      <div className="flex items-center gap-2 h-[32px] text-[14px] mb-1">
+        <span className="font-semibold">Worktrees</span><span className="text-link">{worktrees.length}</span>
+        <div className="flex-1" />
+        <DropMenu align="end" items={[{ heading: "Coding agent" }, ...agentItems, { separator: true }, { label: "Agent preferences", onSelect: () => useStore.getState().setDialog({ kind: "prefs", section: "agents" }) }]}
+          trigger={<button className="p-1 rounded border border-accent/70 bg-accent/20 text-white" title="Choose coding agent"><Plug size={15} /></button>} />
+        <button className="p-1 text-fg2 hover:text-white" title="Filter worktrees and sessions" aria-expanded={searchOpen} onClick={() => { setSearchOpen(!searchOpen); setFilter(""); }}><Search size={15} /></button>
+      </div>
+      {searchOpen && <input autoFocus aria-label="Filter worktrees and sessions" placeholder="Filter worktrees and sessions" value={filter} onChange={(e) => setFilter(e.target.value)} className="w-full h-[26px] px-2 mb-2 bg-field border border-white/15 rounded text-[12px] outline-none focus:border-accent" />}
+      <div className="flex h-[36px] mb-2 rounded-[3px] border border-white/35 overflow-hidden">
+        <button className="flex-1 min-w-0 flex items-center justify-center gap-2 text-[13px] hover:bg-white/10" onClick={() => startAgent(repo, false)} title="Start in this repository's terminal">
+          <Plus size={14} /><span className="truncate">{agentName ? `Start ${agentName} Session` : "Choose a coding agent"}</span>
         </button>
-        <button className="h-[26px] px-2 rounded-[3px] border border-white/10 bg-white/5 text-[12.5px] text-fg hover:bg-white/10" onClick={() => startAgent(repo, true)} title="Create a worktree, run the setup commands, then start the agent">
-          In new worktree
+        <DropMenu align="end" trigger={<button className="px-2 border-l border-white/25 hover:bg-white/10" title="More agent options"><ChevronDown size={15} /></button>}
+          items={[{ label: "Start in new worktree…", onSelect: () => startAgent(repo, true) }, { heading: "Coding agent" }, ...agentItems]} />
+      </div>
+      {q.isLoading && <div className="py-2 text-[12px] text-fg2">Finding saved sessions…</div>}
+      {q.isError && <div className="py-2 text-[12px] text-bad">Could not read saved sessions. <button className="underline" onClick={() => q.refetch()}>Retry</button></div>}
+      {visible.map((w) => <AgentWorktree key={w.path} worktree={w} repo={repo} tabId={tabId} sessions={list.filter((a) => sameFolder(a.path, w.path))} />)}
+      {visible.length === 0 && <div className="py-3 text-[12px] text-fg2">No matching worktrees or sessions.</div>}
+      <div className="pt-2 text-[11px] text-fg3 leading-relaxed">
+        Codex CLI and Claude Code session history
+        {agentName && !["claude", "codex"].includes(settings.codingAgent) && ` · ${agentName} runs in the terminal.`}
+      </div>
+    </div>
+  );
+}
+
+function AgentWorktree({ worktree: w, repo, tabId, sessions }: { worktree: RepoView["worktrees"][number]; repo: RepoView; tabId: string; sessions: AgentSession[] }) {
+  const current = sameFolder(w.path, repo.path);
+  const q = useQuery({ queryKey: ["agentWorktreeStatus", w.path], queryFn: () => api.repoStatus(w.path), enabled: !current, refetchInterval: 10000 });
+  const status = current ? repo.status : q.data;
+  const counts = status ? workingChanges(status) : null;
+  const units = useStore((s) => s.metrics.time_units);
+  const agent = useStore((s) => s.settings.codingAgent);
+  const open = () => {
+    if (!current) return openRepoPath(w.path);
+    useStore.getState().setUi(tabId, { selection: { type: "wip" }, multi: [], compareWorkdir: null, diff: null, history: null, conflict: null, pr: null, issue: null });
+  };
+  return (
+    <div className={cn("rounded-[3px] border overflow-hidden mb-2", current ? "border-accent/80" : "border-white/20")}>
+      <div className={cn("px-2.5 py-2", current ? "bg-white/10" : "bg-white/5")}>
+        <div className="flex items-center gap-1.5">
+          {current && <House size={15} className="text-fg2 shrink-0" />}
+          <GitBranch size={13} className="text-fg2 shrink-0" />
+          <button onClick={open} className="font-semibold text-[14px] text-white/90 truncate hover:text-white" title={current ? "View working changes" : "Open worktree"}>{w.branch || "(detached HEAD)"}</button>
+          <div className="flex-1" />
+          <DropMenu align="end" trigger={<button className="p-1 text-fg2 hover:text-white" title="Worktree actions"><MoreVertical size={14} /></button>}
+            items={[{ label: current ? "View Changes" : "Open worktree", onSelect: open }, { label: `Start ${AGENT_LABEL[agent] ?? "agent"} here`, onSelect: () => launchAgent(w.path, agent) }, { label: "Copy worktree path", onSelect: () => copy(w.path) }]} />
+        </div>
+        <div className="flex items-center gap-1.5 text-[12px] text-fg2 mt-1" title={w.path}><Folder size={13} className="shrink-0" /><span className="truncate">{w.path.split(/[\\/]/).pop()}</span>{w.locked && <span className="text-[10px]">Locked</span>}</div>
+        <button onClick={open} className="flex gap-2 text-[12px] mt-1" title="View working changes">
+          {counts ? <>
+            {counts.added > 0 && <span className="text-good">+{counts.added}</span>}
+            {counts.modified > 0 && <span className="text-warn">✎{counts.modified}</span>}
+            {counts.deleted > 0 && <span className="text-bad">−{counts.deleted}</span>}
+            {counts.total === 0 && <span className="text-fg3">No file changes</span>}
+          </> : <span className="text-fg3">{q.isError ? "Changes unavailable" : "Loading changes…"}</span>}
         </button>
       </div>
-      <div className="px-3 pb-1 text-[12px] font-semibold tracking-wider text-fg2">SESSIONS ({list.length})</div>
-      {list.length === 0 && !q.isLoading && (
-        <div className="px-4 py-4 text-fg2 text-[12.5px] leading-relaxed">
-          <Bot size={26} className="mb-2 opacity-70" />
-          No Claude Code sessions have worked in this folder yet. Start one with <span className="mono">claude</span> in the terminal ({"Ctrl+`"}) and it shows up here.
-        </div>
-      )}
-      {list.map((a) => {
-        const t = timeSince(a.modified, units);
+      <div className="px-2.5 py-1.5 flex items-center gap-1.5 text-[12px] text-fg2 border-t border-white/5" title="Status reflects saved activity, not a live process check.">
+        <span className={cn("w-[7px] h-[7px] rounded-full shrink-0", sessions[0]?.status === "recent" ? "bg-good" : "bg-white/40")} />
+        <span className="flex-1 min-w-0 truncate">{sessionStatus(sessions[0])}</span>
+        <span className="text-[11px] text-fg3 whitespace-nowrap">{sessions.length} session{sessions.length === 1 ? "" : "s"}</span>
+      </div>
+      {sessions.map((a) => {
+        const time = timeSince(a.modified, units);
+        const resume = () => launchAgent(w.path, a.agent, a.id);
         return (
-          <CtxMenu
-            key={a.id}
-            items={[
-              { label: "Copy resume command", onSelect: () => copy(`claude --resume ${a.id}`) },
-              { label: "Copy session id", onSelect: () => copy(a.id) },
-            ]}
-          >
-            <div className="flex items-start gap-2 px-3 py-1.5 hover:bg-hoverrow cursor-default" title={`${a.title}\n${a.messages} messages · right-click to copy the resume command`}>
-              <span className={cn("mt-[5px] w-[7px] h-[7px] rounded-full shrink-0", a.status === "active" ? "bg-good" : "bg-white/25")} />
-              <div className="min-w-0 flex-1">
-                <div className="text-[12.5px] text-white/90 truncate">{a.title}</div>
-                <div className="text-[11px] text-fg3">
-                  {a.status === "active" ? "working" : "idle"} · {a.messages} messages · <span style={{ color: t.color }}>{t.text}</span>
-                </div>
-              </div>
+          <CtxMenu key={a.agent + a.id} items={[
+            { label: "Resume session", onSelect: resume },
+            { label: "Copy resume command", onSelect: () => copy((a.agent === "claude" ? "claude --resume " : "codex resume ") + a.id) },
+            { label: "Copy session id", onSelect: () => copy(a.id) },
+          ]}>
+            <div className="px-2.5 py-2 border-t border-white/5 hover:bg-hoverrow" title={a.title}>
+              <div className="flex items-center gap-2 text-[12px]"><Bot size={13} className="text-fg2 shrink-0" /><span className="truncate text-white/90 flex-1">{a.title}</span><button onClick={resume} className="text-link hover:underline text-[11px]">Resume</button></div>
+              <div className="mt-1 text-[10.5px] text-fg3">{AGENT_LABEL[a.agent]} · {sessionStatus(a)} · <span style={{ color: time.color }}>{time.text}</span></div>
             </div>
           </CtxMenu>
         );

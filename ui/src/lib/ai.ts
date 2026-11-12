@@ -21,11 +21,13 @@ export interface AgentSession {
   title: string;
   modified: number;
   messages: number;
-  status: "active" | "idle";
+  agent: "claude" | "codex";
+  path: string;
+  status: "recent" | "finished" | "idle";
 }
 
 export const ai = {
-  commitMessage: (path: string) => invokeAi<[string, string]>("ai_commit_message", { path }),
+  commitMessage: (path: string, sha?: string) => invokeAi<[string, string]>("ai_commit_message", { path, sha: sha ?? null }),
   stashMessage: (path: string) => invokeAi<string>("ai_stash_message", { path }),
   explainCommit: (path: string, sha: string) => invokeAi<string>("ai_explain_commit", { path, sha }),
   explainBranch: (path: string, branch: string, base?: string) => invokeAi<string>("ai_explain_branch", { path, branch, base: base ?? null }),
@@ -33,7 +35,7 @@ export const ai = {
   savePatch: (path: string, shas: string[], name: string) => invoke<string | null>("save_patch", { path, shas, name }),
   pickPatch: () => invoke<string | null>("pick_patch_file"),
   conflictCheck: (path: string, target?: string) => invoke<ConflictCheck>("conflict_check", { path, target: target ?? null }),
-  agents: (path: string) => invoke<AgentSession[]>("agent_sessions", { path }),
+  agents: (path: string, paths: string[], claudeDir: string, codexDir: string) => invoke<AgentSession[]>("agent_sessions", { path, paths, claudeDir, codexDir }),
 };
 
 /** Run one AI request with a busy note; setup errors open AI Preferences. */

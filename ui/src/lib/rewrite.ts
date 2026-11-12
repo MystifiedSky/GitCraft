@@ -2,6 +2,7 @@
 // (reword, drop, squash, move) that the right-click menus offer.
 import { api, type Commit, type RepoView, type TodoItem } from "./api";
 import { act, confirmThen } from "./repo";
+import { ai } from "./ai";
 import { useStore, type RebaseItem, type RebasePlan } from "./store";
 
 const toItem = (c: Commit): RebaseItem => ({
@@ -103,11 +104,15 @@ export function rewordCommit(repo: RepoView, sha: string) {
   const n = line.indexOf(sha) + 1;
   useStore.getState().setDialog({
     kind: "message",
-    title: "Reword commit message",
+    title: "Rename commit",
     label: "Commit message (first line is the summary)",
     value: c.body ? `${c.summary}\n\n${c.body}` : c.summary,
-    confirm: "Reword",
-    help: `Rewording this commit message will cause ${n} commit${n === 1 ? "" : "s"} to be rebased.`,
+    confirm: "Rename commit",
+    help: `Renaming changes this commit's ID${n > 1 ? ` and the IDs of ${n - 1} newer commit${n === 2 ? "" : "s"}` : ""}. Review the message before saving. You can undo this with Undo.`,
+    generate: async () => {
+      const [summary, description] = await ai.commitMessage(repo.path, sha);
+      return description ? `${summary}\n\n${description}` : summary;
+    },
     onSubmit: (msg) => quick(repo.path, baseFor(repo, sha), (items) => items.map((i) => (i.sha === sha ? { ...i, action: "reword", message: msg } : i))),
   });
 }

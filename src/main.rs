@@ -7,6 +7,7 @@ mod files;
 mod git;
 mod graph;
 mod ai;
+mod agents;
 mod ai_cli;
 mod ai_models;
 mod extras;
@@ -231,7 +232,7 @@ fn cancel_job(id: String, state: State<'_, AppState>) -> bool {
 }
 
 #[tauri::command]
-fn term_open(cwd: String, cols: u16, rows: u16, shell: Option<String>, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<u32, String> {
+fn term_open(cwd: String, cols: u16, rows: u16, shell: Option<String>, agent_env: Option<HashMap<String, String>>, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<u32, String> {
     let a1 = app.clone();
     let a2 = app.clone();
     state.terminals.open(
@@ -239,6 +240,7 @@ fn term_open(cwd: String, cols: u16, rows: u16, shell: Option<String>, app: taur
         &cwd,
         cols,
         rows,
+        agent_env.as_ref(),
         std::sync::Arc::new(move |id, data| {
             let _ = a1.emit("term-data", serde_json::json!({ "id": id, "data": data }));
         }),
@@ -425,8 +427,8 @@ fn open_url(url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn ai_commit_message(path: String) -> Result<(String, String), String> {
-    blocking(move || ai::commit_message(Path::new(&path))).await?
+async fn ai_commit_message(path: String, sha: Option<String>) -> Result<(String, String), String> {
+    blocking(move || ai::commit_message(Path::new(&path), sha.as_deref())).await?
 }
 
 #[tauri::command]
@@ -579,8 +581,12 @@ async fn pr_template(path: String) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-async fn agent_sessions(path: String) -> Result<Vec<extras::AgentSession>, String> {
-    blocking(move || extras::agent_sessions(Path::new(&path))).await
+async fn agent_sessions(path: String, paths: Option<Vec<String>>, claude_dir: Option<String>, codex_dir: Option<String>) -> Result<Vec<agents::AgentSession>, String> {
+    blocking(move || {
+        let mut roots = paths.unwrap_or_default();
+        if !roots.contains(&path) { roots.push(path); }
+        agents::sessions(&roots, claude_dir.as_deref(), codex_dir.as_deref())
+    }).await
 }
 
 /// Whether automatic updates are set up in this build (a public key is configured), and where they come from.

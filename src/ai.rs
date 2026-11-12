@@ -323,16 +323,39 @@ fn staged_or_all(dir: &Path) -> String {
 const COMMIT_SYSTEM: &str = "You write git commit messages. Read the diff and describe what changed and why it matters, \
 following the repository's existing message style shown in the recent commits. The summary is one line, imperative mood, \
 at most 72 characters, no trailing period. The description explains the change in a few short lines, or is empty for trivial changes.";
-pub fn commit_message(dir: &Path) -> Result<(String, String), String> {
-    let diff = staged_or_all(dir);
+/// Select the saved commit's changes when renaming; never include work in progress.
+fn commit_prompt(dir: &Path, sha: Option<&str>) -> Result<String, String> {
+    let (diff, recent, original) = if let Some(sha) = sha {
+        let revision = format!("{sha}^{{commit}}");
+        let resolved = git::run(dir, &["rev-parse", "--verify", "--end-of-options", &revision]);
+        if !resolved.ok {
+            return Err(resolved.message());
+        }
+        let oid = resolved.stdout.trim();
+        // --root includes the initial commit; merges are compared with their first parent.
+        let shown = git::run(dir, &["show", "--root", "--format=", "--patch", "--diff-merges=first-parent",
+            "--no-color", "--no-ext-diff", "--no-textconv", oid, "--"]);
+        if !shown.ok {
+            return Err(shown.message());
+        }
+        let original = git::run(dir, &["log", "-1", "--format=%B", oid, "--"]).stdout;
+        let recent = git::run(dir, &["log", "-15", "--format=%s", oid, "--"]).stdout;
+        (shown.stdout, recent, format!("Existing message (context only; describe the diff accurately):\n{original}\n\n"))
+    } else {
+        (staged_or_all(dir), git::run(dir, &["log", "-15", "--format=%s"]).stdout, String::new())
+    };
     if diff.trim().is_empty() {
         return Err("There are no changes to describe.".into());
     }
-    if diff.len() > MAX_INPUT_CHARS {
-        return Err(too_big("The diff", diff.len()));
+    let prompt = format!("Recent commit summaries in this repository:\n{recent}\n\n{original}Diff to describe:\n{diff}");
+    if prompt.len() > MAX_INPUT_CHARS {
+        return Err(too_big("The commit context", prompt.len()));
     }
-    let recent = git::run(dir, &["log", "-15", "--format=%s"]).stdout;
-    let prompt = format!("Recent commit summaries in this repository:\n{recent}\n\nDiff to describe:\n{diff}");
+    Ok(prompt)
+}
+
+pub fn commit_message(dir: &Path, sha: Option<&str>) -> Result<(String, String), String> {
+    let prompt = commit_prompt(dir, sha)?;
     let schema = json!({
         "type": "object",
         "properties": { "summary": { "type": "string" }, "description": { "type": "string" } },
@@ -508,13 +531,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rename_context_uses_the_selected_commit_without_pending_changes() {
+        let d = std::env::temp_dir().join(format!("gitcraft-ai-rename-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let run = |args: &[&str]| {
+            let result = git::run(&d, args);
+            assert!(result.ok, "{}", result.message());
+            result.stdout
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.name", "Test"]);
+        run(&["config", "user.email", "test@example.invalid"]);
+        std::fs::write(d.join("saved.txt"), "saved-root-change\n").unwrap();
+        run(&["add", "."]);
+        run(&["-c", "commit.gpgsign=false", "commit", "-qm", "Original message"]);
+        let root = run(&["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(d.join("later.txt"), "later-commit-change\n").unwrap();
+        run(&["add", "."]);
+        run(&["-c", "commit.gpgsign=false", "commit", "-qm", "Later message"]);
+        std::fs::write(d.join("saved.txt"), "staged-secret-marker\n").unwrap();
+        run(&["add", "saved.txt"]);
+        std::fs::write(d.join("saved.txt"), "unstaged-secret-marker\n").unwrap();
+        let prompt = commit_prompt(&d, Some(&root)).unwrap();
+        assert!(prompt.contains("+saved-root-change"));
+        assert!(prompt.contains("Original message"));
+        for excluded in ["later-commit-change", "staged-secret-marker", "unstaged-secret-marker"] {
+            assert!(!prompt.contains(excluded), "{excluded}");
+        }
+        assert!(commit_prompt(&d, None).unwrap().contains("staged-secret-marker"));
+        assert!(commit_prompt(&d, Some("missing-commit")).is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn needs_a_key_and_refuses_empty_changes() {
         // With no changes, nothing is sent to the API.
         let d = std::env::temp_dir().join(format!("gitcraft-ai-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         assert!(git::run(&d, &["init", "-q"]).ok);
-        assert!(commit_message(&d).unwrap_err().contains("no changes"));
+        assert!(commit_message(&d, None).unwrap_err().contains("no changes"));
         assert!(compose(&d).unwrap_err().contains("no changes"));
         let _ = std::fs::remove_dir_all(&d);
     }

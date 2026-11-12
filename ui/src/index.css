@@ -58,7 +58,7 @@ textarea {
 /* Other themes override the same variables (values from the original's theme files).
    text-white / bg-white/x use --color-white, so on light themes they turn dark. */
 :root {
-  --menu-bg: #2b2e35;
+  --menu-bg: #1f1f1f;
 }
 [data-theme="light"],
 [data-theme="light-hc"] {
@@ -115,50 +115,53 @@ body,
 /* Context / dropdown menus (shadcn-style, Radix underneath) */
 .menu-content {
   min-width: 190px;
+  max-width: calc(100vw - 16px);
+  max-height: var(--radix-context-menu-content-available-height, var(--radix-dropdown-menu-content-available-height, calc(100vh - 16px)));
+  overflow-y: auto;
   background: var(--menu-bg);
-  border: 1px solid rgb(255 255 255 / 0.12);
-  border-radius: 6px;
-  padding: 4px;
-  box-shadow: 0 8px 24px rgb(0 0 0 / 0.45);
+  border: 1px solid var(--color-line);
+  border-radius: 12px;
+  padding: 8px 0;
+  box-shadow: 0 12px 30px rgb(0 0 0 / 0.4);
   z-index: 60;
   font-size: 13px;
+  line-height: 20px;
 }
 .menu-item {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 10px;
-  border-radius: 4px;
+  padding: 5px 18px;
   outline: none;
   cursor: default;
   color: var(--color-fg);
 }
 .menu-item[data-highlighted] {
-  background: var(--color-accent);
-  color: white;
+  background: var(--color-hoverrow);
+  color: var(--color-fg);
 }
 .menu-item[data-disabled] {
   opacity: 0.4;
 }
 .menu-sep {
   height: 1px;
-  background: rgb(255 255 255 / 0.1);
-  margin: 4px 2px;
+  background: var(--color-line2);
+  margin: 10px 0;
 }
 .menu-label {
-  padding: 4px 10px;
+  padding: 4px 18px;
   font-size: 11px;
   color: var(--color-fg2);
   text-transform: uppercase;
 }
 .menu-shortcut {
   margin-left: auto;
-  padding-left: 16px;
+  padding-left: 20px;
   font-size: 11px;
-  color: var(--color-fg3);
+  color: var(--color-fg2);
 }
 .menu-item[data-highlighted] .menu-shortcut {
-  color: rgb(255 255 255 / 0.8);
+  color: var(--color-fg);
 }
 
 @keyframes spin {
@@ -168,4 +171,21 @@ body,
 }
 .spin {
   animation: spin 1s linear infinite;
+}
+
+/* Ref labels unfold without changing graph row heights or clipping inside the virtual scroller. */
+@keyframes commit-ref-unfold {
+  from { opacity: 0; transform: translateY(-4px) scaleY(0.85); }
+  to { opacity: 1; transform: translateY(0) scaleY(1); }
+}
+.commit-ref-stack {
+  animation: commit-ref-unfold 160ms ease-out;
+  box-shadow: 0 3px 8px rgb(0 0 0 / 0.18);
+}
+.commit-ref-label {
+  transition: filter 120ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .commit-ref-stack { animation: none; }
+  .commit-ref-label { transition: none; }
 }

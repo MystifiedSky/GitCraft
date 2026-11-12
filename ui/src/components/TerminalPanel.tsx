@@ -39,12 +39,18 @@ interface Tab {
   title: string;
   /** A command typed into the shell once it starts (coding agent sessions). */
   run?: string;
+  cwd?: string;
+  agentEnv?: Record<string, string>;
 }
 
+type TerminalRun = { command: string; title: string; cwd?: string; agentEnv?: Record<string, string> };
+const pendingRuns: TerminalRun[] = [];
+
 /** Open a new in-app terminal tab that runs `command` (shows the terminal panel). */
-export function runInTerminal(command: string, title: string) {
+export function runInTerminal(command: string, title: string, cwd?: string, agentEnv?: Record<string, string>) {
+  pendingRuns.push({ command, title, cwd, agentEnv });
   useStore.getState().setSettings({ showTerminal: true });
-  setTimeout(() => window.dispatchEvent(new CustomEvent("gitcraft-terminal-run", { detail: { command, title } })), 50);
+  window.dispatchEvent(new Event("gitcraft-terminal-run"));
 }
 
 /** In-app terminal under the graph, with terminal tabs (Ctrl+` toggles it). */
@@ -66,16 +72,19 @@ export function TerminalPanel({ cwd, visible }: { cwd: string; visible: boolean 
   useEffect(() => {
     const on = (e: Event) => {
       if (!visible) return;
-      const { command, title } = (e as CustomEvent<{ command: string; title: string }>).detail;
+      const requests = pendingRuns.splice(0);
+      if (!requests.length) return;
       setTabs((all) => {
-        const key = Math.max(0, ...all.map((t) => t.key)) + 1;
+        let key = Math.max(0, ...all.map((t) => t.key));
+        const added = requests.map((r) => ({ key: ++key, id: null, title: r.title, run: r.command, cwd: r.cwd ?? cwd, agentEnv: r.agentEnv }));
         setActive(key);
-        return [...all, { key, id: null, title, run: command }];
+        return [...all, ...added];
       });
     };
     window.addEventListener("gitcraft-terminal-run", on);
+    if (visible) on(new Event("gitcraft-terminal-run"));
     return () => window.removeEventListener("gitcraft-terminal-run", on);
-  }, [visible]);
+  }, [visible, cwd]);
   const close = (key: number) => {
     const t = tabs.find((x) => x.key === key);
     if (t?.id) invoke("term_close", { id: t.id });
@@ -130,8 +139,9 @@ export function TerminalPanel({ cwd, visible }: { cwd: string; visible: boolean 
         {tabs.map((t) => (
           <TermView
             key={t.key}
-            cwd={cwd}
+            cwd={t.cwd ?? cwd}
             run={t.run}
+            agentEnv={t.agentEnv}
             visible={visible && active === t.key}
             onReady={(id) => setTabs((all) => all.map((x) => (x.key === t.key ? { ...x, id } : x)))}
             onExit={() => close(t.key)}
@@ -142,7 +152,7 @@ export function TerminalPanel({ cwd, visible }: { cwd: string; visible: boolean 
   );
 }
 
-function TermView({ cwd, run, visible, onReady, onExit }: { cwd: string; run?: string; visible: boolean; onReady: (id: number) => void; onExit: () => void }) {
+function TermView({ cwd, run, agentEnv, visible, onReady, onExit }: { cwd: string; run?: string; agentEnv?: Record<string, string>; visible: boolean; onReady: (id: number) => void; onExit: () => void }) {
   // Preferences > In-App Terminal.
   const pref = useStore.getState().settings;
   const [focused, setFocused] = useState(true);
@@ -191,7 +201,7 @@ function TermView({ cwd, run, visible, onReady, onExit }: { cwd: string; run?: s
     Promise.all([unData, unExit])
       .then(async () => {
         if (disposed) return;
-        const id = await invoke<number>("term_open", { cwd, cols: t.cols, rows: t.rows, shell: pref.termShell || null });
+        const id = await invoke<number>("term_open", { cwd, cols: t.cols, rows: t.rows, shell: pref.termShell || null, agentEnv: agentEnv ?? null });
         if (disposed) return invoke("term_close", { id });
         idRef.current = id;
         for (const event of earlyData) if (event.id === id) t.write(event.data);

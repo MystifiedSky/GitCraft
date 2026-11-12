@@ -94,9 +94,9 @@ function CtxItems({ items }: { items: MenuEntry[] }) {
   );
 }
 
-export function CtxMenu({ children, items }: { children: ReactNode; items: MenuEntry[] | (() => MenuEntry[]) }) {
+export function CtxMenu({ children, items, onOpenChange }: { children: ReactNode; items: MenuEntry[] | (() => MenuEntry[]); onOpenChange?: (open: boolean) => void }) {
   return (
-    <CM.Root modal={false}>
+    <CM.Root modal={false} onOpenChange={onOpenChange}>
       <CM.Trigger asChild>{children}</CM.Trigger>
       <CM.Portal>
         <CM.Content className="menu-content">

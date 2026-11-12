@@ -1,10 +1,11 @@
-import { Check, Cloud, Eye, EyeOff, Laptop, MessageSquare, Network, Settings2, Tag, X, ChevronUp, ChevronDown, Loader2 } from "lucide-react";
+import { Eye, EyeOff, MessageSquare, Network, Settings2, X, ChevronUp, ChevronDown, Loader2 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Commit, GitRef, RepoView, Stats } from "@/lib/api";
 import { api } from "@/lib/api";
 import { DEFAULT_COLUMNS, useStore, useTabUi, type GraphColumns } from "@/lib/store";
 import { act, clearSolo, showAllRefs, toggleHidden, WIP_COMMIT_EVENT } from "@/lib/repo";
-import { branchMenu, commitMenu } from "@/lib/menus";
+import { commitMenu } from "@/lib/menus";
+import { CommitRefs } from "./CommitRefs";
 import { CtxMenu, DropMenu, type MenuEntry } from "./ui/menu";
 import { Button } from "./ui/button";
 import { Avatar } from "./Icons";
@@ -393,6 +394,7 @@ export function GraphView({ repo, tabId }: Props) {
         dim={q.length > 0 && !matchSet.has(i)}
         refs={refsBySha.get(c.sha)}
         ghost={ghostOn && !refsBySha.get(c.sha) && (hoverRow === i || sel) ? ghostFor(i) : undefined}
+        hovered={hoverRow === i}
         onHoverRow={setHoverRow}
         rowH={ROW}
         showDesc={cols.description}
@@ -544,6 +546,7 @@ function CommitRow({
   refs,
   ghost,
   onHoverRow,
+  hovered,
   rowH,
   showDesc,
   stats,
@@ -565,6 +568,7 @@ function CommitRow({
   dim: boolean;
   refs: GitRef[] | undefined;
   ghost: GitRef | undefined;
+  hovered: boolean;
   onHoverRow: (i: number | null) => void;
   rowH: number;
   showDesc: boolean;
@@ -574,10 +578,6 @@ function CommitRow({
 }) {
   const m = useStore((st) => st.metrics);
   const first = refs?.[0];
-  const remoteSame = first && first.kind === "Local" && repo.refs.some((r) => r.kind === "Remote" && r.sha === c.sha && r.name.endsWith("/" + first.name));
-  const isHead = first?.kind === "Local" && first.name === repo.head_branch;
-  const more = (refs?.length ?? 0) - 1 - (remoteSame ? 1 : 0);
-  const roomy = refW >= 120; // icons only when the branch/tag zone has room, the name comes first
   const desc = showDesc && c.body ? c.body.replace(/\r?\n+/g, " | ") : "";
   const bg = selected ? mix(color, 0.28) : highlighted ? mix(color, 0.14) : undefined;
   return (
@@ -614,36 +614,16 @@ function CommitRow({
               </div>
             )}
             {first && (
-              <CtxMenu items={() => branchMenu(repo, first)}>
-                <button
-                  type="button"
-                  tabIndex={selected ? 0 : -1}
-                  onClick={(e) => onClick(c, index, e)}
-                  onMouseEnter={() => onHoverRef(index)}
-                  onMouseLeave={() => onHoverRef(null)}
-                  onDoubleClick={(e) => {
-                    e.stopPropagation();
-                    if (first.kind === "Local" && !isHead) void act(repo.path, { type: "checkout", target: first.name });
-                    if (first.kind === "Remote") void act(repo.path, { type: "checkoutRemote", remoteBranch: first.name });
-                  }}
-                  title={refs!.slice(0, m.ref_max).map((r) => r.name).join("\n")}
-                  className="relative z-[1] flex items-center gap-[4px] px-[5px] rounded-[3px] min-w-0 max-w-full text-[12.5px] text-white"
-                  style={{ background: mix(color, 0.45), height: m.row_inner }}
-                >
-                  {isHead && <Check size={13} strokeWidth={3} className="shrink-0" />}
-                  {first.kind === "Tag" && <Tag size={12} className="shrink-0" />}
-                  <span className="truncate font-semibold min-w-[14px]">{first.name}</span>
-                  {roomy && first.kind === "Local" && <Laptop size={13} className="shrink-0 opacity-90" />}
-                  {(first.kind === "Remote" || remoteSame) && <Cloud size={13} className={cn("shrink-0 opacity-90", !roomy && "w-[11px]")} />}
-                  {roomy && more > 0 && <span className="shrink-0 text-[11px] opacity-80">+{more}</span>}
-                  {first.kind === "Local" && (first.ahead > 0 || first.behind > 0) && (
-                    <span className="shrink-0 text-[10.5px] font-semibold opacity-90" title={`${first.ahead} ahead, ${first.behind} behind ${first.upstream}`}>
-                      {first.ahead > 0 && `↑${first.ahead}`}
-                      {first.behind > 0 && `↓${first.behind}`}
-                    </span>
-                  )}
-                </button>
-              </CtxMenu>
+              <CommitRefs
+                repo={repo}
+                refs={refs!}
+                color={color}
+                hovered={hovered}
+                selected={selected}
+                roomy={refW >= 120}
+                onSelect={(e) => onClick(c, index, e)}
+                onHover={(active) => onHoverRef(active ? index : null)}
+              />
             )}
           </div>
         )}

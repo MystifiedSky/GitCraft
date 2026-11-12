@@ -28,8 +28,31 @@ import { Avatar, StatusIcon } from "./Icons";
 import { cn, fullDate, mix, MOD, withCoauthors } from "@/lib/utils";
 import { applyPatch, composeCommits, explainCommit, generateCommitMessage, generateStashTitle, patchName, savePatch } from "@/lib/ai";
 
+import { workingChanges } from "@/lib/working-changes";
+
 /** Right panel: staging and committing (WIP) or the details of a selected commit. */
 export function RightPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
+  const ui = useTabUi(tabId);
+  const setUi = useStore((s) => s.setUi);
+  const { total } = workingChanges(repo.status);
+  const inspecting = ui.selection.type === "commit" || ui.multi.length > 1 || !!ui.compareWorkdir;
+  return (
+    <div className="h-full flex flex-col bg-panel min-w-0">
+      {inspecting && total > 0 && (
+        <div className="flex items-center justify-center flex-wrap gap-x-2 gap-y-1 px-2 py-2 shrink-0 bg-accent/40 text-white text-[12px]" role="status">
+          <span>{total} file change{total === 1 ? "" : "s"} in working directory</span>
+          <button
+            className="border border-white/40 rounded-[2px] px-1.5 py-0.5 hover:bg-white/15 focus-visible:outline focus-visible:outline-1 focus-visible:outline-white"
+            onClick={() => setUi(tabId, { selection: { type: "wip" }, multi: [], compareWorkdir: null, diff: null, history: null, conflict: null, pr: null, issue: null })}
+          >View Changes</button>
+        </div>
+      )}
+      <div className="flex-1 min-h-0"><SelectionPanel repo={repo} tabId={tabId} /></div>
+    </div>
+  );
+}
+
+function SelectionPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
   const ui = useTabUi(tabId);
   if (ui.compareWorkdir) return <ComparePanel repo={repo} tabId={tabId} from={ui.compareWorkdir} to={WORKDIR} />;
   if (ui.multi.length === 2) {
@@ -221,7 +244,7 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
   const conflicted = repo.status.unstaged.filter((f) => f.status === "U");
   const unstaged = repo.status.unstaged.filter((f) => f.status !== "U");
   const staged = repo.status.staged;
-  const total = new Set([...repo.status.unstaged.map((f) => f.path), ...staged.map((f) => f.path)]).size;
+  const { total } = workingChanges(repo.status);
   const merging = repo.state_note === "merging";
   const [cur, inc] = repo.conflict_labels ?? [repo.head_branch ?? "HEAD", "incoming"];
   // Commit template (Preferences > Commit): fill an empty, untouched commit box.

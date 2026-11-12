@@ -77,6 +77,7 @@ impl Terminals {
         cwd: &str,
         cols: u16,
         rows: u16,
+        agent_env: Option<&HashMap<String, String>>,
         on_data: Arc<dyn Fn(u32, String) + Send + Sync>,
         on_exit: Arc<dyn Fn(u32) + Send + Sync>,
     ) -> Result<u32, String> {
@@ -87,6 +88,16 @@ impl Terminals {
         let mut cmd = shell_for(shell);
         cmd.cwd(cwd);
         cmd.env("TERM", "xterm-256color");
+        // Keep agent config paths out of shell command text.
+        if let Some(vars) = agent_env {
+            for key in ["CODEX_HOME", "CLAUDE_CONFIG_DIR"] {
+                if let Some(value) = vars.get(key) {
+                    let expanded = value.strip_prefix("~/").or_else(|| value.strip_prefix("~\\"))
+                        .and_then(|rest| std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(|home| std::path::PathBuf::from(home).join(rest)));
+                    cmd.env(key, expanded.unwrap_or_else(|| value.into()));
+                }
+            }
+        }
         let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
@@ -164,7 +175,7 @@ mod tests {
         let out = Arc::new(Mutex::new(String::new()));
         let o2 = out.clone();
         let id = t
-            .open("", &std::env::temp_dir().to_string_lossy(), 80, 24, Arc::new(move |_, s| o2.lock().unwrap().push_str(&s)), Arc::new(|_| {}))
+            .open("", &std::env::temp_dir().to_string_lossy(), 80, 24, None, Arc::new(move |_, s| o2.lock().unwrap().push_str(&s)), Arc::new(|_| {}))
             .unwrap();
         // Like xterm.js does in the app: answer the console's "where is the cursor?" request.
         let mut answered = false;

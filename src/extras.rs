@@ -3,7 +3,6 @@
 //! - Conflict prevention: warn early when your branch would conflict with its target
 //!   (the original's "proactive conflict detection with target branch"), computed locally
 //!   with `git merge-tree` — nothing leaves the computer.
-//! - Agents: Claude Code sessions that worked in this repository.
 
 use crate::git;
 use crate::metrics::{DIFF_CONTEXT_LINES, DIFF_INTERHUNK_LINES, MERGE_RENAME_LIMIT, MERGE_RENAME_THRESHOLD, PATCH_START_NUMBER, PATCH_SUBJECT_PREFIX};
@@ -99,19 +98,27 @@ pub fn repo_summary(dir: &Path) -> RepoSummary {
     if !dir.is_dir() {
         return RepoSummary::default();
     }
-    let o = git::run(dir, &["status", "--porcelain=v2", "--branch"]);
+    // Use the same recovered recursion/rename rules as the working-directory lists.
+    // NUL records keep filenames containing line breaks from inflating the count.
+    let options = git::status_options();
+    let o = git::run(dir, &["--no-optional-locks", "status", "--porcelain=v2", "--branch", "-z", &options[0], &options[1]]);
     if !o.ok {
         return RepoSummary::default();
     }
     let mut s = RepoSummary { exists: true, ..Default::default() };
-    for line in o.stdout.lines() {
+    let mut records = o.stdout.split('\0');
+    while let Some(line) = records.next() {
         if let Some(b) = line.strip_prefix("# branch.head ") {
             s.branch = (b != "(detached)").then(|| b.to_string());
         } else if let Some(ab) = line.strip_prefix("# branch.ab ") {
             let mut it = ab.split_whitespace();
             s.ahead = it.next().and_then(|x| x.trim_start_matches('+').parse().ok()).unwrap_or(0);
             s.behind = it.next().and_then(|x| x.trim_start_matches('-').parse().ok()).unwrap_or(0);
-        } else if !line.starts_with('#') && !line.is_empty() {
+        } else if line.starts_with("2 ") {
+            s.changes += 1;
+            records.next(); // A renamed/copied file has a second NUL record for its old path.
+        } else if line.starts_with("1 ") || line.starts_with("u ") || line.starts_with("? ") {
+            // Each porcelain entry represents a path, even when both index and worktree changed.
             s.changes += 1;
         }
     }
@@ -182,63 +189,6 @@ pub fn conflict_check(dir: &Path, target: Option<&str>) -> ConflictCheck {
         return ConflictCheck { target, files, note: None };
     }
     ConflictCheck { target, files: vec![], note: Some(o.message()) }
-}
-
-#[derive(Serialize, Clone)]
-pub struct AgentSession {
-    pub id: String,
-    pub title: String,
-    pub modified: i64,
-    pub messages: usize,
-    /// "active" if written to in the last two minutes, else "idle".
-    pub status: String,
-}
-
-/// Claude Code keeps each project's sessions under ~/.claude/projects/<path with non-alphanumerics as '-'>.
-pub fn claude_project_dir(repo: &Path) -> PathBuf {
-    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from).unwrap_or_default();
-    let name: String = repo.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-    home.join(".claude").join("projects").join(name)
-}
-
-pub fn agent_sessions(repo: &Path) -> Vec<AgentSession> {
-    let dir = claude_project_dir(repo);
-    let now = std::time::SystemTime::now();
-    let mut out = Vec::new();
-    let Ok(rd) = std::fs::read_dir(&dir) else { return out };
-    for e in rd.flatten() {
-        let p = e.path();
-        if p.extension().map(|x| x != "jsonl").unwrap_or(true) {
-            continue;
-        }
-        let modified = e.metadata().and_then(|m| m.modified()).ok();
-        let text = std::fs::read_to_string(&p).unwrap_or_default();
-        let mut title = String::new();
-        let mut messages = 0;
-        for line in text.lines() {
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
-            if v["type"] == "user" || v["type"] == "assistant" {
-                messages += 1;
-            }
-            if title.is_empty() && v["type"] == "user" {
-                let c = &v["message"]["content"];
-                let t = c.as_str().map(|s| s.to_string()).or_else(|| c.as_array().and_then(|a| a.iter().find_map(|b| b["text"].as_str().map(|s| s.to_string()))));
-                if let Some(t) = t.filter(|t| !t.trim().is_empty() && !t.starts_with('<')) {
-                    title = t.lines().next().unwrap_or_default().chars().take(120).collect();
-                }
-            }
-        }
-        let age = modified.and_then(|m| now.duration_since(m).ok()).map(|d| d.as_secs()).unwrap_or(u64::MAX);
-        out.push(AgentSession {
-            id: p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
-            title: if title.is_empty() { "(untitled session)".into() } else { title },
-            modified: modified.and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0),
-            messages,
-            status: if age < 120 { "active".into() } else { "idle".into() },
-        });
-    }
-    out.sort_by(|a, b| b.modified.cmp(&a.modified));
-    out
 }
 
 #[cfg(test)]
@@ -364,6 +314,12 @@ mod tests {
         fs::write(d.join("x.txt"), "x").unwrap();
         let s = repo_summary(&d);
         assert!(s.exists && s.changes == 1 && s.branch.as_deref() == Some("main"));
+        // Personal settings must not hide files or collapse a new directory into one change.
+        assert!(git::run(&d, &["config", "status.showUntrackedFiles", "no"]).ok);
+        fs::create_dir_all(d.join("nested")).unwrap();
+        fs::write(d.join("nested/a.txt"), "a").unwrap();
+        fs::write(d.join("nested/b.txt"), "b").unwrap();
+        assert_eq!(repo_summary(&d).changes, 3);
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -385,12 +341,11 @@ mod tests {
         let s = git::status(&d);
         assert_eq!(s.staged.len(), 1, "{:?}", s.staged);
         assert_eq!((s.staged[0].path.as_str(), s.staged[0].status), ("new.txt", 'R'));
+        // The repository summary must consume the old-path record and count this rename once.
+        assert_eq!(repo_summary(&d).changes, 1);
+        fs::write(d.join("new.txt"), "edited after staging\n").unwrap();
+        assert_eq!(repo_summary(&d).changes, 1);
         let _ = fs::remove_dir_all(&d);
     }
 
-    #[test]
-    fn claude_project_folder_name() {
-        let p = claude_project_dir(Path::new(r"C:\Users\Sam\My Project"));
-        assert!(p.ends_with(Path::new(".claude").join("projects").join("C--Users-Sam-My-Project")));
-    }
 }
