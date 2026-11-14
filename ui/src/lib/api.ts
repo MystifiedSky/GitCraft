@@ -93,6 +93,7 @@ export type DiffSource =
 export const WORKDIR = "WORKDIR";
 
 export interface FileVersions {
+  decoding_loss?: boolean;
   new_token?: string | null;
   too_large?: boolean;
   preview_limit?: number;
@@ -226,6 +227,7 @@ export interface SubmoduleInfo {
 }
 
 export interface ConflictInfo {
+  decoding_loss?: boolean;
   working_token: string;
   working: string | null;
   base: string | null;
@@ -239,7 +241,7 @@ export interface ConflictInfo {
 export interface RebaseState { head: string; branch: string; base: string }
 
 export interface DiffLine {
-  kind: "Context" | "Added" | "Removed" | "Hunk" | "Meta";
+  kind: "Context" | "Added" | "Removed" | "Hunk" | "Meta" | "Limit";
   old_no: number | null;
   new_no: number | null;
   text: string;
@@ -251,6 +253,8 @@ export interface LogEntry {
   ok: boolean;
   output: string;
 }
+
+export interface PushReview { branch: string; head: string; remote: string; remoteRef: string; url: string; remoteOid: string; trackingOid: string; config: string }
 
 export type Action =
   | { type: "stage"; paths: string[] }
@@ -273,7 +277,7 @@ export type Action =
   | { type: "deleteRemoteTag"; name: string; remote: string }
   | { type: "fetch" }
   | { type: "pull"; mode: string }
-  | { type: "push"; force: boolean; lease?: boolean }
+  | { type: "push"; force: boolean; lease?: boolean; review?: PushReview }
   | { type: "pushBranch"; branch: string }
   | { type: "skipRebase" }
   | { type: "interactiveRebase"; base: string; items: TodoItem[]; expected: RebaseState }

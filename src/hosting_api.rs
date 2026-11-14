@@ -561,6 +561,9 @@ fn await_gitlab_rebase(mut read: impl FnMut() -> Result<Value,String>, mut pause
 }
 
 pub fn merge_pr(r: &RemoteRepo, number: u64, method: &str) -> Result<(), String> {
+    if r.service == "bitbucket-server" && method != "default" {
+        return Err("This service uses its configured server default merge strategy. Refresh the pull request and select Server default.".into());
+    }
     let waiting = MergeWait::new(r, number)?;
     let b = api_base(&r.service);
     match r.service.as_str() {
@@ -835,11 +838,13 @@ mod concurrency_tests {
     fn launchpad_bounds_workers_and_preserves_partial_errors() {
         use std::sync::atomic::{AtomicUsize,Ordering};
         let active=AtomicUsize::new(0);let peak=AtomicUsize::new(0);
+        let started=std::time::Instant::now();
         let result=parallel_launchpad(&["a","b","c","d","e","f"],|id| {
             let count=active.fetch_add(1,Ordering::SeqCst)+1;peak.fetch_max(count,Ordering::SeqCst);
             std::thread::sleep(std::time::Duration::from_millis(25));active.fetch_sub(1,Ordering::SeqCst);
             Launchpad {errors:vec![id.into()],..Default::default()}
         });
+        eprintln!("Six independent 25ms services: {:?}, sequential fixture budget 150ms, peak {} workers", started.elapsed(), peak.load(Ordering::SeqCst));
         assert_eq!(result.errors.len(),6);assert!(peak.load(Ordering::SeqCst)>1);assert!(peak.load(Ordering::SeqCst)<=4);
     }
 }
@@ -857,5 +862,16 @@ mod rebase_wait_tests {
         assert!(await_gitlab_rebase(||panic!("cancelled"),||{},||true,&expected,std::time::Duration::from_secs(5)).is_err());
         assert!(await_gitlab_rebase(||panic!("expired"),||{},||false,&expected,std::time::Duration::ZERO).is_err());
         let mut changed=state(false);changed["source_branch"]=json!("other");assert!(await_gitlab_rebase(||Ok(changed.clone()),||{},||false,&expected,std::time::Duration::from_secs(5)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod server_merge_tests {
+    #[test]
+    fn refuses_specific_strategies_before_contacting_a_server_that_uses_defaults() {
+        let remote = crate::hosting::RemoteRepo {provider: crate::hosting::Provider::Bitbucket, service:"bitbucket-server".into(),host:"example.invalid".into(),path:"P/repo".into(),web:"https://example.invalid".into()};
+        for method in ["merge", "squash", "rebase"] {
+            assert!(super::merge_pr(&remote, 1, method).unwrap_err().contains("server default"));
+        }
     }
 }

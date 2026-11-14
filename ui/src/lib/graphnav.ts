@@ -12,10 +12,11 @@ interface NavCommit {
  */
 export function nextTopological(commits: NavCommit[], headSha: string, hasWip: boolean, current: NavSelection | null): NavSelection | null {
   if (!current) return defaultSelection(commits, headSha, hasWip);
-  if (current.type === "wip") return headSha ? { type: "commit", sha: headSha } : null;
+  if (current.type === "wip") return defaultSelection(commits, headSha, false);
   const c = commits.find((x) => x.sha === current.sha);
-  const parent = c?.parents[0];
-  return { type: "commit", sha: parent ?? current.sha };
+  if (!c) return defaultSelection(commits, headSha, hasWip);
+  const parent = c.parents[0];
+  return { type: "commit", sha: parent && commits.some(commit => commit.sha === parent) ? parent : current.sha };
 }
 
 /**
@@ -31,7 +32,7 @@ export function previousTopological(commits: NavCommit[], headSha: string, hasWi
 
 export function defaultSelection(commits: NavCommit[], headSha: string, hasWip: boolean): NavSelection | null {
   if (hasWip) return { type: "wip" };
-  if (headSha) return { type: "commit", sha: headSha };
+  if (headSha && commits.some(commit => commit.sha === headSha)) return { type: "commit", sha: headSha };
   return commits.length ? { type: "commit", sha: commits[0].sha } : null;
 }
 

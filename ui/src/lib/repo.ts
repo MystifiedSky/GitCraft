@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { QueryClient, useQuery } from "@tanstack/react-query";
 import { postDesktopNotifications } from "./desktop-notify";
 import { invoke } from "@tauri-apps/api/core";
-import { api, type Action, type FileChange, type GitRef, type RefView, type RepoView } from "./api";
+import { api, type Action, type FileChange, type GitRef, type RefView, type RepoView, type PushReview } from "./api";
 import { useStore } from "./store";
 import { spinButtonFor, withSpin } from "./spin";
 
@@ -353,8 +353,13 @@ async function afterAction(path: string, action: Action, ok: boolean, message: s
   if (ok && ["lfsInstall", "lfsTrack", "lfsUntrack"].includes(action.type)) await queryClient.invalidateQueries({ queryKey: ["lfsInfo", path] });
   if (ok && ["lfsLock", "lfsUnlock", "addRemote", "editRemote", "removeRemote"].includes(action.type)) await queryClient.invalidateQueries({ queryKey: ["lfsLocks", path] });
   // General > Keep submodules up to date: "Automatically update all submodules after performing a Git action".
-  if (ok && set.autoUpdateSubmodules && MOVES_HEAD.has(action.type) && (latest.get(path)?.submodules.length ?? 0) > 0)
-    await api.run(path, { type: "submoduleUpdate", paths: [] }).catch(() => undefined);
+  let submoduleError: string | undefined;
+  if (ok && set.autoUpdateSubmodules && MOVES_HEAD.has(action.type) && (latest.get(path)?.submodules.length ?? 0) > 0) {
+    try {
+      const result = await api.run(path, { type: "submoduleUpdate", paths: [] });
+      if (!result.ok) submoduleError = result.message;
+    } catch (error) { submoduleError = String(error); }
+  }
   // General > Delete ".orig" files after merging.
   if (ok && set.deleteOrigAfterMerge && (wasMerging && (action.type === "commit" || action.type === "continueRebase") || action.type === "merge"))
     {
@@ -364,6 +369,11 @@ async function afterAction(path: string, action: Action, ok: boolean, message: s
   // Notifications > Enable Desktop Notifications: a finished network action while GitCraft is in the background. Failures reach the
   // bell (and from there a desktop notification) through the error toast, so only successes are posted here.
   if (ok && NETWORK.has(action.type)) postDesktopNotifications([`${path.split(/[\\/]/).pop()}: ${message.split("\n")[0]}`]);
+  if (submoduleError !== undefined) {
+    const text = `The repository action completed, but its submodules could not be updated. Your local work was kept. Resolve the reported problem, then retry the submodule update.\n\n${submoduleError}`;
+    useStore.getState().toast(false, text);
+    if (!useStore.getState().dialog) confirmThen("Submodules need attention", text, "Retry update", () => { void act(path, { type: "submoduleUpdate", paths: [] }); }, false);
+  }
 }
 
 const SSH_REFUSED = /Permission denied \(publickey|Could not read from remote repository|Host key verification failed/i;
@@ -452,18 +462,23 @@ async function offerSignInHelp(path: string, action: Action, message: string) {
 }
 
 /** The remote has commits we don't: pull first, or force push (with lease, or without as a last resort). */
-function offerForcePush(path: string) {
+async function offerForcePush(path: string) {
   const st = useStore.getState();
   const repo = latest.get(path);
   const b = repo?.refs.find((r) => r.kind === "Local" && r.name === repo.head_branch);
+  let review: PushReview;
+  try {
+    review = await invoke<PushReview>("push_review", { path });
+    if (review.branch !== `refs/heads/${repo?.head_branch}` || review.head !== repo?.head_sha) throw new Error("The branch changed after the rejected push. Refresh and try again.");
+  } catch (error) { st.toast(false, String(error)); return; }
   st.setDialog({
     kind: "choice",
     title: "Push was rejected",
-    text: `'${b?.name ?? "This branch"}' is behind '${b?.upstream || "the remote"}'. Update your branch by doing a Pull.\n\nForce push is a destructive action and cannot be undone: it replaces the remote branch with yours.`,
+    text: `'${b?.name ?? "This branch"}' is behind '${review.remote}/${review.remoteRef.replace(/^refs\/heads\//, "")}'. Update your branch by doing a Pull.\n\nForce push is a destructive action and cannot be undone: it replaces the remote branch with yours.`,
     choices: [
       { label: "Pull", variant: "primary", onSelect: () => act(path, { type: "pull", mode: st.settings.pullMode === "fetch" ? "ff" : st.settings.pullMode }) },
-      { label: "Force Push", variant: "danger", onSelect: () => act(path, { type: "push", force: true, lease: true }) },
-      { label: "Force Push Anyway", variant: "danger", onSelect: () => act(path, { type: "push", force: true, lease: false }) },
+      { label: "Force Push", variant: "danger", onSelect: () => act(path, { type: "push", force: true, lease: true, review }) },
+      { label: "Force Push Anyway", variant: "danger", onSelect: () => act(path, { type: "push", force: true, lease: false, review }) },
     ],
   });
 }

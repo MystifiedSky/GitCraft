@@ -421,7 +421,7 @@ fn finder_preserves_unicode_names_and_blame_supports_sha256() {
 fn first_push_qualifies_a_branch_that_shares_its_name_with_a_tag() {
     let f=fixture("gitcraft-push-tag-");let remote=tempfile::tempdir().unwrap();let d=f.path();assert!(git::run(remote.path(),&["init","--bare","-q"]).ok);
     assert!(git::run(d,&["tag","main"]).ok);assert!(git::run(d,&["remote","add","origin",&remote.path().to_string_lossy()]).ok);
-    let result=Engine::default().perform(&d.to_string_lossy(),Action::Push {force:false,lease:None});assert!(result.ok,"{}",result.message);
+    let result=Engine::default().perform(&d.to_string_lossy(),Action::Push {force:false,lease:None,review:None});assert!(result.ok,"{}",result.message);
     assert_eq!(git::run(remote.path(),&["rev-parse","refs/heads/main"]).stdout.trim(),head(d));
     assert!(!git::run(remote.path(),&["show-ref","--verify","refs/tags/main"]).ok);
 }
@@ -606,4 +606,327 @@ fn escaped_exact_ignore_patterns_match_only_the_named_file_and_directory() {
     assert!(git::run(d,&["check-ignore","--","[ab].txt"]).ok);assert!(!git::run(d,&["check-ignore","--","a.txt","b.txt"]).ok);
     std::fs::create_dir(d.join("[dir]")).unwrap();std::fs::write(d.join("[dir]/inside.txt"),"ignored").unwrap();
     crate::manage::ignore(d,r"/\[dir\]/").unwrap();assert!(git::run(d,&["check-ignore","--","[dir]/inside.txt"]).ok);
+}
+
+#[test]
+fn conflict_prevention_supports_both_object_formats_and_reports_real_errors() {
+    for format in ["sha1", "sha256"] {
+        let folder = tempfile::tempdir().unwrap(); let path = folder.path();
+        for args in [vec!["init", "-q", "-b", "main", if format == "sha1" { "--object-format=sha1" } else { "--object-format=sha256" }],
+            vec!["config", "user.name", "Fixture"], vec!["config", "user.email", "fixture@example.invalid"], vec!["config", "commit.gpgsign", "false"]] {
+            assert!(git::run(path, &args).ok);
+        }
+        std::fs::write(path.join("f.txt"), "base\n").unwrap();
+        assert!(git::run(path, &["add", "."]).ok); assert!(git::run(path, &["commit", "-qm", "base"]).ok);
+        assert!(git::run(path, &["checkout", "-qb", "side"]).ok);
+        std::fs::write(path.join("f.txt"), "side\n").unwrap(); assert!(git::run(path, &["commit", "-qam", "side"]).ok);
+        assert!(git::run(path, &["checkout", "-q", "main"]).ok);
+        let clean = crate::extras::conflict_check(path, Some("side")); assert!(clean.files.is_empty()); assert!(clean.note.is_none());
+        std::fs::write(path.join("f.txt"), "main\n").unwrap(); assert!(git::run(path, &["commit", "-qam", "main"]).ok);
+        let conflicts = crate::extras::conflict_check(path, Some("side")); assert_eq!(conflicts.files, vec!["f.txt"]); assert!(conflicts.note.is_none(), "{format}: {:?}", conflicts.note);
+        let error = crate::extras::conflict_check(path, Some("missing-branch")); assert!(error.files.is_empty()); assert!(error.note.is_some());
+        assert_eq!(git::run(path, &["branch", "--show-current"]).stdout.trim(), "main");
+    }
+}
+
+#[test]
+fn textconv_never_enters_partial_mutations_or_working_patch_exports() {
+    let folder=fixture("gitcraft-textconv-");let d=folder.path();
+    std::fs::write(d.join(".gitattributes"), "file.txt diff=fixture\n").unwrap();
+    assert!(git::run(d,&["config","diff.fixture.textconv","sed s/secret/public/g"]).ok);
+    std::fs::write(d.join("file.txt"), "base\nsecret\n").unwrap();
+    // Prove Git's configured display converter is active in this fixture.
+    assert!(git::run(d,&["diff","--textconv","--","file.txt"]).stdout.contains("+public"));
+    let shown=git::file_diff_opts(d,&git::DiffSource::Unstaged,"file.txt",false,None,false);
+    let raw=git::diff_text_checked(d,&git::DiffSource::Unstaged,"file.txt",None,false).unwrap();
+    assert!(raw.contains("+secret"));assert!(!raw.contains("+public"));
+    let exported=crate::extras::make_patch(d,&[]).unwrap();assert!(exported.contains("+secret"));assert!(!exported.contains("+public"));
+    crate::files::apply_part_checked(d,"file.txt",false,crate::files::PatchOp::Stage,0,None,&shown).unwrap();
+    assert_eq!(git::run(d,&["show",":file.txt"]).stdout,"base\nsecret\n");
+    assert_eq!(std::fs::read(d.join("file.txt")).unwrap(),b"base\nsecret\n");
+    crate::files::apply_part(d,"file.txt",false,crate::files::PatchOp::Unstage,0,None).unwrap();
+    assert_eq!(git::run(d,&["show",":file.txt"]).stdout,"base\n");
+    crate::files::apply_part(d,"file.txt",false,crate::files::PatchOp::Discard,0,None).unwrap();
+    assert_eq!(std::fs::read(d.join("file.txt")).unwrap(),b"base\n");
+    let parent=head(d);std::fs::write(d.join("file.txt"),"base\nsecret\n").unwrap();
+    assert!(git::run(d,&["add","file.txt"]).ok);assert!(git::run(d,&["commit","-qm","raw bytes"]).ok);
+    let committed=head(d);let range=git::diff_text_checked(d,&git::DiffSource::Range(parent.clone(),committed.clone()),"file.txt",None,false).unwrap();assert!(range.contains("+secret"));
+    assert!(Engine::default().perform(&d.to_string_lossy(),Action::RevertHunk {sha:committed,parent:Some(parent),file:"file.txt".into(),hunk:0,lines:None}).ok);
+    assert_eq!(std::fs::read(d.join("file.txt")).unwrap(),b"base\n");
+}
+
+#[test]
+fn first_ordinary_commit_undo_redo_preserves_index_and_working_files() {
+    for clone in [false,true] {
+        let folder=tempfile::tempdir().unwrap();let path=folder.path().join("work");
+        if clone {
+            let remote=folder.path().join("remote.git");assert!(git::run(folder.path(), &["init","--bare","-q",&remote.to_string_lossy()]).ok);
+            assert!(git::run(folder.path(), &["clone","-q",&remote.to_string_lossy(),&path.to_string_lossy()]).ok);
+        } else {std::fs::create_dir(&path).unwrap();assert!(git::run(&path,&["init","-q"]).ok);}
+        for args in [["config","user.name","Fixture"],["config","user.email","fixture@example.invalid"],["config","commit.gpgsign","false"],["config","core.autocrlf","false"]] {assert!(git::run(&path,&args).ok);}
+        std::fs::write(path.join("first.txt"),"staged\n").unwrap();assert!(git::run(&path,&["add","first.txt"]).ok);
+        let engine=Engine::default();let repo=path.to_string_lossy();
+        assert!(engine.perform(&repo,Action::Commit {summary:"first".into(),description:String::new(),amend:false,stage_all:false,skip_hooks:false,strip_comments:false}).ok);
+        let committed=head(&path);let branch=git::run(&path,&["symbolic-ref","HEAD"]).stdout.trim().to_owned();
+        std::fs::write(path.join("first.txt"),"later working edit\n").unwrap();
+        assert!(engine.undo_info(&repo).undo.is_some());assert!(engine.perform(&repo,Action::Undo).ok);assert!(!git::run(&path,&["rev-parse","--verify","HEAD"]).ok);
+        assert_eq!(git::run(&path,&["show",":first.txt"]).stdout,"staged\n");assert_eq!(std::fs::read(path.join("first.txt")).unwrap(),b"later working edit\n");
+        assert!(engine.perform(&repo,Action::Redo).ok);assert_eq!(head(&path),committed);
+        assert!(git::run(&path,&["checkout","-qb","other"]).ok);assert!(!engine.perform(&repo,Action::Undo).ok);
+        assert!(git::run(&path,&["symbolic-ref","HEAD",&branch]).ok);assert!(git::run(&path,&["commit","--allow-empty","-qm","intervening"]).ok);assert!(!engine.perform(&repo,Action::Undo).ok);
+    }
+}
+
+#[test]
+fn literal_file_hunks_never_read_or_stage_a_matching_siblings_content() {
+    let folder=fixture("gitcraft-literal-hunks-");let d=folder.path();
+    for name in ["[ab].txt","a.txt"] {std::fs::write(d.join(name),"base\n").unwrap();}
+    assert!(git::run(d,&["add","."]).ok);assert!(git::run(d,&["commit","-qm","files"]).ok);
+    std::fs::write(d.join("[ab].txt"),"base\nselected\n").unwrap();std::fs::write(d.join("a.txt"),"base\nsibling\n").unwrap();
+    let raw=git::diff_text_checked(d,&git::DiffSource::Unstaged,"[ab].txt",None,false).unwrap();
+    assert_eq!(raw.matches("diff --git ").count(),1);assert!(raw.contains("+selected"));assert!(!raw.contains("+sibling"));
+    let multi=format!("{raw}{}",git::diff_text_checked(d,&git::DiffSource::Unstaged,"a.txt",None,false).unwrap());assert!(crate::files::partial_patch(&multi,0,None,false).is_none());
+    for lines in [Some(vec![1usize]),None] {
+        crate::files::apply_part(d,"[ab].txt",false,crate::files::PatchOp::Stage,0,lines.as_deref()).unwrap();
+        assert_eq!(git::run(d,&["show", ":[ab].txt"]).stdout,"base\nselected\n");assert_eq!(git::run(d,&["show",":a.txt"]).stdout,"base\n");
+        crate::files::apply_part(d,"[ab].txt",false,crate::files::PatchOp::Unstage,0,None).unwrap();
+    }
+    let engine=Engine::default();let repo=d.to_string_lossy();assert!(engine.perform(&repo,Action::Stage {paths:vec!["[ab].txt".into()]}).ok);
+    assert_eq!(git::run(d,&["show",":a.txt"]).stdout,"base\n");assert!(engine.perform(&repo,Action::Unstage {paths:vec!["[ab].txt".into()]}).ok);
+    crate::files::apply_part(d,"[ab].txt",false,crate::files::PatchOp::Discard,0,None).unwrap();assert_eq!(std::fs::read(d.join("[ab].txt")).unwrap(),b"base\n");assert_eq!(std::fs::read(d.join("a.txt")).unwrap(),b"base\nsibling\n");
+}
+
+#[test]
+fn oversized_clipboard_sources_are_rejected_before_buffering_their_contents() {
+    let folder=fixture("gitcraft-copy-bounds-");let d=folder.path();
+    let large=std::fs::File::create(d.join("large.bin")).unwrap();large.set_len(64*1024*1024).unwrap();drop(large);
+    assert!(crate::files::file_text(d,"large.bin",None).unwrap_err().contains("too large"));
+    assert!(git::run(d,&["add","large.bin"]).ok);
+    assert!(crate::files::file_text(d,"large.bin",Some(":")).unwrap_err().contains("too large"));
+    assert!(git::run(d,&["commit","-qm","large blob"]).ok);
+    assert!(crate::files::file_text(d,"large.bin",Some("HEAD")).unwrap_err().contains("too large"));
+    assert!(crate::files::file_text(d,"missing",None).is_err());assert!(crate::files::file_text(d,"missing",Some("HEAD")).is_err());
+    assert_eq!(crate::files::file_text(d,"file.txt",None).unwrap(),"base\n");
+    assert_eq!(crate::files::file_text(d,"file.txt",Some(":")).unwrap(),"base\n");
+    assert_eq!(crate::files::file_text(d,"file.txt",Some("HEAD")).unwrap(),"base\n");
+}
+
+#[test]
+fn selected_lines_preserve_unselected_eof_newlines_on_both_sides() {
+    for newline in ["\n","\r\n"] {for old_end in [false,true] {for new_end in [false,true] {
+        let folder=fixture("gitcraft-eof-selection-");let d=folder.path();
+        let old=format!("A{newline}B{newline}C{}",if old_end {newline} else {""});
+        let new=format!("X{newline}B{newline}Y{}",if new_end {newline} else {""});
+        std::fs::write(d.join("file.txt"),&old).unwrap();assert!(git::run(d,&["add","file.txt"]).ok);assert!(git::run(d,&["commit","-qm","baseline"]).ok);
+        std::fs::write(d.join("file.txt"),&new).unwrap();
+        let raw=git::diff_text_checked(d,&git::DiffSource::Unstaged,"file.txt",None,false).unwrap();
+        let lines:Vec<_>=raw.split('\n').skip_while(|line|!line.starts_with("@@")).skip(1).enumerate().filter_map(|(i,line)|["-A","+X"].contains(&line.trim_end_matches('\r')).then_some(i)).collect();assert_eq!(lines.len(),2);
+        crate::files::apply_part(d,"file.txt",false,crate::files::PatchOp::Stage,0,Some(&lines)).unwrap();
+        let expected=format!("X{newline}B{newline}C{}",if old_end {newline} else {""});assert_eq!(git::run(d,&["show",":file.txt"]).stdout.as_bytes(),expected.as_bytes());
+        assert!(git::run(d,&["reset","-q","HEAD","--","file.txt"]).ok);
+        crate::files::apply_part(d,"file.txt",false,crate::files::PatchOp::Discard,0,Some(&lines)).unwrap();
+        let expected=format!("A{newline}B{newline}Y{}",if new_end {newline} else {""});assert_eq!(std::fs::read(d.join("file.txt")).unwrap(),expected.as_bytes());
+        std::fs::write(d.join("file.txt"),&new).unwrap();assert!(git::run(d,&["add","file.txt"]).ok);
+        crate::files::apply_part(d,"file.txt",false,crate::files::PatchOp::Unstage,0,Some(&lines)).unwrap();assert_eq!(git::run(d,&["show",":file.txt"]).stdout.as_bytes(),expected.as_bytes());
+    }}}
+}
+
+#[test]
+fn signing_booleans_normalize_and_explicit_false_overrides_includes() {
+    let folder=fixture("gitcraft-signing-bool-");let d=folder.path();
+    let keys=vec!["commit.gpgsign".to_owned(),"tag.gpgSign".to_owned()];
+    for (value,expected) in [("true","true"),("yes","true"),("on","true"),("1","true"),("false","false"),("no","false"),("off","false"),("0","false")] {
+        for key in &keys {crate::accounts::set(d,"local",key,value).unwrap();}
+        let values=crate::prefs::config_get(Some(d),"local",&keys);for key in &keys {assert_eq!(values[key],expected);}
+    }
+    for key in &keys {crate::accounts::set(d,"local",key,"").unwrap();}
+    let include=d.join("included-config");std::fs::write(&include,"[commit]\n gpgsign = yes\n[tag]\n gpgsign = on\n").unwrap();assert!(git::run(d,&["config","include.path",&include.to_string_lossy()]).ok);
+    for key in &keys {assert_eq!(crate::prefs::config_get(Some(d),"local",&keys)[key],"true");crate::accounts::set(d,"local",key,"false").unwrap();assert_eq!(git::run(d,&["config","--bool",key]).stdout.trim(),"false");}
+}
+
+#[test]
+fn credential_usernames_are_literal_protocol_data_not_shell_code() {
+    use std::io::Write;
+    let folder=tempfile::tempdir().unwrap();
+    for user in ["normal@example.test","o'connor@example.test","space name","dollar$NAME","back`tick","semi;colon&pipe|name"] {
+        let token="synthetic-token-privacy";let env=git::credential_env(&[("fixture.invalid".into(),user.into(),token.into())]);
+        assert!(!env.iter().filter(|(key,_)|key.starts_with("GIT_CONFIG_VALUE_")).any(|(_,value)|value.contains(user)||value.contains(token)));
+        let mut child=std::process::Command::new("git").current_dir(folder.path()).args(["credential","fill"])
+            .env("GIT_CONFIG_NOSYSTEM","1").env("GIT_CONFIG_GLOBAL",folder.path().join("empty-config")).env("GIT_TERMINAL_PROMPT","0").envs(env)
+            .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+        child.stdin.take().unwrap().write_all(b"protocol=https\nhost=fixture.invalid\n\n").unwrap();let output=child.wait_with_output().unwrap();assert!(output.status.success());
+        let text=String::from_utf8(output.stdout).unwrap();assert!(text.lines().any(|line|line==format!("username={user}")));assert!(text.lines().any(|line|line==format!("password={token}")));
+    }
+    assert!(git::credential_env(&[("fixture.invalid".into(),"bad\nname".into(),"synthetic".into())]).is_empty());
+}
+
+#[test]
+fn remote_checkout_requires_the_existing_local_branch_to_track_that_remote() {
+    let folder=fixture("gitcraft-remote-identity-");let d=folder.path();let base=head(d);
+    assert!(git::run(d,&["checkout","-qb","topic"]).ok);assert!(git::run(d,&["commit","--allow-empty","-qm","local ahead"]).ok);let local=head(d);
+    for remote in ["origin","upstream"] {assert!(git::run(d,&["remote","add",remote,&format!("https://{remote}.example.invalid/repo")]).ok);}
+    assert!(git::run(d,&["update-ref","refs/remotes/origin/topic",&local]).ok);assert!(git::run(d,&["update-ref","refs/remotes/upstream/topic",&base]).ok);
+    assert!(git::run(d,&["branch","--set-upstream-to=origin/topic","topic"]).ok);assert!(git::run(d,&["checkout","-q","main"]).ok);
+    let engine=Engine::default();let repo=d.to_string_lossy();
+    let rejected=engine.perform(&repo,Action::CheckoutRemote {remote_branch:"upstream/topic".into()});assert!(!rejected.ok);assert!(rejected.message.contains("does not track"));assert_eq!(head(d),base);
+    assert!(git::run(d,&["branch","--unset-upstream","topic"]).ok);assert!(!engine.perform(&repo,Action::CheckoutRemote {remote_branch:"upstream/topic".into()}).ok);
+    assert!(git::run(d,&["branch","--set-upstream-to=upstream/topic","topic"]).ok);assert!(engine.perform(&repo,Action::CheckoutRemote {remote_branch:"upstream/topic".into()}).ok);assert_eq!(head(d),local);
+    assert_eq!(git::run(d,&["rev-parse","--symbolic-full-name","topic@{upstream}"]).stdout.trim(),"refs/remotes/upstream/topic");
+}
+
+#[test]
+fn reviewed_force_push_refuses_stale_branch_commit_destination_and_remote_state() {
+    for lease in [true,false] {
+        let folder=fixture("gitcraft-force-review-");let d=folder.path();let base=head(d);let bare=folder.path().join("remote.git");
+        assert!(git::run(d,&["init","--bare","-q",&bare.to_string_lossy()]).ok);assert!(git::run(d,&["remote","add","origin",&bare.to_string_lossy()]).ok);
+        assert!(git::run(d,&["push","-qu","origin","main"]).ok);assert!(git::run(d,&["branch","other"]).ok);assert!(git::run(d,&["push","-q","origin","other"]).ok);
+        assert!(git::run(d,&["commit","--allow-empty","-qm","reviewed"]).ok);let tip=head(d);assert!(git::run(d,&["push","-q","origin",&format!("{tip}:refs/heads/fixture-object")]).ok);let review=crate::actions::push_review(d).unwrap();let engine=Engine::default();let repo=d.to_string_lossy();
+        let action=||Action::Push {force:true,lease:Some(lease),review:Some(review.clone())};
+        assert!(git::run(d,&["checkout","-q","other"]).ok);assert!(!engine.perform(&repo,action()).ok);assert_eq!(git::run(d,&["--git-dir",&bare.to_string_lossy(),"rev-parse","refs/heads/main"]).stdout.trim(),base);
+        assert!(git::run(d,&["checkout","-q","main"]).ok);assert!(git::run(d,&["config","branch.main.merge","refs/heads/other"]).ok);assert!(!engine.perform(&repo,action()).ok);
+        assert!(git::run(d,&["config","branch.main.merge","refs/heads/main"]).ok);
+        assert!(git::run(d,&["config","remote.origin.pushurl",&format!("{}/.",bare.to_string_lossy())]).ok);assert!(!engine.perform(&repo,action()).ok);
+        assert!(git::run(d,&["config","--unset-all","remote.origin.pushurl"]).ok);
+        assert!(git::run(d,&["commit","--allow-empty","-qm","later"]).ok);assert!(!engine.perform(&repo,action()).ok);assert!(git::run(d,&["reset","--hard",&tip]).ok);
+        assert!(git::run(d,&["--git-dir",&bare.to_string_lossy(),"update-ref","refs/heads/main",&tip]).ok);assert!(!engine.perform(&repo,action()).ok);
+        assert!(git::run(d,&["--git-dir",&bare.to_string_lossy(),"update-ref","refs/heads/main",&base]).ok);
+        assert!(!engine.perform(&repo,Action::Push {force:true,lease:Some(lease),review:None}).ok);
+        let result=engine.perform(&repo,action());assert!(result.ok,"{}",result.message);
+        assert_eq!(git::run(d,&["--git-dir",&bare.to_string_lossy(),"rev-parse","refs/heads/main"]).stdout.trim(),tip);
+        assert_eq!(git::run(d,&["--git-dir",&bare.to_string_lossy(),"rev-parse","refs/heads/other"]).stdout.trim(),base);
+    }
+}
+
+#[test]
+fn deleted_branch_undo_restores_configuration_and_refuses_external_changes() {
+    for bulk in [false,true] {
+        let folder=fixture("gitcraft-deleted-config-");let d=folder.path();let tip=head(d);assert!(git::run(d,&["branch","feature"]).ok);
+        let settings=[("remote","origin"),("merge","refs/heads/published"),("pushRemote","secondary"),("rebase","true"),("description","first line\nsecond line")];
+        for (key,value) in settings {assert!(git::run(d,&["config",&format!("branch.feature.{key}"),value]).ok);}
+        let engine=Engine::default();let repo=d.to_string_lossy();
+        let action=if bulk {Action::DeleteBranches {names:vec!["feature".into()],remotes:vec![]}} else {Action::DeleteBranch {name:"feature".into()}};
+        assert!(engine.perform(&repo,action).ok);assert!(engine.perform(&repo,Action::Undo).ok);
+        assert_eq!(git::run(d,&["rev-parse","refs/heads/feature"]).stdout.trim(),tip);
+        for (key,value) in settings {assert_eq!(git::run(d,&["config","--get",&format!("branch.feature.{key}")]).stdout.trim_end(),value);}
+        assert!(engine.perform(&repo,Action::Redo).ok);assert!(engine.perform(&repo,Action::Undo).ok);
+        assert!(git::run(d,&["config","branch.feature.description","external"]).ok);assert!(!engine.perform(&repo,Action::Redo).ok);
+        assert_eq!(git::run(d,&["config","branch.feature.description"]).stdout.trim(),"external");
+    }
+}
+
+#[test]
+fn stash_and_commit_all_refuse_unresolved_operations_without_changing_the_index() {
+    for operation in ["merge","cherry-pick","rebase"] {
+        let folder=fixture("gitcraft-unmerged-guard-");let d=folder.path();
+        assert!(git::run(d,&["checkout","-qb","side"]).ok);std::fs::write(d.join("file.txt"),"side\n").unwrap();assert!(git::run(d,&["commit","-qam","side"]).ok);
+        assert!(git::run(d,&["checkout","-q","main"]).ok);std::fs::write(d.join("file.txt"),"main\n").unwrap();assert!(git::run(d,&["commit","-qam","main"]).ok);
+        assert!(!git::run(d,&[operation,"side"]).ok);let before=head(d);let index=git::run(d,&["ls-files","--stage","-z"]).stdout;let working=std::fs::read(d.join("file.txt")).unwrap();
+        let engine=Engine::default();let repo=d.to_string_lossy();
+        let actions=[Action::Stash {message:"unsafe".into()},Action::Commit {summary:"unsafe".into(),description:String::new(),amend:false,stage_all:true,skip_hooks:false,strip_comments:false},Action::Commit {summary:"unsafe".into(),description:String::new(),amend:false,stage_all:false,skip_hooks:false,strip_comments:false}];
+        for action in actions {assert!(!engine.perform(&repo,action).ok);assert_eq!(git::run(d,&["ls-files","--stage","-z"]).stdout,index);assert_eq!(std::fs::read(d.join("file.txt")).unwrap(),working);assert_eq!(head(d),before);}
+        if operation=="merge" {
+            assert!(d.join(".git/MERGE_HEAD").exists());std::fs::write(d.join("file.txt"),"resolved\n").unwrap();assert!(git::run(d,&["add","file.txt"]).ok);
+            assert!(!engine.perform(&repo,Action::Stash {message:"still merging".into()}).ok);
+            assert!(engine.perform(&repo,Action::Commit {summary:"resolved".into(),description:String::new(),amend:false,stage_all:false,skip_hooks:false,strip_comments:false}).ok);
+            assert_eq!(git::run(d,&["rev-list","--parents","-n","1","HEAD"]).stdout.split_whitespace().count(),3);
+        }
+    }
+}
+
+#[test]
+fn ordinary_commit_cleanup_honors_the_configured_comment_character() {
+    for character in ["#",";"] {for strip in [false,true] {
+        let folder=fixture("gitcraft-comment-cleanup-");let d=folder.path();assert!(git::run(d,&["config","core.commentChar",character]).ok);
+        std::fs::write(d.join("file.txt"),"change\n").unwrap();
+        let result=Engine::default().perform(&d.to_string_lossy(),Action::Commit {summary:"Subject".into(),description:format!("{character} Template comment\nKept description"),amend:false,stage_all:true,skip_hooks:false,strip_comments:strip});assert!(result.ok,"{}",result.message);
+        let body=git::run(d,&["log","-1","--format=%B"]).stdout;assert_eq!(body.contains("Template comment"),!strip);assert!(body.contains("Kept description"));
+    }}
+}
+
+#[test]
+fn ignore_appends_preserve_non_utf8_and_bom_bytes_and_fail_before_untracking() {
+    let folder=fixture("gitcraft-ignore-bytes-");let d=folder.path();let original=b"# caf\xe9\r\nnode_modules/\r\n";
+    std::fs::write(d.join(".gitignore"),original).unwrap();std::fs::create_dir(d.join("node_modules")).unwrap();std::fs::write(d.join("node_modules/dependency"),"data").unwrap();
+    assert!(git::run(d,&["check-ignore","node_modules/dependency"]).ok);assert!(crate::manage::ignore(d,"/new.txt").unwrap());
+    let after=std::fs::read(d.join(".gitignore")).unwrap();assert!(after.starts_with(original));assert!(git::run(d,&["check-ignore","node_modules/dependency"]).ok);assert!(!crate::manage::ignore(d,"/new.txt").unwrap());assert_eq!(std::fs::read(d.join(".gitignore")).unwrap(),after);
+    std::fs::write(d.join(".gitignore"),b"\xef\xbb\xbf/existing\n").unwrap();assert!(!crate::manage::ignore(d,"/existing").unwrap());assert!(crate::manage::ignore(d,"/next").unwrap());assert!(std::fs::read(d.join(".gitignore")).unwrap().starts_with(b"\xef\xbb\xbf/existing\n"));
+    std::fs::remove_file(d.join(".gitignore")).unwrap();std::fs::create_dir(d.join(".gitignore")).unwrap();
+    assert!(!Engine::default().perform(&d.to_string_lossy(),Action::Ignore {pattern:"/file.txt".into(),untrack:vec!["file.txt".into()]}).ok);
+    assert!(git::run(d,&["ls-files","--error-unmatch","file.txt"]).ok);assert!(d.join(".gitignore").is_dir());
+    std::fs::remove_dir(d.join(".gitignore")).unwrap();assert!(crate::manage::ignore(d,"/created").unwrap());assert_eq!(std::fs::read(d.join(".gitignore")).unwrap(),b"/created\n");
+}
+
+#[test]
+fn conflict_side_checkout_failure_does_not_stage_a_deletion() {
+    let folder=fixture("gitcraft-side-filter-");let d=folder.path();assert!(git::run(d,&["checkout","-qb","side"]).ok);
+    std::fs::write(d.join("file.txt"),"theirs\n").unwrap();assert!(git::run(d,&["commit","-qam","side"]).ok);assert!(git::run(d,&["checkout","-q","main"]).ok);
+    std::fs::write(d.join("file.txt"),"ours\n").unwrap();assert!(git::run(d,&["commit","-qam","main"]).ok);assert!(!git::run(d,&["merge","side"]).ok);
+    let index=git::run(d,&["ls-files","--stage","-z"]).stdout;let working=std::fs::read(d.join("file.txt")).unwrap();
+    std::fs::write(d.join(".gitattributes"),"file.txt filter=broken\n").unwrap();assert!(git::run(d,&["config","filter.broken.smudge","false"]).ok);assert!(git::run(d,&["config","filter.broken.required","true"]).ok);
+    let engine=Engine::default();let repo=d.to_string_lossy();for side in ["ours","theirs"] {assert!(!engine.perform(&repo,Action::TakeSide {paths:vec!["file.txt".into()],side:side.into()}).ok);assert_eq!(git::run(d,&["ls-files","--stage","-z"]).stdout,index);assert_eq!(std::fs::read(d.join("file.txt")).unwrap(),working);}
+    // Git itself may leave its attempted working copy after a filter failure, but the
+    // original unresolved index must remain recoverable and no deletion is staged.
+    std::fs::write(d.join("file.txt"),working).unwrap();std::fs::remove_file(d.join(".gitattributes")).unwrap();assert!(engine.perform(&repo,Action::TakeSide {paths:vec!["file.txt".into()],side:"ours".into()}).ok);
+    assert_eq!(git::run(d,&["show",":file.txt"]).stdout,"ours\n");
+}
+
+#[test]
+fn branch_creation_undo_uses_its_branch_ref_when_a_tag_has_the_same_name() {
+    for annotated in [false,true] {for checkout in [false,true] {
+        let folder=fixture("gitcraft-create-ref-");let d=folder.path();let base=head(d);let args=if annotated {vec!["tag","-a","topic","-m","tag"]} else {vec!["tag","topic"]};assert!(git::run(d,&args).ok);
+        assert!(git::run(d,&["commit","--allow-empty","-qm","second"]).ok);let target=head(d);let engine=Engine::default();let repo=d.to_string_lossy();
+        assert!(engine.perform(&repo,Action::CreateBranch {name:"topic".into(),at:Some(target.clone()),checkout}).ok);
+        if checkout {assert_eq!(git::run(d,&["symbolic-ref","HEAD"]).stdout.trim(),"refs/heads/topic");assert!(git::run(d,&["checkout","-q","main"]).ok);}
+        assert!(engine.perform(&repo,Action::Undo).ok);assert!(!git::run(d,&["show-ref","--verify","refs/heads/topic"]).ok);assert_eq!(git::run(d,&["rev-parse","refs/tags/topic^{}"]).stdout.trim(),base);
+    }}
+}
+
+#[test]
+fn undecodable_editor_previews_keep_original_bytes_until_explicit_conversion() {
+    struct Restore(crate::prefs::RuntimeSettings);impl Drop for Restore {fn drop(&mut self){crate::prefs::set_runtime(self.0.clone());}}
+    let original=crate::prefs::runtime();let _restore=Restore(original.clone());
+    for (encoding,bytes,loss) in [("",b"caf\xe9\n".to_vec(),true),("windows-1252",b"caf\xe9\n".to_vec(),false),("shift_jis",vec![b'x',0x82,b'\n'],true),("",b"valid utf8\n".to_vec(),false)] {
+        let folder=fixture("gitcraft-decoding-loss-");let d=folder.path();let mut settings=original.clone();settings.encodings.remove(&d.to_string_lossy().to_string());if !encoding.is_empty(){settings.encodings.insert(d.to_string_lossy().into_owned(),encoding.into());}crate::prefs::set_runtime(settings);
+        std::fs::write(d.join("file.txt"),&bytes).unwrap();let preview=crate::files::versions(d,&git::DiffSource::Unstaged,"file.txt",None,false);
+        assert_eq!(preview.decoding_loss,loss);assert_eq!(preview.editable,!loss);let text=preview.new.unwrap()+"added\n";
+        let result=crate::files::save_checked_mode(d,"file.txt",&text,preview.new_token.as_deref(),false);
+        if loss {assert!(result.unwrap_err().contains("ENCODING_DECODE_LOSS"));assert_eq!(std::fs::read(d.join("file.txt")).unwrap(),bytes);crate::files::save_checked_mode(d,"file.txt",&text,preview.new_token.as_deref(),true).unwrap();assert!(std::fs::read(d.join("file.txt")).unwrap().starts_with(&[0xef,0xbb,0xbf]));}
+        else {result.unwrap();assert!(std::fs::read(d.join("file.txt")).unwrap().starts_with(&bytes));}
+    }
+}
+
+#[test]
+fn lossy_conflict_stages_require_explicit_conversion_even_with_valid_working_text() {
+    use std::io::Write;
+    let folder=fixture("gitcraft-conflict-decode-");let d=folder.path();std::fs::write(d.join("bad.txt"),b"caf\xe9\n").unwrap();let oid=git::run(d,&["hash-object","-w","--no-filters","bad.txt"]).stdout.trim().to_owned();
+    let mut child=git::git_cmd(d).args(["update-index","--index-info"]).stdin(std::process::Stdio::piped()).spawn().unwrap();let input=format!("0 {}\tfile.txt\n100644 {oid} 1\tfile.txt\n100644 {oid} 2\tfile.txt\n100644 {oid} 3\tfile.txt\n","0".repeat(40));child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();assert!(child.wait().unwrap().success());
+    std::fs::write(d.join("file.txt"),"valid working text\n").unwrap();let info=crate::rewrite::conflict_info(d,"file.txt");assert!(info.decoding_loss);let index=git::run(d,&["ls-files","--stage","-z"]).stdout;
+    let engine=Engine::default();let result=engine.perform(&d.to_string_lossy(),Action::SaveResolved {file:"file.txt".into(),content:"reviewed text\n".into(),expected:Some(info.working_token.clone()),utf8:Some(false)});assert!(!result.ok);assert_eq!(std::fs::read(d.join("file.txt")).unwrap(),b"valid working text\n");assert_eq!(git::run(d,&["ls-files","--stage","-z"]).stdout,index);
+    assert!(engine.perform(&d.to_string_lossy(),Action::SaveResolved {file:"file.txt".into(),content:"reviewed text\n".into(),expected:Some(info.working_token),utf8:Some(true)}).ok);
+}
+
+#[test]
+fn taking_a_genuinely_deleted_conflict_side_removes_only_that_file() {
+    for missing in ["ours","theirs"] {
+        let folder=fixture("gitcraft-side-delete-");let d=folder.path();assert!(git::run(d,&["checkout","-qb","side"]).ok);
+        if missing=="theirs" {assert!(git::run(d,&["rm","file.txt"]).ok);} else {std::fs::write(d.join("file.txt"),"theirs\n").unwrap();assert!(git::run(d,&["add","file.txt"]).ok);}assert!(git::run(d,&["commit","-qm","side"]).ok);
+        assert!(git::run(d,&["checkout","-q","main"]).ok);if missing=="ours" {assert!(git::run(d,&["rm","file.txt"]).ok);} else {std::fs::write(d.join("file.txt"),"ours\n").unwrap();assert!(git::run(d,&["add","file.txt"]).ok);}assert!(git::run(d,&["commit","-qm","main"]).ok);assert!(!git::run(d,&["merge","side"]).ok);
+        assert!(Engine::default().perform(&d.to_string_lossy(),Action::TakeSide {paths:vec!["file.txt".into()],side:missing.into()}).ok);assert!(!d.join("file.txt").exists());assert!(git::run(d,&["ls-files","--unmerged"]).stdout.is_empty());
+    }
+}
+
+#[test]
+fn dense_diff_payloads_are_bounded_and_never_applied_as_partial_patches() {
+    let folder=fixture("gitcraft-dense-diff-"); let d=folder.path();
+    std::fs::write(d.join("dense.txt"), "x\n".repeat(100000)).unwrap();
+    let shown=git::file_diff_opts(d,&git::DiffSource::Unstaged,"dense.txt",true,None,false);
+    assert_eq!(shown.len(),1); assert_eq!(shown[0].kind,git::DiffLineKind::Limit);
+    assert!(serde_json::to_vec(&shown).unwrap().len()<256);
+    let raw=format!("diff --git a/dense.txt b/dense.txt\n--- /dev/null\n+++ b/dense.txt\n@@ -0,0 +1,100000 @@\n{}", "+x\n".repeat(100000));
+    assert!(crate::files::partial_patch(&raw,0,Some(&[0]),false).is_none());
+    assert!(!git::diff_within_budget(&"x".repeat(512*1024+1)));
+    assert!(!git::diff_within_budget(&"@@ -1 +1 @@\n-a\n+b\n".repeat(201)));
+    assert!(git::run(d,&["add","dense.txt"]).ok);
+    assert_eq!(git::file_diff_opts(d,&git::DiffSource::Staged,"dense.txt",false,None,false)[0].kind,git::DiffLineKind::Limit);
+    assert_eq!(git::run(d,&["show",":dense.txt"]).stdout,"x\n".repeat(100000));
 }

@@ -103,6 +103,40 @@ pub struct GitOut {
     pub stderr: String,
 }
 
+/// Remove credentials before diagnostics leave the Git boundary or enter activity storage.
+pub fn redact_diagnostic(text: &str) -> String {
+    let mut value=text.to_string();let mut cursor=0;
+    while let Some(offset)=value[cursor..].find("://") {
+        let start=cursor+offset+3;
+        let end=value[start..].find(|character:char|character.is_whitespace() || matches!(character,'/'|'?'|'#')).map(|offset|start+offset).unwrap_or(value.len());
+        if let Some(at)=value[start..end].rfind('@') {
+            value.replace_range(start..start+at,"[redacted]");cursor=start+"[redacted]@".len();
+        } else {cursor=end;}
+    }
+    for key in ["access_token","private_token","oauth_token","token","password","api_key"] {
+        for prefix in ['?','&'] {
+            let pattern=format!("{prefix}{key}=");let mut cursor=0;
+            loop {
+                let lower=value.to_ascii_lowercase();let Some(offset)=lower[cursor..].find(&pattern) else {break};let start=cursor+offset+pattern.len();
+                let end=value[start..].find(|character:char|character.is_whitespace() || matches!(character,'&'|'#')).map(|offset|start+offset).unwrap_or(value.len());
+                value.replace_range(start..end,"[redacted]");cursor=start+"[redacted]".len();
+            }
+        }
+    }
+    if let Some(start)=value.to_ascii_lowercase().find("http.extraheader") {value.truncate(start);value.push_str("http.extraheader=[redacted]");}
+    for marker in ["authorization:","cookie:","x-auth-token:","x-api-key:"] {
+        let mut cursor=0;
+        loop {
+            let lower=value.to_ascii_lowercase();let Some(offset)=lower[cursor..].find(marker) else {break};let start=cursor+offset+marker.len();
+            let end=value[start..].find('\n').map(|offset|start+offset).unwrap_or(value.len());value.replace_range(start..end," [redacted]");cursor=start+" [redacted]".len();
+        }
+    }
+    if let Ok(tokens)=HOST_TOKENS.read() {
+        for (_,_,token) in tokens.iter().filter(|(_,_,token)|!token.is_empty()) {value=value.replace(token,"[redacted]");}
+    }
+    value
+}
+
 impl GitOut {
     pub fn failed(why: &str) -> Self {
         GitOut { ok: false, stdout: String::new(), stderr: why.to_string() }
@@ -110,7 +144,7 @@ impl GitOut {
 
     pub fn message(&self) -> String {
         let s = if self.stderr.trim().is_empty() { &self.stdout } else { &self.stderr };
-        s.trim().to_string()
+        redact_diagnostic(s.trim())
     }
 }
 
@@ -125,11 +159,12 @@ pub fn set_host_tokens(tokens: Vec<(String, String, String)>) {
 }
 
 /// Config (through GIT_CONFIG_COUNT, so nothing shows in the command line or the activity log) that makes Git
-/// use a connected service's token for https://<host>. The token itself travels in an environment variable.
+/// use a connected service's credentials for https://<host>. Usernames and tokens travel as environment data.
 pub fn credential_env(tokens: &[(String, String, String)]) -> Vec<(String, String)> {
     let mut env = Vec::new();
     let mut n = 0;
     for (i, (host, user, token)) in tokens.iter().enumerate() {
+        if user.contains(['\r', '\n']) || token.contains(['\r', '\n']) { continue; }
         let key = format!("credential.https://{host}.helper");
         // An empty helper first clears any other helper for this host, so Git doesn't ask twice.
         env.push((format!("GIT_CONFIG_KEY_{n}"), key.clone()));
@@ -138,9 +173,10 @@ pub fn credential_env(tokens: &[(String, String, String)]) -> Vec<(String, Strin
         env.push((format!("GIT_CONFIG_KEY_{n}"), key));
         env.push((
             format!("GIT_CONFIG_VALUE_{n}"),
-            format!("!f() {{ test \"$1\" = get || exit 0; echo username={user}; echo \"password=$GITCRAFT_TOKEN_{i}\"; }}; f"),
+            format!("!f() {{ test \"$1\" = get || exit 0; printf 'username=%s\\npassword=%s\\n' \"$GITCRAFT_USER_{i}\" \"$GITCRAFT_TOKEN_{i}\"; }}; f"),
         ));
         n += 1;
+        env.push((format!("GITCRAFT_USER_{i}"), user.clone()));
         env.push((format!("GITCRAFT_TOKEN_{i}"), token.clone()));
     }
     if n > 0 {
@@ -589,6 +625,7 @@ pub enum DiffLineKind {
     Removed,
     Hunk,
     Meta,
+    Limit,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
@@ -702,7 +739,7 @@ fn diff_text_impl(dir: &Path, src: &DiffSource, path: &str, parent: Option<&str>
     // Diff options: 3 context lines, hunks never merged.
     let ctx = format!("-U{}", crate::metrics::DIFF_CONTEXT_LINES);
     let inter = format!("--inter-hunk-context={}", crate::metrics::DIFF_INTERHUNK_LINES);
-    let mut args: Vec<&str> = vec!["-c", "diff.noprefix=false", "diff", "-M", "--src-prefix=a/", "--dst-prefix=b/", "--no-relative", "--no-color", "--no-ext-diff", ctx.as_str(), inter.as_str()];
+    let mut args: Vec<&str> = vec!["--literal-pathspecs", "-c", "diff.noprefix=false", "diff", "-M", "--src-prefix=a/", "--dst-prefix=b/", "--no-relative", "--no-color", "--no-ext-diff", "--no-textconv", ctx.as_str(), inter.as_str()];
     if ignore_ws {
         // Ignore all whitespace (git -w).
         args.push("--ignore-all-space");
@@ -718,7 +755,7 @@ fn diff_text_impl(dir: &Path, src: &DiffSource, path: &str, parent: Option<&str>
                 args.push(sha);
             }
             None => {
-                let mut a: Vec<&str> = vec!["-c", "diff.noprefix=false", "show", "--src-prefix=a/", "--dst-prefix=b/", "--no-relative", "--no-ext-diff", "--no-textconv", "--no-color", "--format=", ctx.as_str(), inter.as_str()];
+                let mut a: Vec<&str> = vec!["--literal-pathspecs", "-c", "diff.noprefix=false", "show", "--src-prefix=a/", "--dst-prefix=b/", "--no-relative", "--no-ext-diff", "--no-textconv", "--no-color", "--format=", ctx.as_str(), inter.as_str()];
                 if ignore_ws {
                     a.push("--ignore-all-space");
                 }
@@ -741,10 +778,25 @@ fn diff_text_impl(dir: &Path, src: &DiffSource, path: &str, parent: Option<&str>
     if strict { run_utf8(dir, &args) } else { Ok(run(dir, &args).stdout) }
 }
 
+// Bound structured bridge allocations as well as the original file preview bytes.
+pub fn diff_within_budget(text: &str) -> bool {
+    text.len() <= 512 * 1024 && text.lines().take(5002).count() <= 5000
+        && text.lines().filter(|line| line.starts_with("@@")).take(202).count() <= 200
+}
+fn diff_limit() -> Vec<DiffLine> {
+    vec![DiffLine { kind: DiffLineKind::Limit, old_no: None, new_no: None,
+        text: "Large diff: use the virtualized comparison or full-file actions.".into() }]
+}
+
 pub fn file_diff_opts(dir: &Path, src: &DiffSource, path: &str, untracked: bool, parent: Option<&str>, ignore_ws: bool) -> Vec<DiffLine> {
     let text = match src {
         DiffSource::Unstaged if untracked => {
-            let content = std::fs::read(dir.join(path)).unwrap_or_default();
+            use std::io::Read;
+            let mut content = Vec::new();
+            if let Ok(file) = std::fs::File::open(dir.join(path)) {
+                let _ = file.take(512 * 1024 + 1).read_to_end(&mut content);
+            }
+            if content.len() > 512 * 1024 || content.split(|b| *b == b'\n').take(5002).count() > 5000 { return diff_limit(); }
             if content.contains(&0) {
                 return vec![DiffLine { kind: DiffLineKind::Meta, old_no: None, new_no: None, text: "Binary file".into() }];
             }
@@ -760,6 +812,7 @@ pub fn file_diff_opts(dir: &Path, src: &DiffSource, path: &str, untracked: bool,
         }
         _ => diff_text(dir, src, path, parent, ignore_ws),
     };
+    if !diff_within_budget(&text) { return diff_limit(); }
     parse_diff(&text)
 }
 

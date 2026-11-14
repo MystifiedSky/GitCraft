@@ -109,6 +109,7 @@ export const COMMANDS: Command[] = [
       const u = t ? st().ui[t.id] : undefined;
       if (u?.conflict) return act(p!, { type: "externalMerge", file: u.conflict, tool: st().settings.mergeTool });
       if (!u?.diff) return st().toast(false, "Open a file's changes first");
+      if (!["Staged", "Unstaged"].includes(u.diff.source.kind)) return st().toast(false, "External comparison of saved commits, ranges and stashes is not available. Use the in-app diff for this selection.");
       return act(p!, { type: "externalDiff", file: u.diff.file, staged: u.diff.source.kind === "Staged", tool: st().settings.diffTool });
     },
   },

@@ -1,4 +1,4 @@
-import { startPersistence, flushPersistence, hasUnsavedPreferences } from "@/lib/persistence";
+import { startPersistence, preferenceCloseGuard } from "@/lib/persistence";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useShallow } from "zustand/react/shallow";
 import { startBackendSync } from "@/lib/integrations";
@@ -287,18 +287,10 @@ function useStartup() {
       if (savedPaths.length) restoreTabs(savedPaths, saved?.active ?? 0);
       startBackendSync();
       startPersistence();
-      let closing = false;
-      let allowClose = false;
-      await getCurrentWindow().onCloseRequested(event => {
-        if (allowClose && !hasUnsavedPreferences()) return;
-        event.preventDefault();
-        if (closing) return;
-        closing = true;
-        void flushPersistence().then(() => { closing = false; allowClose = true; return getCurrentWindow().close(); }).catch(error => {
-          closing = false; allowClose = false;
-          useStore.getState().toast(false, "Could not save preferences before closing: " + String(error));
-        });
-      });
+      await getCurrentWindow().onCloseRequested(preferenceCloseGuard(
+        () => getCurrentWindow().close(),
+        error => useStore.getState().toast(false, "Could not save preferences before closing: " + String(error)),
+      ));
       setSettingsLoaded(true);
       await syncGitCredentials();
     })().catch((error) => useStore.getState().toast(false, "GitCraft could not finish starting: " + String(error)));
@@ -454,6 +446,14 @@ function useShortcuts() {
           const u = tabUi(tab.id);
           const to = (down ? nextTopological : previousTopological)(repo.commits, repo.head_sha, wip, u.selection);
           if (!to) return run(() => undefined);
+          if (down && u.selection.type === "commit" && to.type === "commit" && to.sha === u.selection.sha) {
+            const currentSha = u.selection.sha;
+            const parent = repo.commits.find(commit => commit.sha === currentSha)?.parents[0];
+            if (parent && !repo.commits.some(commit => commit.sha === parent)) {
+              const message = repo.has_more ? "Load more commits at the end of the graph to follow this parent." : "This parent is outside the graph view. Show its branch or clear the graph filters.";
+              if (!st.toasts.some(toast => toast.text === message)) st.toast(false, message);
+            }
+          }
           return run(() => st.setUi(tab.id, { selection: to, diff: null, multi: [], compareWorkdir: null }));
         }
         // "Select First Item" / "Select Last Item" (Home / End; End goes to the last loaded commit).

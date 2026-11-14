@@ -76,6 +76,19 @@ describe("automatic GitCraft updates", () => {
     expect(mocks.relaunch).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps the ready update when saving preferences fails and retries before installation", async () => {
+    const update=offeredUpdate();mocks.check.mockResolvedValue(update);
+    stop=updates.startUpdateChecks();await vi.advanceTimersByTimeAsync(0);
+    const {startPersistence}=await import("./persistence");const stopSaving=startPersistence();
+    let fail=true;const order:string[]=[];
+    mocks.invoke.mockImplementation(async(command:string)=>{if(command==="save_settings"){order.push("save");if(fail)throw new Error("disk full");}});
+    update.install.mockImplementation(async()=>{order.push("install");});
+    useStore.getState().setSettings({rememberTabs:true});
+    await updates.installAndRestart();expect(update.install).not.toHaveBeenCalled();expect(mocks.relaunch).not.toHaveBeenCalled();
+    expect(updates.useUpdates.getState().phase).toBe("ready");
+    fail=false;await updates.installAndRestart();expect(order).toEqual(["save","save","install"]);expect(mocks.relaunch).toHaveBeenCalledTimes(1);stopSaving();
+  });
+
   it("stops an automatic check before download if the preference changes while it is checking", async () => {
     const update = offeredUpdate();
     let offer!: (value: ReturnType<typeof offeredUpdate>) => void;

@@ -22,6 +22,12 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Changed
 
+- Bound structured diff payloads and render visible hunk rows only. Large and densely wrapped comparisons use the virtualized editor with safe full-file actions; oversized partial patches are refused.
+
+- Reject oversized clipboard file copies before loading their contents, with bounded reads for working files and Git blobs.
+
+- Watch working directories selectively so ignored dependency and build trees do not generate unnecessary file events, while preserving tracked files and reacting to changed ignore rules.
+
 - Load independent hosting services and repository summaries with bounded concurrency. Batch configuration and submodule reads, cache ignored-file classifications, and avoid retransmitting unchanged activity logs.
 - Keep large file lists, folder counts, file-finder ranking, branch grouping, graph highlighting, and coding-session grouping responsive with bounded rendering and reusable indexes.
 - Bound terminal input and output queues, let the renderer acknowledge consumed output, and cancel Git helpers together with their parent process.
@@ -60,7 +66,57 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 - Source comments, documentation and test names describe GitCraft on its own terms and no longer refer to other software.
 
+### Removed
+
+- Hide the unavailable worktree WIP graph control until its data and rendering support are implemented.
+
 ### Fixed
+
+- Detect undecodable file and conflict previews, refuse ordinary saves that would replace original bytes, and require a correct encoding or explicit UTF-8 conversion.
+
+- Give shared preference controls accessible captions and help text, with distinct names for path fields and Browse buttons.
+- Redact remote-URL credentials, authentication headers and token-bearing query fields before storing or displaying Git diagnostics.
+
+- Preserve unresolved files when taking a conflict side fails, and delete only when that side is genuinely absent.
+- Record the exact created branch for Undo when a same-named tag exists.
+- Include every requested repository in bulk fetch/pull even while summaries are filtered or loading, and report failures in the final count.
+
+- Preserve existing ignore-file bytes, including non-UTF-8 rules and UTF-8 BOMs, and report read failures before untracking files.
+- Use each revision’s historical filename when showing blame across renames.
+
+- Keep topological navigation on visible commits at unloaded or filtered boundaries and explain how to load or reveal the parent.
+- Refuse unsupported historical external comparisons instead of opening an unrelated working-tree diff. Named-file history and external-tool paths use literal filenames.
+
+- Keep activity logs bounded across background jobs and hunk operations, and notify the viewer immediately when those entries arrive. Very large command/output entries now show a truncation notice.
+
+- Restore upstream, push destination and other branch settings when undoing branch deletion, and refuse to overwrite externally changed branch settings.
+
+- Refuse stashing during unresolved operations, and block every Commit All route before it can stage unresolved conflict markers.
+- Apply the commit-message comment-cleanup preference to ordinary commits and amendments.
+
+- Bind force-push confirmations to the reviewed branch, commit, destination and remote tip; reject stale confirmations and push an explicit commit with an atomic remote lease.
+
+- Refuse remote-branch checkout when an existing local branch tracks a different remote, preserving both branch relationships and local work.
+
+- Report failed automatic submodule updates and offer a safe retry while preserving the successful repository action.
+- Pass HTTPS credential usernames as literal data so apostrophes and shell characters cannot break authentication.
+
+- Read Git signing booleans consistently and write explicit Off values so included signing defaults can be disabled.
+
+- Preserve unselected end-of-file newline changes when staging, unstaging or discarding selected lines.
+
+- Treat bracketed and other special filenames literally in hunk views and named-file actions, and refuse mixed-file partial patches.
+
+- Allow Undo and Redo for the first ordinary commit in an empty repository while preserving staged and working files and refusing intervening branch changes.
+
+- Keep Git text-conversion output out of hunk staging, unstaging, discards and working-change patch exports so these operations preserve the original file content.
+
+- Clearly use the configured server default for Bitbucket Server merges instead of offering merge strategies that were ignored.
+
+- Prevent read-only filesystem notifications from causing repeated repository refreshes on Linux.
+- Detect potential merge conflicts in both SHA-1 and SHA-256 repositories.
+- Keep repository creation filesystem checks asynchronous, and share consistent loading and error states across history file lists.
+- Correct Unix regression fixtures and keep upstream dependency duplication separate from GitCraft source duplication in quality analysis.
 
 - Protect existing files during repository initialization and submodule removal. Stash actions follow the selected stash, and discard Redo preserves its original file selection and refuses later edits.
 - Reject stale hunk selections and history-edit plans. Internal patches use consistent file paths, and partial operations refuse non-UTF-8 patches rather than changing their bytes.

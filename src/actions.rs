@@ -6,6 +6,59 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
+/// Exact local and remote state reviewed before a destructive push.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PushReview {
+    pub branch: String,
+    pub head: String,
+    pub remote: String,
+    pub remote_ref: String,
+    pub url: String,
+    pub remote_oid: String,
+    pub tracking_oid: String,
+    pub config: String,
+}
+
+pub fn push_review(dir: &Path) -> Result<PushReview, String> {
+    let read = |args: &[&str]| { let out=git::run(dir,args); if out.ok {Ok(out.stdout.trim().to_string())} else {Err(out.message())} };
+    let branch=read(&["symbolic-ref","-q","HEAD"])?;
+    let head=read(&["rev-parse","--verify","HEAD"])?;
+    let refs=read(&["for-each-ref","--format=%(refname)%00%(push:remotename)%00%(push:remoteref)%00%(push)","refs/heads"])?;
+    let fields=refs.lines().map(|line|line.split('\0').collect::<Vec<_>>()).find(|fields|fields.first()==Some(&branch.as_str())).ok_or("The current branch is no longer available.")?;
+    if fields.len()!=4 || fields[1].is_empty() {return Err("Set a single push destination for this branch before forcing a push.".into());}
+    let remote=fields[1].to_string();
+    let remote_ref=if !fields[2].is_empty() {fields[2].to_string()} else {
+        // Default push modes can omit push:remoteref. Resolve the advertised tracking
+        // ref only through Git's standard fetch mapping; refuse unfamiliar mappings.
+        let mapping=read(&["config","--get-all",&format!("remote.{remote}.fetch")])?;
+        let expected=format!("refs/heads/*:refs/remotes/{remote}/*");
+        if !mapping.lines().any(|line|line.trim_start_matches('+')==expected) {return Err("This push mapping requires an explicit destination before force push.".into());}
+        let suffix=fields[3].strip_prefix(&format!("refs/remotes/{remote}/")).ok_or("The push destination could not be resolved.")?;
+        format!("refs/heads/{suffix}")
+    };
+    if !remote_ref.starts_with("refs/heads/") {return Err("Force push requires a branch destination.".into());}
+    let urls=read(&["remote","get-url","--push","--all",&remote])?;
+    if urls.lines().count()!=1 {return Err("Force push requires one explicitly reviewed push URL.".into());}
+    let url=urls;
+    let remote_state=read(&["ls-remote","--refs","--",&url,&remote_ref])?;
+    let remote_oid=remote_state.lines().find_map(|line|line.split_once('\t').filter(|(_,reference)|*reference==remote_ref).map(|(oid,_)|oid.to_string())).unwrap_or_default();
+    let tracking_oid=if fields[3].is_empty() {String::new()} else {read(&["rev-parse","--verify",fields[3]]).unwrap_or_default()};
+    let config=read(&["config","--null","--list","--includes"])?;
+    let config=crate::files::content_token(Some(config.as_bytes()));
+    Ok(PushReview {branch,head,remote,remote_ref,url,remote_oid,tracking_oid,config})
+}
+
+fn branch_config(dir: &Path, name: &str) -> Result<Vec<(String,String)>, git::GitOut> {
+    let out=git::run(dir,&["config","--local","--null","--list"]);if !out.ok {return Err(out);}
+    let mut config:Vec<_>=out.stdout.split('\0').filter_map(|record| {
+        let (key,value)=record.split_once('\n')?;
+        let (branch,_)=key.strip_prefix("branch.")?.rsplit_once('.')?;
+        (branch==name).then(||(key.to_string(),value.to_string()))
+    }).collect();
+    config.sort_by(|a,b|a.0.cmp(&b.0));Ok(config)
+}
+
 /// Git's answer when there is nothing to stash; the toolbar Stash treats it as an error
 /// (a stash with no local changes is refused instead of reported as done).
 pub const STASH_NOTHING: &str = "No local changes to save";
@@ -56,7 +109,7 @@ pub enum Action {
     Pull { mode: String },
     /// force: push even though the remote has other commits. lease (default true) keeps the
     /// safety check that the remote branch is still where we last saw it.
-    Push { force: bool, #[serde(default)] lease: Option<bool> },
+    Push { force: bool, #[serde(default)] lease: Option<bool>, #[serde(default)] review: Option<PushReview> },
     /// Push the selected local branch without changing the checked-out branch.
     PushBranch { branch: String },
     Stash { message: String },
@@ -155,7 +208,7 @@ enum UndoRec {
     InitialCommit { after: String, branch: String, label: String },
     Checkout { from: String, to: String },
     CreateBranch { name: String, sha: String },
-    DeleteBranch { name: String, sha: String },
+    DeleteBranch { name: String, sha: String, config: Vec<(String,String)> },
     Reset { before: String, after: String, mode: String, branch: String },
     CreateTag { name: String, sha: String },
     DeleteTag { name: String, sha: String },
@@ -256,6 +309,12 @@ impl Engine {
 
     /// Runs git and records it in the activity log.
     pub fn git(&self, dir: &Path, args: &[&str]) -> git::GitOut {
+        // Named-file actions pass exact identities after --, never wildcard selections.
+        let literal;
+        let args = if args.contains(&"--") {
+            literal = std::iter::once("--literal-pathspecs").chain(args.iter().copied()).collect::<Vec<_>>();
+            literal.as_slice()
+        } else { args };
         let o = git::run(dir, args);
         let entry = LogEntry {
             time: chrono::Local::now().format("%H:%M:%S").to_string(),
@@ -263,12 +322,7 @@ impl Engine {
             ok: o.ok,
             output: log_output(&o),
         };
-        let mut l = self.log.lock().unwrap();
-        l.push(entry);
-        self.log_version.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if l.len() > 500 {
-            l.remove(0);
-        }
+        self.append_log(entry);
         o
     }
 
@@ -280,10 +334,21 @@ impl Engine {
         o
     }
 
+    fn append_log(&self, mut entry: LogEntry) {
+        entry.command=git::redact_diagnostic(&entry.command);entry.output=git::redact_diagnostic(&entry.output);
+        for (text, limit) in [(&mut entry.command,8192),(&mut entry.output,65536)] {
+            if text.len()>limit {
+                let mut end=limit;while !text.is_char_boundary(end) {end-=1;}
+                text.truncate(end);text.push_str("\n[truncated]");
+            }
+        }
+        let mut log=self.log.lock().unwrap();log.push(entry);
+        let excess=log.len().saturating_sub(500);if excess>0 {log.drain(..excess);}
+        self.log_version.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+    }
+
     fn record(&self, command: &str, o: &git::GitOut) {
-        let mut l = self.log.lock().unwrap();
-        self.log_version.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        l.push(LogEntry { time: chrono::Local::now().format("%H:%M:%S").to_string(), command: command.to_string(), ok: o.ok, output: log_output(o) });
+        self.append_log(LogEntry { time: chrono::Local::now().format("%H:%M:%S").to_string(), command: command.to_string(), ok: o.ok, output: log_output(o) });
     }
 
     fn in_progress(&self, dir: &Path, what: &str) -> bool {
@@ -292,8 +357,7 @@ impl Engine {
     }
 
     fn log_note(&self, command: &str) {
-        let mut l = self.log.lock().unwrap();
-        l.push(LogEntry { time: chrono::Local::now().format("%H:%M:%S").to_string(), command: command.to_string(), ok: true, output: String::new() });
+        self.append_log(LogEntry { time: chrono::Local::now().format("%H:%M:%S").to_string(), command: command.to_string(), ok: true, output: String::new() });
     }
 
     fn rev(&self, dir: &Path, r: &str) -> String {
@@ -386,6 +450,9 @@ impl Engine {
             Action::Discard { paths } => self.discard(repo, dir, Some(paths)),
             Action::DiscardAll => self.discard(repo, dir, None),
             Action::Commit { summary, description, amend, stage_all, skip_hooks, strip_comments } => {
+                let unmerged=self.git(dir, &["ls-files", "--unmerged", "-z"]);
+                if !unmerged.ok { return done(unmerged, ""); }
+                if !unmerged.stdout.is_empty() { return done(git::GitOut::failed("Resolve and stage every conflicted file before committing. Commit All cannot resolve conflicts automatically."), ""); }
                 if summary.trim().is_empty() {
                     return ActionResult { ok: false, message: "Type a commit summary first".into() };
                 }
@@ -412,10 +479,12 @@ impl Engine {
                     a.push("--cleanup=strip"); // "Remove comments from commit messages"
                 }
                 let o = self.git(dir, &a);
-                if o.ok && !before.is_empty() {
+                if o.ok {
                     let after = self.rev(dir, "HEAD");
+                    let branch = self.branch_ref(dir);
                     let label = if amend { "amend commit".to_string() } else { "commit".to_string() };
-                    self.push_undo(repo, UndoRec::Commit { before, after, branch: self.branch_ref(dir), label });
+                    self.push_undo(repo, if before.is_empty() { UndoRec::InitialCommit { after, branch, label } }
+                        else { UndoRec::Commit { before, after, branch, label } });
                 }
                 done(o, if amend { "Amended previous commit" } else { "Committed" })
             }
@@ -443,7 +512,17 @@ impl Engine {
             }
             Action::CheckoutRemote { remote_branch } => {
                 let local = remote_branch.splitn(2, '/').nth(1).unwrap_or(&remote_branch).to_string();
+                let selected = format!("refs/remotes/{remote_branch}");
+                if !self.git(dir, &["check-ref-format", "--branch", &local]).ok || self.rev(dir, &selected).is_empty() {
+                    return done(git::GitOut::failed("That remote branch is no longer available. Refresh the repository and try again."), "");
+                }
                 let exists = !self.rev(dir, &format!("refs/heads/{local}")).is_empty();
+                if exists {
+                    let upstream = self.git(dir, &["rev-parse", "--symbolic-full-name", "--verify", &format!("{local}@{{upstream}}")]);
+                    if !upstream.ok || upstream.stdout.trim() != selected {
+                        return done(git::GitOut::failed(&format!("Local branch '{local}' does not track '{remote_branch}'. Create a differently named local branch from the selected remote commit, or explicitly change its upstream before checking it out.")), "");
+                    }
+                }
                 let from = self.head_name(dir);
                 let o = if exists {
                     self.git(dir, &["checkout", "-q", &local])
@@ -465,7 +544,7 @@ impl Engine {
                 if !o.ok {
                     return done(o, "");
                 }
-                let sha = self.rev(dir, &name);
+                let sha = self.rev(dir, &format!("refs/heads/{name}"));
                 self.push_undo(repo, UndoRec::CreateBranch { name: name.clone(), sha });
                 if checkout {
                     let o = self.git(dir, &["checkout", "-q", &name]);
@@ -475,9 +554,10 @@ impl Engine {
             }
             Action::DeleteBranch { name } => {
                 let sha = self.rev(dir, &format!("refs/heads/{name}"));
-                let o = self.git(dir, &["branch", "-D", &name]);
+                let config=match branch_config(dir,&name) {Ok(config)=>config,Err(out)=>return done(out, "")};
+                let o = self.git(dir, &["branch", "-D", "--", &name]);
                 if o.ok {
-                    self.push_undo(repo, UndoRec::DeleteBranch { name: name.clone(), sha });
+                    self.push_undo(repo, UndoRec::DeleteBranch { name: name.clone(), sha, config });
                 }
                 done(o, &format!("Deleted {name}"))
             }
@@ -536,20 +616,27 @@ impl Engine {
                     done(self.job(repo, "pull", dir, &args.iter().map(String::as_str).collect::<Vec<_>>()), "Pulled")
                 }
             },
-            Action::Push { force, lease } => {
+            Action::Push { force, lease, review } => {
+                if force {
+                    let Some(review)=review else {return done(git::GitOut::failed("Review the branch and destination again before forcing a push."), "");};
+                    let current=match push_review(dir) {Ok(current)=>current,Err(error)=>return done(git::GitOut::failed(&error), "")};
+                    if current != review {return done(git::GitOut::failed("The branch, commit, push destination or remote tip changed after confirmation. Review the push again."), "");}
+                    let expected=if lease==Some(false) {&review.remote_oid} else {&review.tracking_oid};
+                    let guard=format!("--force-with-lease={}:{}",review.remote_ref,expected);
+                    let refspec=format!("{}:{}",review.head,review.remote_ref);
+                    // Push the reviewed object and URL even if an external process changes HEAD/config
+                    // after validation. An explicit remote lease also protects the final network race.
+                    let out=self.jobs.run(&format!("{repo}|push"),dir,&["push","--progress",&guard,"--",&review.url,&refspec]);
+                    self.record(&format!("git push --force-with-lease {} {}",review.remote,review.remote_ref),&out);
+                    return done(out,"Pushed the reviewed commit");
+                }
                 let branch = git::run(dir, &["symbolic-ref", "-q", "HEAD"]).stdout.trim().strip_prefix("refs/heads/").unwrap_or_default().to_string();
                 if branch.is_empty() {
                     return ActionResult { ok: false, message: "Push is not available when in a detached HEAD state".into() };
                 }
                 let upstream = git::run(dir, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
                 let o = if upstream.ok {
-                    if force && lease == Some(false) {
-                        self.job(repo, "push", dir, &["push", "--force", "--progress"])
-                    } else if force {
-                        self.job(repo, "push", dir, &["push", "--force-with-lease", "--progress"])
-                    } else {
-                        self.job(repo, "push", dir, &["push", "--progress"])
-                    }
+                    self.job(repo, "push", dir, &["push", "--progress"])
                 } else {
                     let remotes = git::run(dir, &["remote"]).stdout;
                     let remote = if remotes.lines().any(|r| r == "origin") {
@@ -590,6 +677,11 @@ impl Engine {
                 done(self.job(repo, "push", dir, &["push", "--set-upstream", "--progress", &remote, &refspec]), &format!("Pushed {branch}"))
             }
             Action::Stash { message } => {
+                let unmerged=self.git(dir, &["ls-files", "--unmerged", "-z"]);
+                if !unmerged.ok { return done(unmerged, ""); }
+                if !unmerged.stdout.is_empty() || ["MERGE_HEAD","CHERRY_PICK_HEAD","REVERT_HEAD","rebase-merge","rebase-apply","sequencer"].iter().any(|state|self.in_progress(dir,state)) {
+                    return done(git::GitOut::failed("Finish or abort the current merge, rebase or replay before stashing. Its conflict state was kept."), "");
+                }
                 // Stage everything (new files too), then `stash push` without --include-untracked, named by stash_message.
                 let add = self.git(dir, &["add", "-A"]);
                 if !add.ok {
@@ -736,8 +828,9 @@ impl Engine {
                 let mut failed = Vec::new();
                 for n in &names {
                     let sha = self.rev(dir, &format!("refs/heads/{n}"));
-                    if self.git(dir, &["branch", "-D", n]).ok {
-                        self.push_undo(repo, UndoRec::DeleteBranch { name: n.clone(), sha });
+                    let config=match branch_config(dir,n) {Ok(config)=>config,Err(_)=>{failed.push(n.clone());continue;}};
+                    if self.git(dir, &["branch", "-D", "--", n]).ok {
+                        self.push_undo(repo, UndoRec::DeleteBranch { name: n.clone(), sha, config });
                     } else {
                         failed.push(n.clone());
                     }
@@ -755,7 +848,7 @@ impl Engine {
                 }
             }
             Action::ExternalDiff { file, staged, tool } => {
-                let mut a = vec!["difftool".to_string(), "-y".into()];
+                let mut a = vec!["--literal-pathspecs".to_string(), "difftool".into(), "-y".into()];
                 if staged {
                     a.push("--cached".into());
                 }
@@ -767,7 +860,7 @@ impl Engine {
                 ActionResult { ok: true, message: format!("Opening {file} in the diff tool") }
             }
             Action::ExternalMerge { file, tool } => {
-                let mut a = vec!["mergetool".to_string(), "-y".into()];
+                let mut a = vec!["--literal-pathspecs".to_string(), "mergetool".into(), "-y".into()];
                 if !tool.trim().is_empty() {
                     a.push(format!("--tool={}", tool.trim()));
                 }
@@ -936,19 +1029,49 @@ impl Engine {
                 done(o, "Cherry pick complete")
             }
             Action::TakeSide { paths, side } => {
-                let flag = if side == "theirs" { "--theirs" } else { "--ours" };
-                let mut a = vec!["checkout", flag, "--"];
-                a.extend(paths.iter().map(|s| s.as_str()));
-                let o = self.git(dir, &a);
-                if !o.ok {
-                    // That side deleted the file: taking it means removing the file.
-                    let mut r = vec!["rm", "-q", "--"];
-                    r.extend(paths.iter().map(|s| s.as_str()));
-                    return done(self.git(dir, &r), "Resolved");
+                let (flag,stage)=match side.as_str() {"ours"=>("--ours","2"),"theirs"=>("--theirs","3"),_=>return done(git::GitOut::failed("Choose current or incoming conflict contents."), "")};
+                let mut selected=Vec::new();
+                for path in &paths {
+                    let entries=self.git(dir,&["ls-files","--unmerged","-z","--",path]);if !entries.ok {return done(entries, "");}
+                    let stages:Vec<_>=entries.stdout.split('\0').filter_map(|record|record.split_once('\t').and_then(|(header,_)|header.split_whitespace().nth(2))).collect();
+                    if stages.is_empty() {return done(git::GitOut::failed(&format!("{path} is no longer an unresolved file. Refresh its changes first.")), "");}
+                    selected.push((path,stages.contains(&stage)));
                 }
-                let mut add = vec!["add", "--"];
-                add.extend(paths.iter().map(|s| s.as_str()));
-                done(self.git(dir, &add), if side == "theirs" { "Took incoming" } else { "Took current" })
+                for (path,present) in selected {
+                    if !present {
+                        let removed=self.git(dir,&["rm","-q","--",path]);if !removed.ok {return done(removed, "");}
+                    } else {
+                        let full=dir.join(path);
+                        let backup=match std::fs::symlink_metadata(&full) {
+                            Ok(metadata)=>{
+                                let saved=match tempfile::NamedTempFile::new() {Ok(file)=>file,Err(error)=>return done(git::GitOut::failed(&error.to_string()), "")};
+                                let moved=metadata.file_type().is_symlink();
+                                let copied=if moved {std::fs::remove_file(saved.path()).and_then(|_|std::fs::rename(&full,saved.path()))} else {std::fs::copy(&full,saved.path()).map(|_|())};
+                                if let Err(error)=copied {return done(git::GitOut::failed(&format!("Could not back up {path}: {error}")), "");}
+                                Some((saved,moved))
+                            }
+                            Err(error) if error.kind()==std::io::ErrorKind::NotFound=>None,
+                            Err(error)=>return done(git::GitOut::failed(&error.to_string()), ""),
+                        };
+                        let mut result=self.git(dir,&["checkout",flag,"--",path]);
+                        if result.ok {result=self.git(dir,&["add","--",path]);}
+                        if !result.ok {
+                            if let Some((saved,moved))=backup {
+                                let restored=(|| {
+                                    if std::fs::symlink_metadata(&full).is_ok_and(|metadata|metadata.file_type().is_symlink()) {std::fs::remove_file(&full)?;}
+                                    if moved {if full.exists() {std::fs::remove_file(&full)?;}std::fs::rename(saved.path(),&full)} else {std::fs::copy(saved.path(),&full).map(|_|())}
+                                })();
+                                if let Err(error)=restored {
+                                    let recovery=saved.path().display().to_string();
+                                    let (file,recovery_path)=saved.into_parts();drop(file);std::mem::forget(recovery_path);
+                                    return done(git::GitOut::failed(&format!("{}\nCould not restore {path}: {error}. Original contents are retained at {recovery}",result.message())), "");
+                                }
+                            }
+                            return done(result, "");
+                        }
+                    }
+                }
+                ActionResult {ok:true,message:if side=="theirs" {"Took incoming".into()} else {"Took current".into()}}
             }
             Action::MarkResolved { paths } => {
                 let mut a = vec!["add", "--"];
@@ -961,6 +1084,9 @@ impl Engine {
                 done(self.git(dir, &a), "Marked conflicted")
             }
             Action::SaveResolved { file, content, expected, utf8 } => {
+                if !utf8.unwrap_or(false) && crate::rewrite::conflict_info(dir,&file).decoding_loss {
+                    return ActionResult {ok:false,message:"ENCODING_DECODE_LOSS: Conflict content contains undecodable bytes. Choose its repository encoding or explicitly convert the reviewed output to UTF-8.".into()};
+                }
                 if let Err(e) = crate::files::save_checked_mode(dir, &file, &content, expected.as_deref(), utf8.unwrap_or(false)) {
                     return ActionResult { ok: false, message: e };
                 }
@@ -1077,13 +1203,29 @@ impl Engine {
             (UndoRec::Commit { after, .. }, false) => self.git(dir, &["reset", "-q", "--soft", after]),
             (UndoRec::Checkout { from, .. }, true) => self.git(dir, &["checkout", "-q", from]),
             (UndoRec::Checkout { to, .. }, false) => self.git(dir, &["checkout", "-q", to]),
-            (UndoRec::CreateBranch { name, sha }, true) | (UndoRec::DeleteBranch { name, sha }, false) => {
+            (UndoRec::DeleteBranch { name, sha, config }, false) => {
+                if self.rev(dir,&format!("refs/heads/{name}"))!=*sha || branch_config(dir,name).ok().as_ref()!=Some(config) {
+                    return git::GitOut::failed("This branch or its settings changed after Undo; refusing to delete it.");
+                }
+                self.git(dir,&["branch","-D","--",name])
+            }
+            (UndoRec::DeleteBranch { name, sha, config }, true) => {
+                let existing=match branch_config(dir,name) {Ok(config)=>config,Err(out)=>return out};
+                if !existing.is_empty() || !self.rev(dir,&format!("refs/heads/{name}")).is_empty() {return git::GitOut::failed("The deleted branch or its settings were recreated externally. Refusing to overwrite them.");}
+                let created=self.git(dir,&["branch","--",name,sha]);if !created.ok {return created;}
+                for (key,value) in config {
+                    let out=self.git(dir,&["config","--local","--add","--",key,value]);
+                    if !out.ok {let _=self.git(dir,&["branch","-D","--",name]);return out;}
+                }
+                created
+            }
+            (UndoRec::CreateBranch { name, sha }, true) => {
                 if self.rev(dir, &format!("refs/heads/{name}")) != *sha {
                     return git::GitOut::failed("This branch has changed since the recorded action; refusing to delete its new commits.");
                 }
                 self.git(dir, &["branch", "-D", name])
             }
-            (UndoRec::CreateBranch { name, sha }, false) | (UndoRec::DeleteBranch { name, sha }, true) => {
+            (UndoRec::CreateBranch { name, sha }, false) => {
                 self.git(dir, &["branch", name, sha])
             }
             (UndoRec::Reset { before, after, mode, branch }, undo) => {
@@ -1330,6 +1472,31 @@ mod tests {
         assert_eq!(head(Path::new(&wt)), first);
         assert!(e.perform(&repo, Action::WorktreeRemove { path: wt, force: false }).ok);
         let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn every_log_writer_bounds_entries_and_notifies_snapshot_readers() {
+        let engine=Engine::default();let output=git::GitOut {ok:false,stdout:String::new(),stderr:"\u{e9}".repeat(50000)};
+        for i in 0..1000 {engine.record(&format!("job {i}"),&output);}
+        let (version,entries)=engine.log_snapshot(None).unwrap();assert_eq!(entries.len(),500);assert_eq!(entries[0].command,"job 500");assert!(!entries[0].ok);assert!(entries[0].output.len()<=65536+12);assert!(entries[0].output.ends_with("[truncated]"));
+        engine.log_note("hunk operation");let (next,entries)=engine.log_snapshot(Some(version)).unwrap();assert!(next>version);assert_eq!(entries.len(),500);assert_eq!(entries.last().unwrap().command,"hunk operation");
+        assert!(engine.log_snapshot(Some(next)).is_none());
+        let folder=tempfile::tempdir().unwrap();assert!(engine.git(folder.path(),&["--version"]).ok);assert!(engine.log_snapshot(Some(next)).is_some());assert_eq!(engine.log_entries().len(),500);
+    }
+
+    #[test]
+    fn log_diagnostics_redact_credentials_for_every_writer() {
+        let engine=Engine::default();let folder=tempfile::tempdir().unwrap();assert!(git::run(folder.path(),&["init","-q"]).ok);
+        let url="https://audit-user:SYNTHETIC_AUDIT_SECRET@fixture.example/repo.git";
+        assert!(engine.git(folder.path(),&["remote","add","origin",url]).ok);
+        assert!(engine.job("fixture","config",folder.path(),&["remote","set-url","origin",url]).ok);
+        let error=git::GitOut {ok:false,stdout:String::new(),stderr:format!("failed: {url}")};engine.record(&format!("fetch {url}"),&error);engine.log_note(&format!("note {url}"));
+        for entry in engine.log_entries() {assert!(!entry.command.contains("SYNTHETIC_AUDIT_SECRET"));assert!(!entry.output.contains("SYNTHETIC_AUDIT_SECRET"));}
+        assert!(!error.message().contains("SYNTHETIC_AUDIT_SECRET"));
+        assert_eq!(git::redact_diagnostic("https://fixture.example/repo.git"),"https://fixture.example/repo.git");
+        assert!(!git::redact_diagnostic("https://user:encoded%40SYNTHETIC@fixture.example/path?access_token=QUERY_SECRET").contains("SYNTHETIC"));
+        assert!(!git::redact_diagnostic("https://fixture.example/path?access_token=QUERY_SECRET").contains("QUERY_SECRET"));
+        assert!(!git::redact_diagnostic("git -c http.extraHeader=Authorization: Bearer HEADER_SECRET clone url").contains("HEADER_SECRET"));
     }
 
     #[test]
@@ -1828,6 +1995,11 @@ mod tests {
         let hooks = d.join(".git").join("hooks");
         fs::create_dir_all(&hooks).unwrap();
         fs::write(hooks.join("pre-commit"), "#!/bin/sh\necho blocked by hook >&2\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(hooks.join("pre-commit"), fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let r = e.perform(&repo, Action::Commit { summary: "blocked".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false });
         assert!(!r.ok && r.message.contains("blocked by hook"), "{}", r.message);
         assert!(e.perform(&repo, Action::Commit { summary: "skipped".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: true, strip_comments: false }).ok);

@@ -35,6 +35,17 @@ impl OutputFlow {
     }
 }
 
+/// Each PTY writer owns its blocking I/O; callers only enqueue bounded input.
+fn input_queue(mut writer: Box<dyn Write + Send>) -> std::sync::mpsc::SyncSender<Vec<u8>> {
+    let (input, queued) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
+    std::thread::spawn(move || {
+        for bytes in queued {
+            if writer.write_all(&bytes).and_then(|_| writer.flush()).is_err() { break; }
+        }
+    });
+    input
+}
+
 #[derive(Default)]
 pub struct Terminals {
     sessions: Arc<Mutex<HashMap<u32, Session>>>,
@@ -134,14 +145,9 @@ impl Terminals {
         let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
-        let mut writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+        let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
         let id = self.next.fetch_add(1, Ordering::SeqCst) + 1;
-        let (input, queued) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
-        std::thread::spawn(move || {
-            for bytes in queued {
-                if writer.write_all(&bytes).and_then(|_| writer.flush()).is_err() { break; }
-            }
-        });
+        let input = input_queue(writer);
         let output = Arc::new(OutputFlow::default());
         self.sessions.lock().unwrap().insert(id, Session { writer: input, master: Arc::new(Mutex::new(pair.master)), child, output: output.clone() });
         let sessions = self.sessions.clone();
@@ -220,6 +226,55 @@ mod tests {
         assert!(rx.recv_timeout(Duration::from_secs(1)).unwrap()); worker.join().unwrap();
         let other = flow.clone(); let worker = std::thread::spawn(move || other.drain());
         flow.close(); worker.join().unwrap(); assert!(!flow.reserve(1));
+    }
+
+    #[test]
+    fn blocked_input_does_not_block_another_writer_and_queue_is_bounded() {
+        use std::sync::mpsc::{channel, TrySendError};
+        use std::time::{Duration, Instant};
+        struct Blocked { entered: std::sync::mpsc::Sender<()>, release: std::sync::mpsc::Receiver<()> }
+        impl Write for Blocked {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.entered.send(()).unwrap(); self.release.recv().unwrap(); Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        struct Responsive(std::sync::mpsc::Sender<Vec<u8>>);
+        impl Write for Responsive {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> { self.0.send(bytes.to_vec()).unwrap(); Ok(bytes.len()) }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let (entered_tx, entered) = channel(); let (release, release_rx) = channel();
+        let blocked = input_queue(Box::new(Blocked {entered: entered_tx, release: release_rx}));
+        blocked.try_send(vec![0]).unwrap(); entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        for _ in 0..8 { blocked.try_send(vec![0]).unwrap(); }
+        assert!(matches!(blocked.try_send(vec![0]), Err(TrySendError::Full(_))));
+        let (tx, received) = channel(); let responsive = input_queue(Box::new(Responsive(tx)));
+        let started = Instant::now(); responsive.try_send(b"responsive".to_vec()).unwrap();
+        assert_eq!(received.recv_timeout(Duration::from_secs(2)).unwrap(), b"responsive");
+        eprintln!("Independent terminal input while first writer is blocked: {:?}; eight queued packets maximum", started.elapsed());
+        // Let every queued write finish before releasing the fixture.
+        for _ in 0..9 { release.send(()).unwrap(); }
+        drop(blocked); drop(responsive);
+    }
+
+    #[test]
+    fn sustained_output_stays_bounded_and_drains_in_order() {
+        let flow = Arc::new(OutputFlow::default()); let producer = flow.clone();
+        let (tx, rx) = std::sync::mpsc::channel(); let started = std::time::Instant::now();
+        let worker = std::thread::spawn(move || {
+            for sequence in 0..2048 { assert!(producer.reserve(8192)); tx.send(sequence).unwrap(); }
+            producer.drain();
+        });
+        let mut peak = 0;
+        for expected in 0..2048 {
+            assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap(), expected);
+            peak = peak.max(flow.state.lock().unwrap().0);
+            // Deliberately slower acknowledgements model a busy renderer.
+            std::thread::sleep(std::time::Duration::from_micros(50)); flow.acknowledge(8192);
+        }
+        worker.join().unwrap(); assert!(peak <= 64 * 1024); assert_eq!(flow.state.lock().unwrap().0, 0);
+        eprintln!("16 MiB ordered output: {:?}, peak pending {peak} bytes, 2048 frames", started.elapsed());
     }
 
     #[test]

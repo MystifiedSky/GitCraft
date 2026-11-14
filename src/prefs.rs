@@ -42,6 +42,12 @@ pub fn decode(bytes: &[u8], enc: &'static encoding_rs::Encoding) -> String {
     enc.decode(bytes).0.into_owned()
 }
 
+/// Decode previews while retaining whether undecodable bytes were replaced.
+pub fn decode_preview(bytes: &[u8], encoding: Option<&'static encoding_rs::Encoding>) -> (String,bool) {
+    let (text,_,loss)=encoding.unwrap_or(encoding_rs::UTF_8).decode(bytes);
+    (text.into_owned(),loss)
+}
+
 /// Bytes for saving text in the repository's encoding. UTF-16 is written by hand (encoding_rs only decodes it).
 pub fn encode(text: &str, enc: &'static encoding_rs::Encoding, had_bom: bool) -> Result<Vec<u8>, String> {
     if enc == encoding_rs::UTF_16LE || enc == encoding_rs::UTF_16BE {
@@ -135,8 +141,21 @@ pub fn config_get(dir: Option<&Path>, scope: &str, keys: &[String]) -> HashMap<S
     let mut values = HashMap::new();
     for record in output.stdout.split('\0') {
         if let Some((key, value)) = record.split_once('\n') { values.insert(key.to_lowercase(), value.trim().to_owned()); }
+        else if !record.is_empty() { values.insert(record.to_lowercase(), "true".into()); }
     }
-    keys.iter().map(|key| (key.clone(), values.get(&key.to_lowercase()).cloned().unwrap_or_default())).collect()
+    keys.iter().map(|key| {
+        let lower=key.to_lowercase();
+        let mut value=values.get(&lower).cloned().unwrap_or_default();
+        if matches!(lower.as_str(), "commit.gpgsign" | "tag.gpgsign") {
+            let enabled=match value.to_ascii_lowercase().as_str() {
+                "true" | "yes" | "on" => true,
+                "" | "false" | "no" | "off" => false,
+                _ => value.parse::<i64>().is_ok_and(|number| number != 0),
+            };
+            value=enabled.to_string();
+        }
+        (key.clone(),value)
+    }).collect()
 }
 
 /// gpg --quick-gen-key: "a 4096 bit key with the name and email in your current profile that expires in 2 years"

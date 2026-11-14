@@ -8,6 +8,9 @@ Security fix: RUSTSEC-2024-0429 / GHSA-wrw7-89jp-8q8g
 Upstream patch: https://github.com/gtk-rs/gtk-rs-core/pull/1343
 Change: src/variant_iter.rs, VariantStrIter::impl_get declares its out-pointer
 mutable and passes &mut p to g_variant_get_child instead of &p. No API changes.
+Additional analyzer clarification: src/auto/date_time.rs calls DateTime::hash(self)
+explicitly when hashing its u32 GLib hash value. This disambiguates the inherent
+method from the Hash trait method without changing runtime behavior.
 The remaining release files are unchanged.
 
 Reason for the backport: as reviewed on 2026-11-14, the latest stable Tauri

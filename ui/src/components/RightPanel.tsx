@@ -252,10 +252,11 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
   };
 
   const doCommit = async (stageAll: boolean) => {
+    if (repo.status.conflicted || conflicted.length > 0) { s.toast(false, "Resolve and stage every conflicted file before committing."); return; }
     const submitted = useStore.getState().drafts[repo.path];
     const submittedAuthors = coauthorsRef.current;
     const description = withCoauthors(draft.description, coauthors);
-    const ok = await act(repo.path, { type: "commit", summary: draft.summary, description, amend: draft.amend, stageAll, skipHooks });
+    const ok = await act(repo.path, { type: "commit", summary: draft.summary, description, amend: draft.amend, stageAll, skipHooks, stripComments: s.settings.stripComments });
     if (ok) {
       if (coauthorsRef.current === submittedAuthors) setCoauthors("");
       if (useStore.getState().drafts[repo.path] === submitted) s.setDraft(repo.path, { summary: "", description: "", amend: false });
@@ -643,11 +644,7 @@ function CommitDetails({ repo, tabId, commit: c }: { repo: RepoView; tabId: stri
       </div>
       <ViewSwitch />
       <div className="flex-1 overflow-y-auto">
-        {files.isLoading && <div className="px-3 text-fg3 text-[12px]" role="status">Loading files…</div>}
-        {files.isError && <div className="px-3 py-2 text-[12px] text-[#ef7a76]" role="alert">
-          {String(files.error)} <button className="text-link hover:underline" onClick={() => files.refetch()}>Retry</button>
-        </div>}
-        {files.isSuccess && files.data.length === 0 && <div className="px-3 py-2 text-[12px] text-fg3">No file changes to show.</div>}
+        <FileQueryStatus query={files} />
         <FileList
           files={files.data ?? []}
           activeFile={ui.diff?.source.kind === "Commit" ? ui.diff.file : undefined}
@@ -657,6 +654,16 @@ function CommitDetails({ repo, tabId, commit: c }: { repo: RepoView; tabId: stri
       </div>
     </div>
   );
+}
+
+/** Shared loading, failure and empty states for history file queries. */
+function FileQueryStatus({ query }: { query: { isLoading: boolean; isError: boolean; isSuccess: boolean; error: unknown; data?: FileChange[]; refetch: () => unknown } }) {
+  if (query.isLoading) return <div className="px-3 text-fg3 text-[12px]" role="status">Loading files...</div>;
+  if (query.isError) return <div className="px-3 py-2 text-[12px] text-[#ef7a76]" role="alert">
+    {String(query.error)} <button className="text-link hover:underline" onClick={() => query.refetch()}>Retry</button>
+  </div>;
+  if (query.isSuccess && query.data?.length === 0) return <div className="px-3 py-2 text-[12px] text-fg3">No file changes to show.</div>;
+  return null;
 }
 
 /** Two commits (or a commit and the working folder): the files that differ and their diffs. */
@@ -684,11 +691,7 @@ function ComparePanel({ repo, tabId, from, to }: { repo: RepoView; tabId: string
       </div>
       <ViewSwitch />
       <div className="flex-1 overflow-y-auto">
-        {files.isLoading && <div className="px-3 text-fg3 text-[12px]" role="status">Loading files…</div>}
-        {files.isError && <div className="px-3 py-2 text-[12px] text-[#ef7a76]" role="alert">
-          {String(files.error)} <button className="text-link hover:underline" onClick={() => files.refetch()}>Retry</button>
-        </div>}
-        {files.isSuccess && files.data.length === 0 && <div className="px-3 py-2 text-[12px] text-fg3">No file changes to show.</div>}
+        <FileQueryStatus query={files} />
         <FileList
           files={files.data ?? []}
           activeFile={ui.diff?.source.kind === "Range" ? ui.diff.file : undefined}

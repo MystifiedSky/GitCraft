@@ -24,7 +24,9 @@ export function HistoryView({ repo, tabId, file, mode, sha }: { repo: RepoView; 
   const m = s.metrics;
   const hist = useQuery({ queryKey: ["history", repo.path, file], queryFn: () => api.fileHistory(repo.path, file) });
   const entries = hist.data ?? [];
-  const current = entries.find((e) => e.sha === sha) ?? entries[0];
+  const selected = entries.find((entry) => entry.sha === sha);
+  const current = selected ?? entries[0];
+  const blameFile = sha ? selected?.path : file;
   const setHist = (patch: Partial<{ mode: "history" | "blame"; sha: string | null }>) => s.setUi(tabId, { history: { file, mode, sha, ...patch } });
   const close = () => s.setUi(tabId, { history: null });
   const onGraph = (c: string) => {
@@ -82,7 +84,7 @@ export function HistoryView({ repo, tabId, file, mode, sha }: { repo: RepoView; 
           {entries.length >= 500 && <div className="p-3 text-[11px] text-fg3">Showing the latest 500 commits.</div>}
         </div>
         <div className="flex-1 min-w-0">
-          {mode === "history" ? current ? <HistoryDiff repo={repo} file={current.path} sha={current.sha} parent={current.parents[0] ?? null} onGraph={() => onGraph(current.sha)} /> : null : <Blame repo={repo} file={file} rev={sha} onPick={(c) => onGraph(c)} />}
+          {mode === "history" ? current ? <HistoryDiff repo={repo} file={current.path} sha={current.sha} parent={current.parents[0] ?? null} onGraph={() => onGraph(current.sha)} /> : null : blameFile ? <Blame repo={repo} file={blameFile} rev={sha} onPick={(c) => onGraph(c)} /> : <div className="p-4 text-fg3">{hist.isLoading ? "Loading file history…" : "Select a revision from this file's loaded history to view its blame."}</div>}
         </div>
       </div>
     </div>

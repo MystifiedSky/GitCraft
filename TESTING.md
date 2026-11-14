@@ -72,3 +72,9 @@ Use a disposable repository with a local bare remote. Record the app version, OS
 - Install a previous published version, check for updates, restart into the new version, and verify the displayed version. Test Linux package upgrades separately from AppImage updates.
 
 Report failures with reproduction steps and sanitized logs. Keep platform validation marked as in progress until the packaged desktop flows have been exercised.
+
+## Headless component regression checks
+
+After installing frontend dependencies, run `node scripts/verify-browser.mjs` from the repository root. It uses a locally installed Chrome or Chromium in a temporary profile. Set `CHROME_PATH` if the executable is not in a standard location. No desktop windows or user browser profiles are controlled.
+
+The checks exercise actual React components and Monaco with synthetic backend responses: editor switches, virtual-list scrolling and keyboard focus, delayed commits, upstream submission, graph statistics, remote detection, SSH/signing selection, merge-backup review, LFS failures, bounded repository operations, ranking and session grouping. Reports are written under `target/verification/`. Backend IPC and clipboard writes are intercepted, so real OS/service interactions still require the separate desktop smoke test.

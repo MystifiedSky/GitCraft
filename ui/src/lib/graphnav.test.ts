@@ -45,3 +45,12 @@ describe("hover marking", () => {
     expect([...hoverSegment(chain, new Set(["w"]), 3, false)]).toEqual([3, 4]);
   });
 });
+
+it("keeps selection visible when the parent or HEAD is outside the loaded graph", () => {
+  const page=commits.slice(0,2);const selection={type:"commit" as const,sha:"c"};
+  expect(nextTopological(page,"d",false,selection)).toEqual(selection);
+  expect(nextTopological(page,"missing",true,{type:"wip"})).toEqual({type:"commit",sha:"d"});
+  for(let i=0;i<5;i++)expect(nextTopological(page,"d",false,selection)).toEqual(selection);
+  expect(nextTopological(commits,"d",false,selection)).toEqual({type:"commit",sha:"b"});
+  expect(nextTopological(page,"d",false,{type:"commit",sha:"unloaded"})).toEqual({type:"commit",sha:"d"});
+});

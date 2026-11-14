@@ -28,6 +28,9 @@ export function PullRequestView({ repo, tabId, number }: { repo: RepoView; tabId
   const [method, setMethod] = useState("merge");
   const [busy, setBusy] = useState(false);
   const [merging, setMerging] = useState(false);
+  const serverDefault = remote.data?.service === "bitbucket-server";
+  const selectedMethod = serverDefault ? "default" : method;
+  const methodLabel = serverDefault ? "server default strategy" : method;
   const close = () => s.setUi(tabId, { pr: null });
   const checkout = async () => {
     setBusy(true);
@@ -50,10 +53,10 @@ export function PullRequestView({ repo, tabId, number }: { repo: RepoView; tabId
     }
   };
   const merge = () =>
-    confirmThen(`Merge #${number}?`, `This merges ${pr?.source} into ${pr?.target} on the server (${method}).`, "Merge", async () => {
+    confirmThen(`Merge #${number}?`, `This merges ${pr?.source} into ${pr?.target} on the server (${methodLabel}).`, "Merge", async () => {
       setBusy(true); setMerging(true);
       try {
-        await hosting.merge(repo.path, number, method);
+        await hosting.merge(repo.path, number, selectedMethod);
         s.toast(true, `Merged #${number}`);
         qc.invalidateQueries({ queryKey: ["prs", repo.path] });
         qc.invalidateQueries({ queryKey: ["pr", repo.path, number] });
@@ -98,12 +101,14 @@ export function PullRequestView({ repo, tabId, number }: { repo: RepoView; tabId
             <Button size="sm" disabled={busy} onClick={checkout} title="Check out this pull request’s exact source commit in detached HEAD mode">
               Checkout {pr.source}
             </Button>
-            <select disabled={busy} value={method} onChange={(e) => setMethod(e.target.value)} className="h-7 px-1 rounded-[4px] bg-field border border-white/10 text-[12.5px] text-fg outline-none">
-              <option value="merge">Merge commit</option>
-              <option value="squash">Squash and merge</option>
-              <option value="rebase">Rebase and merge</option>
+            <select disabled={busy || !remote.data} value={selectedMethod} onChange={(e) => setMethod(e.target.value)} className="h-7 px-1 rounded-[4px] bg-field border border-white/10 text-[12.5px] text-fg outline-none">
+              {serverDefault ? <option value="default">Server default</option> : <>
+                <option value="merge">Merge commit</option>
+                <option value="squash">Squash and merge</option>
+                <option value="rebase">Rebase and merge</option>
+              </>}
             </select>
-            <Button size="sm" variant="success" disabled={busy || pr.draft} onClick={merge} title={pr.draft ? "Draft pull requests can't be merged" : ""}>
+            <Button size="sm" variant="success" disabled={busy || pr.draft || !remote.data} onClick={merge} title={pr.draft ? "Draft pull requests can't be merged" : ""}>
               Merge Pull Request
             </Button>
           </div>

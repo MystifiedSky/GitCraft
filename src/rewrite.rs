@@ -117,6 +117,7 @@ pub fn interactive_cherry_pick(dir: &Path, items: &[TodoItem], _log: &dyn Fn(&[&
 #[derive(Serialize, Default)]
 pub struct ConflictInfo {
     pub working_token: String,
+    pub decoding_loss: bool,
     /// The working-folder file with conflict markers.
     pub working: Option<String>,
     pub base: Option<String>,
@@ -126,17 +127,6 @@ pub struct ConflictInfo {
     pub ours_label: String,
     pub theirs_label: String,
     pub binary: bool,
-}
-
-fn decode_text(dir: &Path, bytes: &[u8]) -> String {
-    match crate::prefs::encoding_for(dir) {
-        Some(encoding) => crate::prefs::decode(bytes, encoding),
-        None => String::from_utf8_lossy(bytes).into_owned(),
-    }
-}
-
-fn stage(dir: &Path, n: u8, file: &str) -> Option<String> {
-    crate::files::contents(dir, &format!(":{n}"), file).map(|b| decode_text(dir, &b))
 }
 
 /// The names shown for "current" and "incoming": during a merge HEAD's branch and MERGE_HEAD's
@@ -176,15 +166,15 @@ pub fn conflict_info(dir: &Path, file: &str) -> ConflictInfo {
     let utf16 = encoding.is_some_and(|e| e == encoding_rs::UTF_16LE || e == encoding_rs::UTF_16BE);
     let binary = !utf16 && working.as_deref().map(crate::files::is_binary).unwrap_or(false);
     let (ours_label, theirs_label) = conflict_labels(dir);
+    let working_token=crate::files::content_token(working.as_deref());
+    let mut decoding_loss=false;
+    let mut decoded=[working,crate::files::contents(dir,":1",file),crate::files::contents(dir,":2",file),crate::files::contents(dir,":3",file)].into_iter().map(|bytes|bytes.map(|bytes| {
+        let (text,loss)=crate::prefs::decode_preview(&bytes,encoding);decoding_loss|=loss;text
+    })).collect::<Vec<_>>().into_iter();
     ConflictInfo {
-        working_token: crate::files::content_token(working.as_deref()),
-        working: working.map(|b| decode_text(dir, &b)),
-        base: stage(dir, 1, file),
-        ours: stage(dir, 2, file),
-        theirs: stage(dir, 3, file),
-        ours_label,
-        theirs_label,
-        binary,
+        working_token,decoding_loss,
+        working:decoded.next().unwrap(),base:decoded.next().unwrap(),ours:decoded.next().unwrap(),theirs:decoded.next().unwrap(),
+        ours_label,theirs_label,binary,
     }
 }
 

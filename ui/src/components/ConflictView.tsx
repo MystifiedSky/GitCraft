@@ -62,6 +62,10 @@ export function ConflictView({ repo, tabId, file }: { repo: RepoView; tabId: str
   const allDone = !hasConflictMarkers(output);
 
   const save = async (utf8 = false) => {
+    if (info?.decoding_loss && !utf8) {
+      s.setDialog({kind:"choice",title:"Review this encoding before saving",text:"Some original bytes could not be decoded. Choose the correct repository encoding to preserve them. Converting this output to UTF-8 saves the text shown and can replace undecodable bytes.",choices:[{label:"Convert output to UTF-8",onSelect:()=>{void save(true);}}]});
+      return;
+    }
     const normalized = output.replace(/\r\n/g, "\n");
     const text = crlf ? normalized.replace(/\n/g, "\r\n") : normalized;
     try {
@@ -74,7 +78,7 @@ export function ConflictView({ repo, tabId, file }: { repo: RepoView; tabId: str
         s.toast(true, `Saved ${file}; conflict markers remain to resolve`);
       }
     } catch (e) {
-      if (String(e).includes("ENCODING_UNREPRESENTABLE")) {
+      if (/ENCODING_UNREPRESENTABLE|ENCODING_DECODE_LOSS/.test(String(e))) {
         s.setDialog({ kind: "choice", title: "Save this file as UTF-8?", text: "The current encoding cannot preserve all characters. The original file is unchanged. Convert it to UTF-8 with a byte-order mark?", choices: [{ label: "Save as UTF-8", onSelect: () => { void save(true); } }] });
       } else s.toast(false, String(e));
     }

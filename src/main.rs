@@ -287,6 +287,14 @@ async fn account_info(path: Option<String>) -> Result<accounts::AccountInfo, Str
 }
 
 #[tauri::command]
+async fn push_review(path: String) -> Result<actions::PushReview, String> {
+    blocking(move || {
+        let dir=Path::new(&path);let lock=operation::lock_for(dir);let _guard=lock.lock().unwrap_or_else(|error|error.into_inner());
+        actions::push_review(dir)
+    }).await?
+}
+
+#[tauri::command]
 async fn set_git_config(path: Option<String>, scope: String, key: String, value: String) -> Result<(), String> {
     blocking(move || accounts::set(Path::new(&path.unwrap_or_else(|| ".".into())), &scope, &key, &value)).await?
 }
@@ -749,7 +757,12 @@ async fn init_repo(parent: String, name: String, options: Option<manage::InitOpt
         return Err("Enter a folder name, without parent directories.".into());
     }
     let dir = PathBuf::from(parent).join(name);
-    if dir.exists() && std::fs::read_dir(&dir).map_err(err)?.next().is_some() {
+    let nonempty = match tokio::fs::read_dir(&dir).await {
+        Ok(mut entries) => entries.next_entry().await.map_err(err)?.is_some(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(err(error)),
+    };
+    if nonempty {
         return Err("Choose an empty folder for a new repository. Existing files were not changed.".into());
     }
     let name = name.to_owned();
@@ -1095,6 +1108,7 @@ fn main() {
             term_close,
             account_info,
             set_git_config,
+            push_review,
             generate_ssh_key,
             cancel_job,
             lfs_info,

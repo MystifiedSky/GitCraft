@@ -296,18 +296,26 @@ pub fn lfs_locks(dir: &Path) -> Result<Vec<LfsLock>, String> {
 
 /// Add a pattern to .gitignore unless it's already there.
 pub fn ignore(dir: &Path, pattern: &str) -> Result<bool, String> {
-    let p = dir.join(".gitignore");
-    let cur = std::fs::read_to_string(&p).unwrap_or_default();
-    if cur.lines().any(|l| l.trim() == pattern) {
-        return Ok(false);
-    }
-    let mut next = cur.clone();
-    if !next.is_empty() && !next.ends_with('\n') {
-        next.push('\n');
-    }
-    next.push_str(pattern);
-    next.push('\n');
-    std::fs::write(p, next).map_err(|e| e.to_string())?;
+    use std::io::Write;
+    if pattern.contains(['\r','\n','\0']) {return Err("An ignore rule must be a single text line.".into());}
+    let p=dir.join(".gitignore");
+    let cur=match std::fs::read(&p) {
+        Ok(bytes)=>bytes,
+        Err(error) if error.kind()==std::io::ErrorKind::NotFound=>Vec::new(),
+        Err(error)=>return Err(format!("Could not read .gitignore; its contents were kept: {error}")),
+    };
+    if cur.contains(&0) {return Err("This .gitignore contains binary or unsupported encoded data. Its contents were kept.".into());}
+    if cur.split(|byte|*byte==b'\n').enumerate().any(|(index,line)| {
+        let line=line.strip_suffix(b"\r").unwrap_or(line);
+        let line=if index==0 {line.strip_prefix(&[0xef,0xbb,0xbf]).unwrap_or(line)} else {line};
+        line==pattern.as_bytes()
+    }) {return Ok(false);}
+    let newline=if cur.windows(2).any(|pair|pair==b"\r\n") {b"\r\n".as_slice()} else {b"\n".as_slice()};
+    let mut appended=Vec::new();
+    if !cur.is_empty() {appended.extend_from_slice(newline);}
+    appended.extend_from_slice(pattern.as_bytes());appended.extend_from_slice(newline);
+    // Append original bytes instead of decoding/replacing existing rules.
+    std::fs::OpenOptions::new().create(true).append(true).open(&p).and_then(|mut file|file.write_all(&appended)).map_err(|error|error.to_string())?;
     Ok(true)
 }
 

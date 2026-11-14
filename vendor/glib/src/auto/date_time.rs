@@ -494,7 +494,7 @@ impl hash::Hash for DateTime {
     where
         H: hash::Hasher,
     {
-        hash::Hash::hash(&self.hash(), state)
+        hash::Hash::hash(&DateTime::hash(self), state)
     }
 }
 

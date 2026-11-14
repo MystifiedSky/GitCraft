@@ -5,16 +5,34 @@
 //! - a debounce must be between 1 and 60000 ms; a trailing '/' on an excluded path is dropped.
 
 use crate::metrics::{GITDIR_WATCH_DEBOUNCE_MS, WATCH_DEBOUNCE_MAX_MS, WATCH_DEBOUNCE_MIN_MS, WORKDIR_WATCH_DEBOUNCE_MS};
-use notify_debouncer_mini::{new_debouncer, notify::RecommendedWatcher, notify::RecursiveMode, DebounceEventResult, Debouncer};
+use notify_debouncer_mini::{new_debouncer_opt, Config, DebounceEventHandler, notify::{self, RecommendedWatcher, Watcher}, notify::RecursiveMode, DebounceEventResult, Debouncer};
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+/// Read/open notifications are not changes. In particular, Linux index reads during
+/// watch-plan refreshes must not schedule another refresh of that same plan.
+struct ChangeWatcher(RecommendedWatcher);
+fn is_change(event: &notify::Event) -> bool { !matches!(event.kind, notify::EventKind::Access(_)) }
+impl Watcher for ChangeWatcher {
+    fn new<F: notify::EventHandler>(mut handler: F, config: notify::Config) -> notify::Result<Self> {
+        RecommendedWatcher::new(move |event: notify::Result<notify::Event>| {
+            if event.as_ref().map_or(true, is_change) { handler.handle_event(event); }
+        }, config).map(Self)
+    }
+    fn watch(&mut self, path: &Path, mode: RecursiveMode) -> notify::Result<()> { self.0.watch(path, mode) }
+    fn unwatch(&mut self, path: &Path) -> notify::Result<()> { self.0.unwatch(path) }
+    fn kind() -> notify::WatcherKind { RecommendedWatcher::kind() }
+}
+fn new_change_debouncer<F: DebounceEventHandler>(timeout: Duration, handler: F) -> notify::Result<Debouncer<ChangeWatcher>> {
+    new_debouncer_opt(Config::default().with_timeout(timeout), handler)
+}
+
 pub struct RepoWatch {
     _workdir: WorkWatch,
-    _gitdirs: Vec<Debouncer<RecommendedWatcher>>,
+    _gitdirs: Vec<Debouncer<ChangeWatcher>>,
 }
 
 /// Clamp a debounce to the accepted range.
@@ -116,7 +134,7 @@ impl WorkWatch {
         let mut plan = crate::watch_plan::WatchPlan::read(&root)?;
         let (events, messages) = std::sync::mpsc::channel();
         let sender = events.clone();
-        let mut watcher = new_debouncer(debounce(WORKDIR_WATCH_DEBOUNCE_MS), move |result: DebounceEventResult| {
+        let mut watcher = new_change_debouncer(debounce(WORKDIR_WATCH_DEBOUNCE_MS), move |result: DebounceEventResult| {
             let event = match result {
                 Ok(events) => WorkEvent::Paths(events.into_iter().map(|event| event.path).collect()),
                 Err(_) => WorkEvent::Reconfigure(true),
@@ -206,7 +224,7 @@ pub fn start(root: &Path, on_change: impl Fn(bool) + Send + Sync + Clone + 'stat
         let cb = on_change.clone();
         let gd = gitdir.clone();
         let work_events = work_events.clone();
-        let mut g = new_debouncer(debounce(GITDIR_WATCH_DEBOUNCE_MS), move |res: DebounceEventResult| {
+        let mut g = new_change_debouncer(debounce(GITDIR_WATCH_DEBOUNCE_MS), move |res: DebounceEventResult| {
             if let Ok(events) = res {
                 let paths: Vec<PathBuf> = events.into_iter().map(|e| e.path).filter(|p| !under(p, &lt) && relevant_metadata(&gd, p)).collect();
                 if !paths.is_empty() {
@@ -225,6 +243,16 @@ pub fn start(root: &Path, on_change: impl Fn(bool) + Send + Sync + Clone + 'stat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reading_watched_files_does_not_feed_a_refresh_loop() {
+        use notify::event::{AccessKind, AccessMode, DataChange, ModifyKind};
+        for kind in [AccessKind::Read, AccessKind::Open(AccessMode::Read), AccessKind::Close(AccessMode::Read)] {
+            assert!(!is_change(&notify::Event::new(notify::EventKind::Access(kind))));
+        }
+        assert!(is_change(&notify::Event::new(notify::EventKind::Modify(ModifyKind::Data(DataChange::Any)))));
+        assert!(is_change(&notify::Event::new(notify::EventKind::Create(notify::event::CreateKind::File))));
+    }
 
     #[test]
     fn graph_refreshes_ignore_object_and_reflog_writes_but_keep_refs_and_state() {
@@ -286,6 +314,23 @@ mod registration_tests {
         while start.elapsed()<Duration::from_secs(12) {if condition(){return;}std::thread::sleep(Duration::from_millis(50));}
         panic!("Timed out: {label}");
     }
+    #[test]
+    fn external_excludes_reconfigure_live_directory_watches() {
+        let folder = tempfile::tempdir().unwrap(); let root = folder.path().join("repository");
+        std::fs::create_dir(&root).unwrap(); let root = root.canonicalize().unwrap();
+        assert!(crate::git::run(&root, &["init", "-q"]).ok);
+        let excludes = folder.path().join("external-ignore"); std::fs::write(&excludes, "build/\n").unwrap();
+        assert!(crate::git::run(&root, &["config", "core.excludesFile", &excludes.to_string_lossy()]).ok);
+        std::fs::create_dir_all(root.join("build/deep")).unwrap(); std::fs::write(root.join("build/deep/file"), "initial").unwrap();
+        let events = Arc::new(AtomicUsize::new(0)); let count = events.clone();
+        let watch = start(&root, move |_| {count.fetch_add(1, Ordering::SeqCst);}).unwrap();
+        // Updating an external rule source must install watches in newly visible trees.
+        std::fs::write(&excludes, "").unwrap(); std::thread::sleep(Duration::from_millis(3500));
+        let baseline = events.load(Ordering::SeqCst); std::fs::write(root.join("build/deep/file"), "visible").unwrap();
+        wait_until("external excludes unignored directory", || events.load(Ordering::SeqCst) > baseline);
+        drop(watch);
+    }
+
     #[test]
     fn real_events_follow_new_directories_ignore_edits_and_tracked_exceptions() {
         let folder=tempfile::tempdir().unwrap();let root=folder.path().canonicalize().unwrap();assert!(crate::git::run(&root,&["init","-q"]).ok);

@@ -65,6 +65,7 @@ pub struct FileVersions {
     pub encoding: String,
     /// The working-folder copy can be edited and saved.
     pub editable: bool,
+    pub decoding_loss: bool,
 }
 
 const IMAGE_TYPES: [(&str, &str); 8] = [
@@ -149,6 +150,7 @@ pub fn versions_with_limit(dir: &Path, src: &DiffSource, file: &str, parent: Opt
     }
     // Repo-Specific > Encoding (UTF-16 files contain zero bytes, so they aren't treated as binary then).
     let enc = crate::prefs::encoding_for(dir);
+    v.encoding=new.as_deref().and_then(encoding_rs::Encoding::for_bom).map(|(encoding,_)|encoding).or(enc).unwrap_or(encoding_rs::UTF_8).name().to_owned();
     let utf16 = enc.map(|e| e == encoding_rs::UTF_16LE || e == encoding_rs::UTF_16BE).unwrap_or(false);
     let is_bin = |b: &Option<Vec<u8>>| !utf16 && b.as_ref().map(|x| is_binary(x)).unwrap_or(false);
     if is_bin(&old) || is_bin(&new) {
@@ -156,20 +158,11 @@ pub fn versions_with_limit(dir: &Path, src: &DiffSource, file: &str, parent: Opt
         v.editable = false;
         return v;
     }
-    let text = |b: Option<Vec<u8>>| {
-        b.map(|x| {
-            if let Some(e) = enc {
-                return crate::prefs::decode(&x, e);
-            }
-            let x = x.strip_prefix(&[0xEF, 0xBB, 0xBF][..]).map(|s| s.to_vec()).unwrap_or(x);
-            match String::from_utf8(x) {
-                Ok(s) => s,
-                Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
-            }
-        })
-    };
-    v.old = text(old);
-    v.new = text(new);
+    let decode = |bytes: Option<Vec<u8>>| bytes.map(|bytes|crate::prefs::decode_preview(&bytes,enc));
+    let old=decode(old);let new=decode(new);
+    v.decoding_loss=old.as_ref().is_some_and(|(_,loss)|*loss) || new.as_ref().is_some_and(|(_,loss)|*loss);
+    v.editable &= !new.as_ref().is_some_and(|(_,loss)|*loss);
+    v.old=old.map(|(text,_)|text);v.new=new.map(|(text,_)|text);
     v
 }
 
@@ -200,26 +193,37 @@ fn split_diff(text: &str) -> (String, Vec<Hunk>) {
 /// `lines` are indexes into the hunk body. For a reverse patch (unstage / discard) the
 /// roles of '+' and '-' swap, as in git's own line staging.
 pub fn partial_patch(diff: &str, hunk: usize, lines: Option<&[usize]>, reverse: bool) -> Option<String> {
+    if !git::diff_within_budget(diff) { return None; }
+    if diff.lines().filter(|line| line.starts_with("diff --git ")).count() > 1 { return None; }
     let (head, hunks) = split_diff(diff);
     let h = hunks.get(hunk)?;
     let mut out = head;
     out.push_str(&h.header);
     out.push('\n');
+    let mut previous_written = false;
     for (i, l) in h.lines.iter().enumerate() {
+        // A no-newline marker belongs to the immediately preceding original line.
+        // Dropped additions/deletions must not transfer their marker onto context.
+        if l.starts_with('\\') {
+            if previous_written { out.push_str(l); out.push('\n'); }
+            continue;
+        }
         let chosen = lines.map(|ls| ls.contains(&i)).unwrap_or(true);
         let (keep_sign, ctx_sign) = if reverse { ('-', '+') } else { ('+', '-') };
-        if chosen || l.starts_with(' ') || l.starts_with('\\') {
+        if chosen || l.starts_with(' ') {
             out.push_str(l);
         } else if l.starts_with(ctx_sign) {
             // Not chosen: the line stays as it is on the side the patch is applied to.
             out.push(' ');
             out.push_str(&l[1..]);
         } else if l.starts_with(keep_sign) {
+            previous_written = false;
             continue; // not chosen: leave this addition out
         } else {
             out.push_str(l);
         }
         out.push('\n');
+        previous_written = true;
     }
     Some(out)
 }
@@ -248,7 +252,7 @@ pub fn apply_part(dir: &Path, file: &str, untracked: bool, op: PatchOp, hunk: us
     }
     if untracked {
         // Make the new file visible to `git diff` without staging its contents.
-        let o = run(dir, &["add", "--intent-to-add", "--", file]);
+        let o = run(dir, &["--literal-pathspecs", "add", "--intent-to-add", "--", file]);
         if !o.ok {
             return Err(o.message());
         }
@@ -394,12 +398,12 @@ pub fn save(dir: &Path, file: &str, content: &str) -> Result<(), String> { save_
 fn save_mode(dir: &Path, file: &str, content: &str, utf8: bool) -> Result<(), String> {
     let p = dir.join(file);
     // Keep the file's existing line endings.
-    let before = std::fs::read(&p).unwrap_or_default();
-    let enc = encoding_rs::Encoding::for_bom(&before).map(|(encoding, _)| encoding).or_else(|| crate::prefs::encoding_for(dir));
-    let old_text = match enc {
-        Some(e) => crate::prefs::decode(&before, e),
-        None => String::from_utf8_lossy(&before).into_owned(),
+    let before = match std::fs::read(&p) {
+        Ok(bytes)=>bytes,Err(error) if error.kind()==std::io::ErrorKind::NotFound=>Vec::new(),Err(error)=>return Err(error.to_string()),
     };
+    let enc = encoding_rs::Encoding::for_bom(&before).map(|(encoding, _)| encoding).or_else(|| crate::prefs::encoding_for(dir));
+    let (old_text,decoding_loss)=crate::prefs::decode_preview(&before,enc);
+    if decoding_loss && !utf8 {return Err("ENCODING_DECODE_LOSS: Existing bytes cannot be decoded with this encoding. Choose the correct repository encoding or explicitly convert the reviewed text to UTF-8; the original file was kept.".into());}
     let crlf = old_text.contains("\r\n");
     let text = if crlf { content.replace("\r\n", "\n").replace('\n', "\r\n") } else { content.to_string() };
     let bytes = if utf8 || before.starts_with(&[0xEF, 0xBB, 0xBF]) {
@@ -423,7 +427,7 @@ pub struct HistoryEntry {
 /// Commits that changed a file, newest first, following renames.
 pub fn history(dir: &Path, file: &str, max: usize) -> Vec<HistoryEntry> {
     let count = format!("-n{max}");
-    let output = run(dir, &["log", "--follow", "-M", &count, "--name-status", "-z", "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%s%x00%b%x00", "--", file]);
+    let output = run(dir, &["--literal-pathspecs", "log", "--follow", "-M", &count, "--name-status", "-z", "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%s%x00%b%x00", "--", file]);
     let fields: Vec<_> = output.stdout.split('\0').collect();
     let mut position = 0; let mut entries = Vec::new();
     while position < fields.len() {
@@ -460,7 +464,7 @@ pub struct BlameLine {
 
 /// Who last changed each line (`git blame --porcelain`). `rev` None = working folder.
 pub fn blame(dir: &Path, file: &str, rev: Option<&str>) -> Result<Vec<BlameLine>, String> {
-    let mut args = vec!["blame", "--porcelain"];
+    let mut args = vec!["--literal-pathspecs", "blame", "--porcelain"];
     if let Some(r) = rev {
         args.push(r);
     }
@@ -687,22 +691,11 @@ pub const COPY_CONTENTS_MAX: usize = 10 * 1024 * 1024;
 /// The text of a file, from the working folder or (with `rev`) as it was in a commit, for "Copy file contents".
 /// Binary files are refused by the same rule as the diff view (is_binary).
 pub fn file_text(dir: &Path, file: &str, rev: Option<&str>) -> Result<String, String> {
-    let path = repo_file(dir, file)?;
-    let bytes = match rev {
-        Some(rev) if !rev.is_empty() => {
-            let file = file.replace('\\', "/");
-            let spec = if rev == ":" { format!(":{file}") } else { format!("{rev}:{file}") };
-            let o = git::git_cmd(dir).args(["show", &spec]).output().map_err(|e| e.to_string())?;
-            if !o.status.success() {
-                return Err(String::from_utf8_lossy(&o.stderr).trim().to_string());
-            }
-            o.stdout
-        }
-        _ => std::fs::read(&path).map_err(|e| e.to_string())?,
-    };
-    if bytes.len() > COPY_CONTENTS_MAX {
-        return Err("This file is too large to copy.".into());
-    }
+    repo_file(dir, file)?;
+    let source = rev.filter(|rev| !rev.is_empty()).unwrap_or(WORKDIR);
+    let bytes = preview_contents(dir, source, file, COPY_CONTENTS_MAX)
+        .map_err(|_| "This file is too large to copy.".to_string())?
+        .ok_or_else(|| "Could not read this file. It may have been moved or removed.".to_string())?;
     if is_binary(&bytes) {
         return Err("This is a binary file, so it can't be copied as text.".into());
     }
@@ -738,12 +731,12 @@ mod file_action_tests {
 
     #[test]
     fn repo_file_stays_inside_the_repository() {
-        let dir = Path::new("C:/repo");
+        let dir = Path::new(if cfg!(windows) { "C:/repo" } else { "/repo" });
         assert!(repo_file(dir, "src/main.rs").is_ok());
         assert!(repo_file(dir, "../secret.txt").is_err());
         assert!(repo_file(dir, "src/../../x").is_err());
         assert!(repo_file(dir, "").is_err());
-        assert!(repo_file(dir, "C:/Windows/win.ini").is_err());
+        if cfg!(windows) { assert!(repo_file(dir, "C:/Windows/win.ini").is_err()); }
         assert!(repo_file(dir, "/etc/passwd").is_err());
     }
 

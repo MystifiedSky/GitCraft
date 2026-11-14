@@ -117,7 +117,7 @@ impl Jobs {
                 if at.elapsed() > Duration::from_secs(2) { break; }
             }
             match err_rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(bytes) => for text in output.push(&bytes) { if let Some(listener) = &listener { listener(id, &text, percent(&text)); } },
+                Ok(bytes) => for text in output.push(&bytes) { if let Some(listener) = &listener { listener(id, &git::redact_diagnostic(&text), percent(&text)); } },
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {},
             }

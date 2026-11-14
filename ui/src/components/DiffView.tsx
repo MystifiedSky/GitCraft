@@ -69,6 +69,7 @@ export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: strin
 
   const v = versions.data;
   const editable = !!v?.editable && !v.binary;
+  const virtualComparison = lines.data?.some(line => line.kind === "Limit") || (set.wordWrap && (lines.data?.length ?? 0) > 500);
   const added = (lines.data ?? []).filter((l) => l.kind === "Added").length;
   const removed = (lines.data ?? []).filter((l) => l.kind === "Removed").length;
   const inList = (list: { path: string }[]) => list.some((f) => f.path === target.file);
@@ -89,14 +90,14 @@ export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: strin
       setEditing(false);
       await refresh(repo.path);
     } catch (e) {
-      if (String(e).includes("ENCODING_UNREPRESENTABLE")) {
+      if (/ENCODING_UNREPRESENTABLE|ENCODING_DECODE_LOSS/.test(String(e))) {
         s.setDialog({ kind: "choice", title: "Save this file as UTF-8?", text: "The current encoding cannot represent every character. The original file is unchanged. Convert this file to UTF-8 with a byte-order mark to preserve your text?", choices: [{ label: "Save as UTF-8", onSelect: () => { void save(true); } }] });
       } else s.toast(false, String(e));
     }
   };
 
   const next = (dir: 1 | -1) => {
-    if (view === "diff" && set.diffMode !== "hunk") return dir === 1 ? handle.current?.next() : handle.current?.prev();
+    if (view === "diff" && (set.diffMode !== "hunk" || virtualComparison)) return dir === 1 ? handle.current?.next() : handle.current?.prev();
     const el = hunkScroll.current;
     if (!el) return;
     const hunks = [...el.querySelectorAll<HTMLElement>("[data-hunk]")];
@@ -128,7 +129,7 @@ export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: strin
         onSave={() => save()}
       />
     );
-  else if (v && set.diffMode !== "hunk")
+  else if (v && (set.diffMode !== "hunk" || virtualComparison))
     body = (
       <MonacoDiff
         original={v.old ?? ""}
@@ -159,6 +160,11 @@ export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: strin
 
   return (
     <div className="h-full flex flex-col bg-app min-w-0">
+      {virtualComparison && view === "diff" && <div role="status" className="px-3 py-1 text-[12px] text-fg2">Large or wrapped diff shown in the virtualized comparison. Use full-file actions, or disable wrapping for line selection within the hunk limit.</div>}
+      {v?.decoding_loss && <div role="alert" className="px-3 py-2 text-[12px] text-warn bg-warn/10">
+        Some bytes could not be decoded. Choose the correct repository encoding before editing.
+        {v.new_token && v.new !== null && <button className="ml-2 underline" onClick={() => s.setDialog({kind:"choice",title:`Convert ${target.file} to UTF-8?`,text:"This saves only the text shown. Undecodable bytes can be replaced with replacement characters. Choose the correct repository encoding instead to preserve those bytes.",choices:[{label:"Convert preview to UTF-8",onSelect:async()=>{try {await api.saveFile(repo.path,target.file,v.new!,v.new_token!,true);await refresh(repo.path);s.toast(true,`Converted ${target.file} to UTF-8`);} catch(error){s.toast(false,String(error));}}}]})}>Convert preview to UTF-8...</button>}
+      </div>}
       <div className="flex items-center gap-2 h-[30px] pl-3 pr-2 bg-toolbar/60 border-b border-black/30 shrink-0">
         <StatusIcon status={status} />
         <span className="text-[13px] truncate min-w-0 flex-1" title={target.file}>
@@ -305,7 +311,6 @@ function HunkView({
   const { pre, hunks } = useMemo(() => splitHunks(lines), [lines]);
   const [sel, setSel] = useState<{ hunk: number; lines: number[]; anchor: number } | null>(null);
   useEffect(() => setSel(null), [lines]);
-  useEffect(() => setSel(null), [lines]);
   const staged = target.source.kind === "Staged";
 
   const run = (op: PatchOp, hunk: number, picked: number[] | null) => {
@@ -385,14 +390,20 @@ function HunkView({
               )}
             </div>
             <table className="border-collapse min-w-full">
-              <tbody>
-                {h.lines.map((l, i) => {
+              <VirtualHunkRows lines={h.lines} scrollRef={scrollRef} wordWrap={wordWrap} render={(l, i) => {
                   const change = l.kind === "Added" || l.kind === "Removed";
                   const on = picked.includes(i);
                   return (
                     <tr
                       key={i}
                       onClick={(e) => change && pick(hi, i, e.shiftKey)}
+                      tabIndex={change && actions ? 0 : undefined}
+                      aria-selected={change && actions ? on : undefined}
+                      onKeyDown={(event) => {
+                        if (change && actions && (event.key === "Enter" || event.key === " ")) {
+                          event.preventDefault(); pick(hi, i, event.shiftKey);
+                        }
+                      }}
                       className={cn(
                         l.kind === "Added" && "bg-good/20",
                         l.kind === "Removed" && "bg-bad/20",
@@ -410,12 +421,44 @@ function HunkView({
                       </td>
                     </tr>
                   );
-                })}
-              </tbody>
+                }} />
             </table>
           </div>
         );
       })}
     </div>
   );
+}
+
+/** Fixed-height rows retain original body indexes; large wrapped hunks use Monaco. */
+function VirtualHunkRows({lines, scrollRef, wordWrap, render}: {
+  lines: DiffLine[]; scrollRef: React.RefObject<HTMLDivElement | null>; wordWrap: boolean;
+  render: (line: DiffLine, index: number) => React.ReactNode;
+}) {
+  const body = useRef<HTMLTableSectionElement>(null);
+  const [range, setRange] = useState({start: 0, end: 60});
+  useEffect(() => {
+    const scroller = scrollRef.current;
+    if (!scroller || wordWrap) return;
+    const update = () => {
+      const element = body.current;
+      if (!element) return;
+      const offset = scroller.getBoundingClientRect().top - element.getBoundingClientRect().top;
+      const start = Math.min(lines.length, Math.max(0, Math.floor(offset / 19) - 12));
+      const end = Math.max(start, Math.min(lines.length, Math.ceil((offset + scroller.clientHeight) / 19) + 12));
+      setRange(previous => previous.start === start && previous.end === end ? previous : {start, end});
+    };
+    update();
+    scroller.addEventListener("scroll", update, {passive: true});
+    const observer = new ResizeObserver(update);
+    observer.observe(scroller);
+    return () => {scroller.removeEventListener("scroll", update); observer.disconnect();};
+  }, [lines.length, scrollRef, wordWrap]);
+  const start = wordWrap ? 0 : Math.min(range.start, lines.length);
+  const end = wordWrap ? lines.length : Math.min(range.end, lines.length);
+  return <tbody ref={body}>
+    {start > 0 && <tr aria-hidden="true"><td colSpan={3} style={{height: start * 19, padding: 0, border: 0}} /></tr>}
+    {lines.slice(start, end).map((line, index) => render(line, start + index))}
+    {end < lines.length && <tr aria-hidden="true"><td colSpan={3} style={{height: (lines.length - end) * 19, padding: 0, border: 0}} /></tr>}
+  </tbody>;
 }

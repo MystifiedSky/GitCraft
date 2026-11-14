@@ -280,10 +280,10 @@ export function SigningSection() {
         </>
       )}
       <Row label="Sign Commits by Default">
-        <Toggle value={c["commit.gpgsign"] === "true"} onChange={(v) => save("commit.gpgsign", v ? "true" : "")} />
+        <Toggle value={c["commit.gpgsign"] === "true"} onChange={(v) => save("commit.gpgsign", v ? "true" : "false")} />
       </Row>
       <Row label="Sign Tags by Default">
-        <Toggle value={c["tag.gpgSign"] === "true"} onChange={(v) => save("tag.gpgSign", v ? "true" : "")} />
+        <Toggle value={c["tag.gpgSign"] === "true"} onChange={(v) => save("tag.gpgSign", v ? "true" : "false")} />
       </Row>
     </>
   );

@@ -484,9 +484,6 @@ export function AgentsSection() {
       <Row label="CLI arguments" help="Arguments appended to the agent command when starting a session.">
         <Text value={set.agentArgs} onSave={(v) => put({ agentArgs: v })} mono />
       </Row>
-      <Row label="Show worktree WIP nodes in the graph" help="When enabled, the graph shows a WIP row for every worktree with uncommitted changes or an active agent session.">
-        <Toggle value={set.showWorktreeWip} onChange={(v) => put({ showWorktreeWip: v })} />
-      </Row>
     </>
   );
 }

@@ -19,7 +19,7 @@ pub fn make_patch(dir: &Path, shas: &[String]) -> Result<String, String> {
             let empty = git::run(dir, &["hash-object", "-w", "-t", "tree", "--stdin"]);
             if !empty.ok { return Err(empty.message()); } empty.stdout.trim().to_owned()
         };
-        let text = git::run_utf8(dir, &["diff", &baseline, "--binary", "--no-color", "--no-ext-diff", &context, &interhunk])?;
+        let text = git::run_utf8(dir, &["diff", &baseline, "--binary", "--no-color", "--no-ext-diff", "--no-textconv", &context, &interhunk])?;
         if text.trim().is_empty() {
             return Err("There are no uncommitted changes to put in a patch (new files must be staged first).".into());
         }
@@ -206,7 +206,7 @@ pub fn conflict_check(dir: &Path, target: Option<&str>) -> ConflictCheck {
         return ConflictCheck { target, ..Default::default() };
     }
     let lines: Vec<&str> = o.stdout.lines().collect();
-    if lines.first().map(|l| l.len() == 40 && l.chars().all(|c| c.is_ascii_hexdigit())).unwrap_or(false) {
+    if lines.first().map(|l| matches!(l.len(), 40 | 64) && l.chars().all(|c| c.is_ascii_hexdigit())).unwrap_or(false) {
         let mut files: Vec<String> = lines[1..].iter().filter(|l| !l.trim().is_empty()).map(|s| s.to_string()).collect();
         files.dedup();
         return ConflictCheck { target, files, note: None };

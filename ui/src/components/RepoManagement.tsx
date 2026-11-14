@@ -61,7 +61,7 @@ export function RepoManagementDialog({ onClose }: { onClose: () => void }) {
 
 
   const runAll = async (paths: string[], what: "fetch" | "pull") => {
-    const ok = paths.filter((p) => sum(p)?.exists);
+    const ok = [...new Set(paths)];
     if (!ok.length) return s.toast(false, what === "fetch" ? "No repositories to fetch" : "No repositories to pull");
     let failed = 0;
     let next = 0;
@@ -80,7 +80,7 @@ export function RepoManagementDialog({ onClose }: { onClose: () => void }) {
     await Promise.all(Array.from({ length: Math.min(3, ok.length) }, worker));
     setBulkProgress(null);
     summaries.forEach((summary, index) => { if (visible.has(all[index])) void summary.refetch(); });
-    if (!failed) s.toast(true, `${what === "fetch" ? "Fetched" : "Pulled"} ${ok.length} repositor${ok.length === 1 ? "y" : "ies"}`);
+    s.toast(!failed, `${what === "fetch" ? "Fetched" : "Pulled"} ${ok.length - failed} of ${ok.length} repositories${failed ? `; ${failed} failed` : ""}`);
   };
 
   const removeRecent = (paths: string[]) => s.setSettings({ recents: s.settings.recents.filter((r) => !paths.some((p) => same(p, r))) });

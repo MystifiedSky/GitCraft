@@ -173,3 +173,25 @@ it("invalidates hosting remote resolution even when remote names are unchanged",
   await refresh(repo.path);
   expect(queryClient.getQueryState(key)?.isInvalidated).toBe(true);
 });
+
+it("reports failed automatic submodule updates without failing the completed parent action", async () => {
+  vi.spyOn(api,"openRepo").mockResolvedValue({...repo,submodules:[{path:"module",name:"module",url:"",state:"clean",sha:"a"} as any]});
+  await openRepoPath(repo.path);useStore.getState().setSettings({autoUpdateSubmodules:true});
+  vi.spyOn(api,"repoStatus").mockResolvedValue(repo.status);
+  const run=vi.spyOn(api,"run").mockResolvedValueOnce({ok:true,message:"Checked out"}).mockResolvedValueOnce({ok:false,message:"Local submodule edits would be overwritten"});
+  expect(await act(repo.path,{type:"checkout",target:"main"},true)).toBe(true);
+  expect(useStore.getState().toasts.some(toast=>toast.text.includes("Local submodule edits"))).toBe(true);
+  const dialog=useStore.getState().dialog;expect(dialog?.kind).toBe("confirm");expect(dialog?.kind==="confirm"&&dialog.confirm).toBe("Retry update");
+  run.mockResolvedValue({ok:true,message:"Updated"});if(dialog?.kind==="confirm")dialog.onConfirm();
+  await vi.waitFor(()=>expect(run).toHaveBeenLastCalledWith(repo.path,{type:"submoduleUpdate",paths:[]}));
+});
+
+it.each(["disabled","success","rejected"])("handles %s automatic submodule updating", async (mode) => {
+  vi.spyOn(api,"openRepo").mockResolvedValue({...repo,submodules:[{path:"module"} as any]});await openRepoPath(repo.path);
+  useStore.getState().setSettings({autoUpdateSubmodules:mode!=="disabled"});vi.spyOn(api,"repoStatus").mockResolvedValue(repo.status);
+  const run=vi.spyOn(api,"run").mockResolvedValueOnce({ok:true,message:"Checked out"});
+  if(mode==="rejected")run.mockRejectedValueOnce(new Error("Remote unavailable"));else run.mockResolvedValue({ok:true,message:"Updated"});
+  expect(await act(repo.path,{type:"checkout",target:"main"},true)).toBe(true);
+  expect(run).toHaveBeenCalledTimes(mode==="disabled"?1:2);
+  expect(useStore.getState().toasts.some(toast=>toast.text.includes("submodules could not be updated"))).toBe(mode==="rejected");
+});
