@@ -1,116 +1,102 @@
-# GitCraft
+<p align="center">
+  <img src="icons/128x128.png" width="96" height="96" alt="GitCraft application icon">
+</p>
 
-GitCraft is a desktop Git client for exploring repository history and managing everyday changes. It is an independent project with its own design and branding.
+<h1 align="center">GitCraft</h1>
 
-<img width="3836" height="2086" alt="image" src="https://github.com/user-attachments/assets/8ee127cb-f041-4934-a80d-b8fa91852d09" />
+<p align="center">
+  <b>Your repository, from the big picture to the last changed line.</b><br>
+  Explore history, review changes, manage branches, and resolve conflicts<br>
+  in one beautifully organized, open-source desktop app.
+</p>
 
+<p align="center">
+  <a href="https://github.com/MystifiedSky/GitCraft/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/MystifiedSky/GitCraft?style=flat-square&color=20a5b5"></a>
+  <a href="https://github.com/MystifiedSky/GitCraft/actions/workflows/release.yml"><img alt="Build and release workflow" src="https://github.com/MystifiedSky/GitCraft/actions/workflows/release.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="License: GPL-3.0-only" src="https://img.shields.io/badge/license-GPL--3.0--only-555?style=flat-square"></a>
+  <a href="#download"><img alt="Windows · Linux · macOS" src="https://img.shields.io/badge/Windows%20%C2%B7%20Linux%20%C2%B7%20macOS-desktop-357ec7?style=flat-square"></a>
+  <br>
+  <a href="https://sonarcloud.io/project/overview?id=MystifiedSky_GitCraft"><img alt="Scanned by SonarCloud" src="https://img.shields.io/badge/Scanned_by-SonarCloud-4b9fd5?style=flat-square&logo=sonarqubecloud&logoColor=white"></a>
+  <a href="https://sonarcloud.io/project/overview?id=MystifiedSky_GitCraft"><img alt="SonarCloud quality gate" src="https://sonarcloud.io/api/project_badges/measure?project=MystifiedSky_GitCraft&metric=alert_status"></a>
+  <a href="https://coderabbit.ai"><img alt="Reviewed by CodeRabbit" src="https://img.shields.io/coderabbit/prs/github/MystifiedSky/GitCraft?style=flat-square&label=Reviewed%20by%20CodeRabbit&logo=coderabbit"></a>
+</p>
 
-[Features](#features) · [Under the hood](#under-the-hood) · [Get started](#get-started) · [Testing](#testing) · [Project structure](#project-structure) · [License](#license)
+<p align="center">
+  <a href="https://github.com/MystifiedSky/GitCraft/releases/latest"><b>Download GitCraft</b></a> ·
+  <a href="#features">Features</a> ·
+  <a href="CONTRIBUTING.md#build-from-source-and-package">Build from source</a> ·
+  <a href="docs/AI.md">AI setup</a> ·
+  <a href="CHANGELOG.md">Changelog</a> ·
+  <a href="CONTRIBUTING.md">Contribute</a>
+</p>
+
+<p align="center">
+  <img width="100%" alt="GitCraft desktop with repository tabs, connected branch labels, a colorful commit graph, and commit details with a file tree" src="docs/images/gitcraft-desktop.png">
+  <br>
+  <sub>Your branches, history, and changes — together in one clear view.</sub>
+</p>
 
 ## Features
 
-- **Explore history.** Follow branches and merges in an interactive commit graph, search by commit message, author, or hash, and inspect the files in a commit.
-- **Review and commit changes.** View diffs as hunks, inline, or side by side; stage, unstage, or discard whole files, single hunks, or picked lines; edit a file in place; and create or amend a commit.
-- **Dig into a file's past.** Open File History and Blame for any file, or compare two commits, or a commit and your working folder.
-- **Shape the graph.** Show author, date, SHA, and change-count columns, show commit descriptions, hide or solo branches, and keep scrolling to load older history.
-- **Manage branches, tags, and stashes.** Create or switch branches, merge or rebase, and use stashes to set work aside. GitCraft can undo and redo selected local operations.
-- **Work across repositories.** Open, clone, or initialize a repository, keep several repositories open in tabs, and see changes reflected as files are edited.
-- **Use your existing Git setup.** Fetch, pull, and push through the installed Git CLI and its configured credentials. The activity log shows the Git commands GitCraft runs.
-- **Rewrite and resolve.** Interactive rebase (pick, reword, squash, drop, reorder), cherry pick, and a three-pane merge tool for conflicts.
-- **Power tools.** Remotes, worktrees, submodules, Gitflow, Git LFS, sparse checkout, a command palette, a built-in terminal, workspaces, profiles, and four themes.
-- **Pull requests and issues.** Connect GitHub, GitHub Enterprise, GitLab, Bitbucket, Azure DevOps, Jira or Trello (browser sign-in for GitHub, GitLab, Bitbucket and Azure DevOps, or a token) to list, view, create, comment on, and merge pull requests, work with issues, clone your repositories, and see everything on the Launchpad.
-- **Preferences like you expect.** A full Preferences screen covers Git, SSH, signing, the editor, the terminal, external tools, AI providers, and per-repository settings.
-- **AI helpers (optional).** Use a ChatGPT or Claude subscription through the installed Codex CLI or Claude Code, or connect an API provider or local server. The helpers write commit and stash messages, compose commits, explain changes, draft pull requests, and help resolve conflicts. One default model serves every helper, with optional per-feature overrides.
-- **Manage many repositories.** Repository Management lists open, favorite, and recent repositories with their branch and uncommitted changes, and fetches or pulls them all at once.
-- **Stays up to date.** Installed copies check GitHub Releases, download signed updates in the background, and install them on restart. See [RELEASING.md](RELEASING.md) to publish a version.
-- **Share and stay ahead of conflicts.** Save or apply .patch files, see early whether your branch would conflict with the main branch, and browse worktree cards with file counts and saved Codex CLI or Claude Code sessions. Start or resume a session in its own worktree.
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>See the whole story</h3>
+      Follow branches and merges through a colorful commit graph. Search by message, author, or commit, inspect changes, and trace a file's history with blame and comparisons. Choose the columns and branches you want to see.
+    </td>
+    <td width="50%" valign="top">
+      <h3>Make every commit count</h3>
+      Review diffs inline or side by side. Stage exactly what belongs together — whole files, individual hunks, or selected lines — then write, amend, or compose your commit without leaving the app.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>Move confidently between branches</h3>
+      Create and switch branches, merge, rebase, cherry-pick, and set work aside with stashes. Resolve conflicts in a three-pane editor, plan interactive rebases, and undo or redo supported local operations.
+    </td>
+    <td width="50%" valign="top">
+      <h3>Bring your AI</h3>
+      Generate commit and stash messages, explain changes, draft pull requests, and get help resolving conflicts. Connect your ChatGPT or Claude subscription through its CLI, an API provider, or a local model. AI is optional, with models configurable for each helper.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>Keep every project within reach</h3>
+      Work across repository tabs, favorites, workspaces, and profiles. Manage worktrees and submodules, open the built-in terminal, and pick up saved coding-agent sessions in their own worktrees.
+    </td>
+    <td width="50%" valign="top">
+      <h3>Stay connected to your team</h3>
+      Work with pull requests and issues through GitHub, GitLab, Bitbucket, Azure DevOps, Jira, and Trello integrations. Fetch, pull, and push using your existing Git setup, with an activity log when you want the details.
+    </td>
+  </tr>
+</table>
 
-## Under the hood
+**More tools, fewer interruptions.** Git LFS, sparse checkout, tags, patch import and export, early conflict checks, a command palette, four themes, and preferences for your editor, terminal, SSH, and signing. Signed updates download in the background and are ready when you restart.
 
-Tauri 2 hosts the desktop window. Rust runs Git commands, watches repository files, and computes the graph layout. The interface uses React, TypeScript, Vite, and Tailwind CSS. A Canvas renderer draws the visible portion of the commit graph, and Monaco (bundled locally) shows diffs and file contents.
+## Download
 
-**Platform support:** Windows is the current tested target. macOS and Linux builds have not been validated.
+GitCraft is available for **Windows, Linux, and macOS**.
 
-## Get started
+| Windows | Linux | macOS |
+| --- | --- | --- |
+| x64 · Installer or MSI | x64 · AppImage, DEB, or RPM | Intel & Apple silicon · Universal DMG |
 
-Download the [latest GitCraft installers](https://github.com/MystifiedSky/GitCraft/releases/latest). GitCraft needs Git available on `PATH`.
+<p align="center">
+  <a href="https://github.com/MystifiedSky/GitCraft/releases/latest"><b>Get the latest release →</b></a>
+</p>
 
-On Windows, have these tools available before building:
+Install Git and make sure it is available on `PATH`, then launch GitCraft and open a repository — or clone one to get started. Your existing Git credentials and configuration work with GitCraft.
 
-- Git for Windows on `PATH`. GitCraft also needs `git` at runtime.
-- A recent stable Rust toolchain with Cargo and the Windows MSVC target.
-- Visual Studio Build Tools with the **Desktop development with C++** workload and a Windows SDK, plus the Microsoft Edge WebView2 Runtime.
-- Node.js 22.12 or later and npm.
+Want AI assistance? Follow the [AI setup guide](docs/AI.md) to connect your preferred provider, discover available models, and configure your helpers.
 
-From the directory containing `Cargo.toml`, install the frontend dependencies and launch the desktop app:
+## Make it yours
 
-```powershell
-npm --prefix ui ci
-cargo run --locked
-```
-
-Use **Open a repository** for an existing checkout, or open the sample repository to explore the graph and file panel. The Rust build runs the frontend build after the npm dependencies are available. Restart `cargo run` to pick up UI changes.
-
-To compile a release executable:
-
-```powershell
-npm --prefix ui run build
-cargo build --release --locked
-```
-
-On Windows, the executable is `target/release/gitcraft.exe`. To package an installer (NSIS and MSI on Windows; deb, rpm, AppImage, or dmg on those systems):
-
-```powershell
-npm --prefix ui run installer
-```
-
-Installers are written to `target/release/bundle/`. Pushes to `main` build and publish signed updates through GitHub Actions; see [RELEASING.md](RELEASING.md).
-
-## Testing
-
-After installing the frontend dependencies, run these checks from the same directory:
-
-```powershell
-npm --prefix ui run typecheck
-npm --prefix ui test
-cargo test --locked
-```
-
-The Rust suite covers commit graph lanes, interactive rebase and conflicts, remotes, worktrees, Gitflow, the terminal, hosting API parsing, patches and the conflict check, file watcher behavior, partial (hunk and line) patches, and common Git operations in a temporary repository, including line staging, discard with undo, history, blame, comparisons, and hidden or soloed branches. For changes to the UI, launch the app and try the affected flow in a disposable repository.
-
-## Project structure
-
-| Path | Purpose |
-| --- | --- |
-| `src/` | Rust backend, Git operations, graph layout, and file watching |
-| `ui/src/` | React components, styles, and application state |
-| `capabilities/` | Tauri permissions for the desktop window |
-| `icons/` | GitCraft application icons |
-| `build.rs`, `tauri.conf.json` | Frontend build integration and Tauri configuration |
-| `Cargo.lock`, `ui/package-lock.json` | Locked Rust and frontend dependencies |
+Choose a theme, shape the graph, and set up the tools that fit your workflow. GitCraft's Preferences bring Git, SSH, signing, external editors, terminals, AI providers, and repository settings together in one place.
 
 ## Contributing
 
-Describe the behavior you want to change and how to reproduce it. For a patch, include the checks you ran and, for visible changes, a screenshot using a sample repository.
+Have an idea or found a bug? [Open an issue](https://github.com/MystifiedSky/GitCraft/issues). Code, documentation, and feedback are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) to build from source and get involved.
 
 ## License
 
-Copyright © 2026 the GitCraft contributors.
-
-GitCraft is licensed under the GNU General Public License, version 3 only (`GPL-3.0-only`). See [LICENSE](LICENSE) for the full terms. Third-party dependencies and bundled fonts retain their respective licenses.
-
-## Local and compatible AI
-
-Open **Preferences → AI**, choose a provider or local preset, and click **Fetch Models**. Use the returned list for the default model and any per-feature overrides. You can also enter a model ID if your server doesn't publish a list. Start your local server first. Ollama defaults to `http://localhost:11434/v1`; LM Studio uses `http://localhost:1234/v1`; llama.cpp uses `http://localhost:8080/v1`. Server roots, API bases and full chat-completions URLs are accepted.
-
-Local and custom connections can run without an API key. Save a key only when the server requires authentication; **Remove Key** deletes a previously saved key. Hosted Anthropic, OpenAI and Google connections require their provider key. Keys live in the operating system credential store. Provider endpoints, default models and feature overrides are remembered when switching providers.
-
-**ChatGPT subscription:** Install the [Codex CLI](https://developers.openai.com/codex/cli), run `codex login` in a terminal, and choose **Sign in with ChatGPT**. In **Preferences → AI**, select **ChatGPT subscription (Codex CLI)**.
-
-**Claude subscription:** Install [Claude Code](https://code.claude.com/docs/en/quickstart), run `claude auth login` in a terminal, and sign in with your Claude account. In **Preferences → AI**, select **Claude subscription (Claude Code)**. If you signed in with a separate `CLAUDE_CONFIG_DIR`, choose that folder in GitCraft.
-
-Use **Find Automatically** to locate and verify the installed CLI without sending a prompt. **Fetch Models** lists choices from the signed-in CLI, and **Test Connection** sends a short test request. You can keep the CLI's default model. GitCraft runs the CLI outside the repository with tools disabled and passes the context for the helper you request. The CLI manages its own credentials and uses your account's allowance.
-
-**Test Connection** uses the default model. Every AI helper uses the same connection; feature model overrides are optional. **Automatic** response mode tries structured JSON, JSON mode, then prompt-only JSON if the selected server explicitly rejects that output format. You can select a mode directly for servers with limited compatibility. Replies are validated before use; authentication, rate-limit and missing-model errors are reported without format retries. Compatibility retries stay on the selected endpoint.
-
-Model quality and context capacity depend on the model you run. Conflict suggestions remain editable and require review before saving; composed commits are reviewed before creation. External coding-agent CLIs in the Agents view keep their own provider configuration.
+GitCraft is free and open source under [GPL-3.0-only](LICENSE). Copyright © 2026 the GitCraft contributors. Third-party dependencies and bundled fonts retain their respective licenses.

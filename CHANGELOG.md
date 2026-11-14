@@ -6,6 +6,8 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Added
 
+- A test workflow runs frontend and native regression suites on Windows, Ubuntu, and macOS for pull requests and pushes to main. Platform setup and desktop validation instructions document how to test all three targets.
+
 - An optional strip of coloured ticks beside the graph's scrollbar (Preferences > UI Customization > Show markers beside the graph scrollbar) can mark branches, tags, remote branches, the checked-out commit and the selection. It is off by default, so the graph looks as before.
 
 - Desktop notifications are off by default, sent only while GitCraft is in the background, several at once become "You have N new notifications", an unclicked one is dismissed after 20 seconds, clicking one brings GitCraft forward and opens the bell menu, reading or removing a notification closes its pop-up, and turning the setting on shows a "Desktop notifications enabled" pop-up.
@@ -17,6 +19,10 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 - The bell in the tab bar is now a notification center: unread badge (50+ from fifty), All / Read / Unread filter, newest first with Today / Yesterday / date labels, mark as read or unread, remove, and Mark all as read / unread. Failed actions and available updates appear there. File > Sign Out removes the saved service sign-ins and shows "Successfully signed out". The status bar says "Connect an integration" until a service is connected, then "Select an integration" for repositories on a service you have not connected. The start screen gains Intro Tutorials and Documentation links.
 
 ### Changed
+
+- AI helpers summarize bulk vendored dependency imports and removals while retaining manifests, licenses, patch notes, and edits to existing dependency files. Large changes are no longer rejected by a fixed local byte limit; the selected provider enforces its context capacity.
+
+- The repository landing page now showcases the desktop with an updated screenshot, feature highlights, platform downloads, and quality badges. Detailed setup and contributor guidance have their own pages.
 
 - Graph labels combine local branches with their matching tracking refs, count additional grouped labels in a separate badge, and expand into one clean label stack with both local and remote actions available.
 
@@ -47,6 +53,8 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
+- Repository refreshes explicitly sort ref signatures with Unicode-aware comparison and a deterministic tie-breaker, preserving loaded history when refs arrive in a different order.
+
 - Undo and redo refuse to move a different branch or overwrite commits made after the recorded action. Undoing branch creation also preserves branches that have since changed.
 - Applying a single stashed file refuses to overwrite current staged, unstaged, untracked, or ignored contents. Clearing a remote's custom push URL now restores the pull URL as its push destination.
 - Switching repository tabs preserves file-editor drafts, conflict-resolution selections, and commit-panel input. Full refreshes preserve loaded history and older commit selections, and delayed status reads cannot replace a newer repository snapshot.
@@ -60,6 +68,10 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 - An outdated test of the AI commit-message request was corrected; the frontend (61) and Rust (63) test suites now run and pass.
 
 ### Security
+
+- Release recording validates version strings and matches existing release headings literally, removing command-line input from regular-expression construction.
+- Updated the embedded browser runtime to Wry 0.57.2, the latest compatible stable patch release.
+- Linux builds use the upstream GLib string-iterator soundness fix backported to the released version compatible with stable Tauri. A Linux release check exercises the affected iterator methods; the dependency upgrade is blocked by Tauri's GTK3 version constraint.
 
 - Windows external-editor launches pass file paths directly to resolved executables or safely escaped launcher scripts, preventing filenames from being interpreted as additional shell commands.
 

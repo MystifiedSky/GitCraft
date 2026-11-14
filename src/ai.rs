@@ -11,7 +11,6 @@ const API_URL: &str = "https://api.anthropic.com/v1/messages";
 pub(crate) const API_VERSION: &str = "2026-10-21";
 const MODEL: &str = "claude-opus-5-5";
 const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
-const MAX_INPUT_CHARS: usize = 600000;
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase", default)]
@@ -123,10 +122,6 @@ pub fn configured() -> bool {
         api_url(&c).is_ok() && selected_model(&c, "test").is_ok()
             && (matches!(c.provider.as_str(), "ollama" | "custom") || secret_get(key_name(&c.provider)).is_some())
     }
-}
-
-fn too_big(what: &str, n: usize) -> String {
-    format!("{what} is too large to send ({} KB). Stage fewer files and try again.", n / 1024)
 }
 
 /// Validate prompt-only replies before a helper puts them into a commit or file.
@@ -309,9 +304,9 @@ pub fn test_connection() -> Result<String, String> {
 fn staged_or_all(dir: &Path) -> String {
     let staged = git::run(dir, &["diff", "--cached", "--no-color", "--no-ext-diff"]).stdout;
     if !staged.trim().is_empty() {
-        return staged;
+        return crate::ai_context::summarize(&staged);
     }
-    let mut d = git::run(dir, &["diff", "HEAD", "--no-color", "--no-ext-diff"]).stdout;
+    let mut d = crate::ai_context::summarize(&git::run(dir, &["diff", "HEAD", "--no-color", "--no-ext-diff"]).stdout);
     let untracked = git::run(dir, &["ls-files", "--others", "--exclude-standard"]).stdout;
     if !untracked.trim().is_empty() {
         d.push_str("\nNew (untracked) files:\n");
@@ -340,7 +335,7 @@ fn commit_prompt(dir: &Path, sha: Option<&str>) -> Result<String, String> {
         }
         let original = git::run(dir, &["log", "-1", "--format=%B", oid, "--"]).stdout;
         let recent = git::run(dir, &["log", "-15", "--format=%s", oid, "--"]).stdout;
-        (shown.stdout, recent, format!("Existing message (context only; describe the diff accurately):\n{original}\n\n"))
+        (crate::ai_context::summarize(&shown.stdout), recent, format!("Existing message (context only; describe the diff accurately):\n{original}\n\n"))
     } else {
         (staged_or_all(dir), git::run(dir, &["log", "-15", "--format=%s"]).stdout, String::new())
     };
@@ -348,9 +343,6 @@ fn commit_prompt(dir: &Path, sha: Option<&str>) -> Result<String, String> {
         return Err("There are no changes to describe.".into());
     }
     let prompt = format!("Recent commit summaries in this repository:\n{recent}\n\n{original}Diff to describe:\n{diff}");
-    if prompt.len() > MAX_INPUT_CHARS {
-        return Err(too_big("The commit context", prompt.len()));
-    }
     Ok(prompt)
 }
 
@@ -371,9 +363,6 @@ pub fn stash_message(dir: &Path) -> Result<String, String> {
     if diff.trim().is_empty() {
         return Err("There are no changes to stash.".into());
     }
-    if diff.len() > MAX_INPUT_CHARS {
-        return Err(too_big("The diff", diff.len()));
-    }
     let schema = json!({ "type": "object", "properties": { "title": { "type": "string" } }, "required": ["title"], "additionalProperties": false });
     let v = ask(
         "stash",
@@ -386,9 +375,6 @@ pub fn stash_message(dir: &Path) -> Result<String, String> {
 }
 
 fn explain(prompt: String) -> Result<String, String> {
-    if prompt.len() > MAX_INPUT_CHARS {
-        return Err(too_big("This change", prompt.len()));
-    }
     let schema = json!({ "type": "object", "properties": { "explanation": { "type": "string" } }, "required": ["explanation"], "additionalProperties": false });
     let v = ask(
         "explain",
@@ -406,13 +392,14 @@ pub fn explain_commit(dir: &Path, sha: &str) -> Result<String, String> {
     if !o.ok {
         return Err(o.message());
     }
-    explain(format!("Explain this commit:\n{}", o.stdout))
+    explain(format!("Explain this commit:\n{}", crate::ai_context::summarize(&o.stdout)))
 }
 
 /// Explain what a branch adds compared with another (usually the main branch).
 pub fn explain_branch(dir: &Path, branch: &str, base: &str) -> Result<String, String> {
     let log = git::run(dir, &["log", "--format=- %s", &format!("{base}..{branch}")]).stdout;
     let diff = git::run(dir, &["diff", "--no-color", "--no-ext-diff", &format!("{base}...{branch}")]).stdout;
+    let diff = crate::ai_context::summarize(&diff);
     if log.trim().is_empty() && diff.trim().is_empty() {
         return Err(format!("{branch} has no changes compared with {base}."));
     }
@@ -436,10 +423,8 @@ pub fn compose(dir: &Path) -> Result<Vec<ComposedCommit>, String> {
         return Err("There are no changes to compose into commits.".into());
     }
     let diff = git::run(dir, &["diff", "HEAD", "--no-color", "--no-ext-diff"]).stdout;
+    let diff = crate::ai_context::summarize(&diff);
     let prompt = format!("Changed files (every one must appear in exactly one commit):\n{}\n\nDiff:\n{diff}", files.join("\n"));
-    if prompt.len() > MAX_INPUT_CHARS {
-        return Err(too_big("The changes", prompt.len()));
-    }
     let schema = json!({
         "type": "object",
         "properties": {
@@ -488,13 +473,11 @@ pub fn pull_request_text(dir: &Path, source: &str, target: &str) -> Result<(Stri
     let base = format!("{target}...{source}");
     let log = git::run(dir, &["log", "--format=- %s%n%b", &format!("{target}..{source}")]).stdout;
     let diff = git::run(dir, &["diff", "--no-color", "--no-ext-diff", &base]).stdout;
+    let diff = crate::ai_context::summarize(&diff);
     if log.trim().is_empty() && diff.trim().is_empty() {
         return Err(format!("{source} has no changes compared with {target}."));
     }
     let prompt = format!("Write a pull request for merging '{source}' into '{target}'.\nCommits:\n{log}\nCombined diff:\n{diff}");
-    if prompt.len() > MAX_INPUT_CHARS {
-        return Err(too_big("This branch's changes", prompt.len()));
-    }
     let schema = json!({ "type": "object", "properties": { "title": { "type": "string" }, "description": { "type": "string" } }, "required": ["title", "description"], "additionalProperties": false });
     let v = ask(
         "pr",
@@ -511,9 +494,6 @@ pub fn pull_request_text(dir: &Path, source: &str, target: &str) -> Result<(Stri
 /// merge tool's Output (the person reviews it before saving).
 pub fn resolve_conflict(base: &str, ours: &str, theirs: &str, file: &str) -> Result<String, String> {
     let prompt = format!("File: {file}\n\n=== BASE (common ancestor) ===\n{base}\n=== CURRENT (ours) ===\n{ours}\n=== INCOMING (theirs) ===\n{theirs}");
-    if prompt.len() > MAX_INPUT_CHARS {
-        return Err(too_big("This file", prompt.len()));
-    }
     let schema = json!({ "type": "object", "properties": { "merged": { "type": "string" }, "notes": { "type": "string" } }, "required": ["merged", "notes"], "additionalProperties": false });
     let v = ask(
         "conflict",
@@ -529,6 +509,42 @@ pub fn resolve_conflict(base: &str, ours: &str, theirs: &str, file: &str) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dependency_context_uses_staged_or_saved_evidence_without_worktree_leaks() {
+        let folder = tempfile::tempdir().unwrap();
+        let dir = folder.path();
+        let run = |args: &[&str]| {
+            let result = git::run(dir, args);
+            assert!(result.ok, "{}", result.message());
+            result.stdout
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.name", "Test"]);
+        run(&["config", "user.email", "test@example.invalid"]);
+        run(&["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "Initial"]);
+        std::fs::create_dir_all(dir.join("vendor/example/src")).unwrap();
+        std::fs::write(dir.join("vendor/example/src/lib.rs"), "bulk-source\n".repeat(160_000)).unwrap();
+        let notes = dir.join("vendor/example/GITCRAFT-PATCH.txt");
+        std::fs::write(&notes, "staged security fix: use mutable out pointer\n").unwrap();
+        std::fs::write(dir.join("app.txt"), "application change\n").unwrap();
+        run(&["add", "."]);
+        std::fs::write(&notes, "unstaged private note\n").unwrap();
+        let prompt = commit_prompt(dir, None).unwrap();
+        assert!(prompt.len() < 4000);
+        assert!(prompt.contains("staged security fix"));
+        assert!(prompt.contains("+application change"));
+        assert!(prompt.contains("+160000/-0 lines"));
+        assert!(!prompt.contains("+bulk-source"));
+        assert!(!prompt.contains("unstaged private note"));
+        run(&["-c", "commit.gpgsign=false", "commit", "-qm", "Import dependency with security fix"]);
+        let saved = run(&["rev-parse", "HEAD"]);
+        let renamed = commit_prompt(dir, Some(saved.trim())).unwrap();
+        assert!(renamed.contains("staged security fix"));
+        assert!(!renamed.contains("unstaged private note"));
+        std::fs::write(dir.join("new-untracked.txt"), "pending\n").unwrap();
+        assert!(commit_prompt(dir, None).unwrap().contains("new-untracked.txt"));
+    }
 
     #[test]
     fn rename_context_uses_the_selected_commit_without_pending_changes() {

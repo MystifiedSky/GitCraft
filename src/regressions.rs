@@ -91,3 +91,25 @@ fn conflict_reader_and_resolution_round_trip_the_repository_encoding() {
     assert!(save.is_ok());
     assert_eq!(bytes, b"caf\xe9\n");
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn glib_variant_string_iterator_uses_a_mutable_ffi_out_pointer() {
+    use glib::variant::ToVariant;
+    let values = ["alpha", "café", "", "omega"];
+    let variant = glib::Variant::array_from_iter::<String>(values.map(|value| value.to_variant()));
+    for _ in 0..100 {
+        assert_eq!(variant.array_iter_str().unwrap().collect::<Vec<_>>(), values);
+        assert_eq!(variant.array_iter_str().unwrap().next(), Some("alpha"));
+        assert_eq!(variant.array_iter_str().unwrap().next_back(), Some("omega"));
+        assert_eq!(variant.array_iter_str().unwrap().nth(1), Some("café"));
+        assert_eq!(variant.array_iter_str().unwrap().nth_back(1), Some(""));
+        assert_eq!(variant.array_iter_str().unwrap().last(), Some("omega"));
+        let mut mixed = variant.array_iter_str().unwrap();
+        assert_eq!(mixed.next(), Some("alpha"));
+        assert_eq!(mixed.next_back(), Some("omega"));
+        assert_eq!(mixed.next_back(), Some(""));
+        assert_eq!(mixed.next(), Some("café"));
+        assert_eq!(mixed.next(), None);
+    }
+}

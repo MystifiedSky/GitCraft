@@ -69,3 +69,11 @@ test('category headings and trailing whitespace accept long inputs without backt
   const released = recordRelease({ current, shipped: current, version: '1.0.0', repo: 'owner/project', date: '2026-11-14' });
   assert.ok(released.includes('[Unreleased]: https://github.com/owner/project/compare/v1.0.0...HEAD'));
 });
+
+test('release versions are validated instead of interpreted as regular expressions', () => {
+  for (const version of ['1.2.3\\', '1.2.3.*', '(a+)+$', '1.2.3]\n## [Unreleased]', '', undefined]) {
+    assert.throws(() => recordRelease({ current, shipped, version, repo: 'o/r', date: '2026-11-14' }), /Release version/);
+  }
+  const withNearbyVersion = current + '\n## [10.1.6] - 2026-11-13\n';
+  assert.ok(recordRelease({ current: withNearbyVersion, shipped, version: '0.1.6', repo: 'o/r', date: '2026-11-14' }));
+});

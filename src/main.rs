@@ -7,6 +7,7 @@ mod files;
 mod git;
 mod graph;
 mod ai;
+mod ai_context;
 mod agents;
 mod ai_cli;
 mod ai_models;

@@ -43,7 +43,8 @@ const actionChanges = new Map<string, { full: boolean }>();
 const fullRefreshes = new Map<string, { again: boolean; promise: Promise<void> }>();
 
 function historySignature(repo: RepoView) {
-  return JSON.stringify([repo.head_sha, repo.refs.map((r) => `${r.full}:${r.sha}`).sort()]);
+  return JSON.stringify([repo.head_sha, repo.refs.map((r) => `${r.full}:${r.sha}`).sort((a, b) =>
+    a.localeCompare(b) || (a < b ? -1 : a > b ? 1 : 0))]);
 }
 
 /** Refresh metadata while preserving the loaded range and the user's selected older commit. */

@@ -107,6 +107,10 @@ jobs:
           npm --prefix ui ci --ignore-scripts
           npm --prefix ui run build
 
+      - name: Check the GLib security backport on Linux
+        if: matrix.platform == 'linux'
+        run: cargo test --locked glib_variant_string_iterator -- --nocapture
+
       - name: Build installers and sign updates
         shell: bash
         env:

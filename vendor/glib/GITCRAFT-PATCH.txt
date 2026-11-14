@@ -1,0 +1,26 @@
+GLib security backport for GitCraft
+
+Base: the published crates.io glib 0.18.5 release, including its MIT license.
+Archive SHA-256: 233daaf6e83ae6a12a52055f568f9d7cf4671dabb78ff9560ab6da230ce00ee5
+Archive: https://crates.io/api/v1/crates/glib/0.18.5/download
+
+Security fix: RUSTSEC-2024-0429 / GHSA-wrw7-89jp-8q8g
+Upstream patch: https://github.com/gtk-rs/gtk-rs-core/pull/1343
+Change: src/variant_iter.rs, VariantStrIter::impl_get declares its out-pointer
+mutable and passes &mut p to g_variant_get_child instead of &p. No API changes.
+The remaining release files are unchanged.
+
+Reason for the backport: as reviewed on 2026-11-14, the latest stable Tauri
+2.12.5 still requires gtk ^0.18, which requires glib ^0.18. The newest compatible
+released glib is 0.18.5. Fixed releases start at 0.20.0; the newest stable glib
+is 0.22.10, but adding it directly would not replace the vulnerable transitive
+0.18 instance. No prerelease framework or advisory-ignore rule is used.
+
+Validation: the Linux release job runs glib_variant_string_iterator, covering
+next, next_back, nth, nth_back, last and mixed-direction iteration with the
+optimized glib dependency. Windows does not compile this Linux dependency.
+
+Remove this Cargo patch and vendor directory when the stable Tauri/GTK chain
+can resolve a released, fixed glib. Then use the newest compatible stable
+release and rerun the Linux regression test. Version-only advisory scanners
+may continue to flag 0.18.5; do not treat their absence as proof of this patch.

@@ -47,3 +47,11 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 2
+
+# Stable Tauri's GTK3 bindings still require glib 0.18. Keep the released API and
+# backport the upstream VariantStrIter soundness fix until that constraint changes.
+[patch.crates-io]
+glib = { path = "vendor/glib" }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+glib = "0.18.5"

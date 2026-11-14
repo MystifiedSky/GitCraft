@@ -91,6 +91,20 @@ describe("repository loading and refresh", () => {
 });
 
 describe("repository refresh safety", () => {
+  it("reuses loaded history when Unicode refs arrive in a different order", async () => {
+    const refs: RepoView["refs"] = ["é", "e\u0301", "Δ", "main"].map((name) => ({
+      name, full: `refs/heads/${name}`, sha: "first", kind: "Local", upstream: "", ahead: 0, behind: 0,
+    }));
+    const previous = { ...repo, refs, commits: [commit("first"), commit("second")] };
+    vi.spyOn(api, "openRepo").mockResolvedValue({ ...repo, refs: [...refs].reverse() });
+    const pages = vi.spyOn(api, "historyPage");
+    const result = await readRepoSnapshot(repo.path, 500, { hidden: [], solo: [] }, previous);
+    expect(result.commits).toBe(previous.commits);
+    expect(result.graph).toBe(previous.graph);
+    expect(pages).not.toHaveBeenCalled();
+    expect(previous.refs).toEqual(refs);
+  });
+
   it("rejects a delayed status response from before a full refresh", async () => {
     await open();
     let finish!: (status: RepoView["status"]) => void;

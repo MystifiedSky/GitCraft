@@ -73,7 +73,9 @@ export function releaseNotes(changelogText) {
  */
 export function recordRelease({ current, shipped, version, repo, date }) {
   const text = normalize(current);
-  if (new RegExp(`^## \\[${version.replace(/\./g, '\\.')}\\]`, 'm').test(text)) return null;
+  if (!/^\d+\.\d+\.\d+$/.test(version ?? '')) throw new Error('Release version must be three numeric components (for example 1.2.3).');
+  const releaseHeading = `## [${version}]`;
+  if (text.split('\n').some((line) => line.startsWith(releaseHeading))) return null;
   const shippedEntries = parseEntries(splitUnreleased(shipped).body);
   if (isEmpty(shippedEntries)) return null;
 
