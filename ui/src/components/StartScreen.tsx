@@ -10,7 +10,7 @@ import { openWorkspace } from "@/lib/prefs";
 import { MOD } from "@/lib/utils";
 import { RELEASES_URL } from "@/lib/updates";
 
-/** "New Tab" screen, laid out like the original: Repositories (Open / Clone / Create, search, Recent)
+/** "New Tab" screen: Repositories (Open / Clone / Create, search, Recent)
  *  on the left and integrations / resources on the right. */
 export function StartScreen() {
   const s = useStore();
@@ -110,8 +110,14 @@ export function StartScreen() {
             <button className="text-link hover:underline" onClick={openSample}>
               {busy ? "Preparing…" : "Try the sample project"}
             </button>
+            <button className="text-link hover:underline" onClick={() => hosting.openUrl("https://git-scm.com/book/en/v2/Getting-Started-What-is-Git%3F")}>
+              Intro Tutorials
+            </button>
             <button className="text-link hover:underline" onClick={() => hosting.openUrl(RELEASES_URL)}>
               Release Notes
+            </button>
+            <button className="text-link hover:underline inline-flex items-center gap-1" onClick={() => hosting.openUrl("https://git-scm.com/docs")}>
+              Documentation <ExternalLink size={12} />
             </button>
             <button className="text-link hover:underline" onClick={() => s.setDialog({ kind: "shortcuts" })}>
               Keyboard Shortcuts

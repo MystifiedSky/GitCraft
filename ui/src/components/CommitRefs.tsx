@@ -19,7 +19,7 @@ interface Props {
   onHover: (active: boolean) => void;
 }
 
-/** Expand grouped refs into the original's colored label stack, outside the virtual scroller. */
+/** Expand grouped refs into a colored label stack, outside the virtual scroller. */
 export function CommitRefs({ repo, refs, color, hovered, selected, roomy, onSelect, onHover }: Props) {
   const m = useStore((s) => s.metrics);
   const id = useId();

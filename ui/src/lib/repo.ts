@@ -1,4 +1,5 @@
 import { QueryClient, useQuery } from "@tanstack/react-query";
+import { postDesktopNotifications } from "./desktop-notify";
 import { invoke } from "@tauri-apps/api/core";
 import { api, type Action, type FileChange, type GitRef, type RefView, type RepoView } from "./api";
 import { useStore } from "./store";
@@ -222,14 +223,9 @@ async function afterAction(path: string, action: Action, ok: boolean, message: s
   // General > Delete ".orig" files after merging.
   if (ok && set.deleteOrigAfterMerge && (wasMerging && (action.type === "commit" || action.type === "markResolved" || action.type === "continueRebase") || action.type === "merge"))
     await invoke<string[]>("delete_orig_files", { path }).catch(() => undefined);
-  // Notifications > Enable Desktop Notifications: long network actions that finish while GitCraft is in the background.
-  if (set.desktopNotifications && NETWORK.has(action.type) && !document.hasFocus() && "Notification" in window && Notification.permission === "granted") {
-    try {
-      new Notification(ok ? "GitCraft" : "GitCraft: action failed", { body: `${path.split(/[\\/]/).pop()}: ${message.split("\n")[0]}` });
-    } catch {
-      /* notifications unavailable */
-    }
-  }
+  // Notifications > Enable Desktop Notifications: a finished network action while GitCraft is in the background. Failures reach the
+  // bell (and from there a desktop notification) through the error toast, so only successes are posted here.
+  if (ok && NETWORK.has(action.type)) postDesktopNotifications([`${path.split(/[\\/]/).pop()}: ${message.split("\n")[0]}`]);
 }
 
 const SSH_REFUSED = /Permission denied \(publickey|Could not read from remote repository|Host key verification failed/i;
@@ -423,7 +419,7 @@ export function toggleHidden(path: string, full: string) {
 /** Sent by the graph's "// WIP" box on Ctrl+Enter ({ path, all }); the Commit panel commits. */
 export const WIP_COMMIT_EVENT = "gitcraft:wip-commit";
 
-/** The original's "Hide all local branches / remotes / tags" and "Show all ..." for a whole left-panel section. */
+/** "Hide all local branches / remotes / tags" and "Show all ..." for a whole left-panel section. */
 export function setHiddenMany(path: string, fulls: string[], hide: boolean) {
   const st = useStore.getState();
   const cur = st.settings.hidden[path] ?? [];

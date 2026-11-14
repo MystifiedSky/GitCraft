@@ -25,7 +25,7 @@ export function toggleFavorite(path: string) {
   s.setSettings({ favorites: fav.some((f) => same(f, path)) ? fav.filter((f) => !same(f, path)) : [...fav, path] });
 }
 
-/** "Open Favorite Repo N" (Favorites menu in the original). */
+/** "Open Favorite Repo N" (Favorites menu). */
 export function openFavorite(n: number) {
   const p = useStore.getState().settings.favorites[n - 1];
   if (p) void openRepoPath(p);

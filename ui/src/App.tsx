@@ -13,6 +13,8 @@ import { withSpin } from "@/lib/spin";
 import { MenuBar, TitleBar } from "./components/TitleBar";
 import { CommandPalette } from "./components/CommandPalette";
 import { dispatchKey } from "@/lib/commands";
+import { startDesktopNotifications } from "@/lib/desktop-notify";
+import { nextTopological, previousTopological } from "@/lib/graphnav";
 import { applyTheme } from "@/lib/prefs";
 import { TabsBar } from "./components/TabsBar";
 import { Toolbar } from "./components/Toolbar";
@@ -36,6 +38,7 @@ export default function App() {
   const active = s.tabs.find((t) => t.id === s.activeId) ?? s.tabs[0];
   const settingsLoaded = useStartup();
   useShortcuts();
+  useEffect(() => startDesktopNotifications(), []);
   useWatchers();
   useAutoFetch();
   useUpdateChecks(settingsLoaded);
@@ -100,7 +103,7 @@ function RepoScreen({ tab, active }: { tab: Tab; active: boolean }) {
             <Resizer onDrag={(dx) => s.setSettings({ leftWidth: clamp((leftPanelRef.current?.offsetWidth ?? useStore.getState().settings.leftWidth) + dx, 200, 600) })} />
           </>
         ) : (
-          // Like the original: while a file is open (or the panel is hidden) the left panel shrinks to icons.
+          // While a file is open (or the panel is hidden) the left panel shrinks to icons.
           <LeftStrip repo={repo} onExpand={() => (set.showLeft ? setPeek(true) : s.setSettings({ showLeft: true }))} />
         )}
         {/* Reserve readable graph space; side panels yield on smaller windows. */}
@@ -252,7 +255,7 @@ function useStartup() {
       if (saved?.settings) useStore.setState({ settings: { ...DEFAULT_SETTINGS, ...saved.settings } });
       if (saved?.profiles?.length) useStore.setState({ profiles: saved.profiles, activeProfile: saved.activeProfile ?? saved.profiles[0].id });
       if (saved?.settings?.zoom && saved.settings.zoom !== 1) setZoom(saved.settings.zoom);
-      // General > Remember tabs. Like the original, every saved tab comes back at once, in its order, with the last
+      // General > Remember tabs. Every saved tab comes back at once, in its order, with the last
       // active one showing; a tab reads its repository the first time it is shown (LazyRepoScreen), so start-up
       // doesn't open each repository in turn and flash through them.
       const savedPaths = useStore.getState().settings.rememberTabs ? [...new Set(saved?.tabs ?? [])] : [];
@@ -289,7 +292,7 @@ function useUpdateChecks(settingsLoaded: boolean) {
 }
 
 /** Auto-fetch every open repository every N minutes (0 = off), pruning if enabled. A failure is
- *  reported once per repository, like the original's "Autofetch failed" notice. */
+ *  reported once per repository as an "Autofetch failed" notice. */
 function useAutoFetch() {
   const minutes = useStore((s) => s.settings.autoFetchMin);
   const prune = useStore((s) => s.settings.autoPrune);
@@ -355,7 +358,7 @@ function useWatchers() {
   }, [tabs]);
 }
 
-/** Keyboard shortcuts from the original's key bindings (Ctrl on Windows). */
+/** Keyboard shortcuts (Ctrl on Windows). */
 function useShortcuts() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -392,10 +395,43 @@ function useShortcuts() {
       if (path && tab && !st.dialog) {
         const repo = repoData(path);
         if (!repo) return;
+        // "Select Left / Right" (Left / H, Right / L): Right steps into the file list (opens its first file), Left goes back to the graph.
+        if (!e.shiftKey && (e.key === "ArrowLeft" || k === "h") && (tabUi(tab.id).diff || tabUi(tab.id).history) && !tabUi(tab.id).rebase && !tabUi(tab.id).conflict)
+          return run(() => st.setUi(tab.id, { diff: null, history: null }));
+        if (!e.shiftKey && (e.key === "ArrowRight" || k === "l") && !tabUi(tab.id).diff && !tabUi(tab.id).history && !tabUi(tab.id).rebase && !tabUi(tab.id).conflict) {
+          const sel = tabUi(tab.id).selection;
+          return run(() => {
+            if (sel.type === "wip") {
+              const un = repo.status.unstaged[0];
+              const sg = repo.status.staged[0];
+              const f = un ?? sg;
+              if (f) st.setUi(tab.id, { diff: { source: { kind: un ? "Unstaged" : "Staged" }, file: f.path, untracked: f.status === "?", parent: null } });
+              return;
+            }
+            const sha = sel.sha;
+            const parent = repo.commits.find((c) => c.sha === sha)?.parents[0] ?? null;
+            void queryClient
+              .fetchQuery({ queryKey: ["commitFiles", repo.path, sha], queryFn: () => api.commitFiles(repo.path, sha), staleTime: Infinity })
+              .then((files) => {
+                const cur = tabUi(tab.id);
+                if (files[0] && !cur.diff && cur.selection.type === "commit" && cur.selection.sha === sha)
+                  st.setUi(tab.id, { diff: { source: { kind: "Commit", sha }, file: files[0].path, untracked: false, parent } });
+              })
+              .catch(() => undefined);
+          });
+        }
         if (tabUi(tab.id).diff || tabUi(tab.id).history || tabUi(tab.id).rebase || tabUi(tab.id).conflict) return; // keys belong to the open view
         const down = e.key === "ArrowDown" || k === "j";
         const up = e.key === "ArrowUp" || k === "k";
-        // The original's "Select First Item" / "Select Last Item" (Home / End; End goes to the last loaded commit).
+        // "Select Next / Previous Topological" (Shift+Down / Shift+Up, Shift+J / Shift+K): follow the first parent / the only child.
+        if (e.shiftKey && !mod && !e.altKey && (down || up)) {
+          const wip = repo.status.unstaged.length + repo.status.staged.length > 0;
+          const u = tabUi(tab.id);
+          const to = (down ? nextTopological : previousTopological)(repo.commits, repo.head_sha, wip, u.selection);
+          if (!to) return run(() => undefined);
+          return run(() => st.setUi(tab.id, { selection: to, diff: null, multi: [], compareWorkdir: null }));
+        }
+        // "Select First Item" / "Select Last Item" (Home / End; End goes to the last loaded commit).
         const first = e.key === "Home";
         const last = e.key === "End";
         if (down || up || first || last) {

@@ -1,7 +1,6 @@
-//! Layout and behaviour values read from the original (see MECHANICS.md / mechanics.json).
+//! Layout and behaviour values the front end uses.
 //! The front end asks for these at start-up and draws the graph and commit box with them.
-//! Graph values come from the graph constants module in render.bundle.js
-//! (exported names such as GRAPH_ROW_HEIGHT, COMMIT_ZONE_EDGE_ARC_RADIUS).
+//! Graph values are the row height, node size and edge arc sizes.
 
 use serde::Serialize;
 
@@ -48,26 +47,26 @@ pub const NODE_MIN_ALPHA_PERCENT: u32 = 50;
 pub const SHORT_SHA_LENGTH: u32 = 6;
 /// DEFAULT_AVATAR_BACKGROUND_COLOR
 pub const DEFAULT_AVATAR_BACKGROUND: &str = "#199489";
-/// libgit2 (nodegit.node) diff defaults, set by the DiffOptions converter at 0x180107360:
+/// Diff defaults (libgit2 conventions):
 /// version 1, flags 0, context_lines 3, interhunk_lines 0.
 pub const DIFF_CONTEXT_LINES: u32 = 3;
 pub const DIFF_INTERHUNK_LINES: u32 = 0;
-/// git_blob_is_binary (nodegit.node 0x180257b80): only the first 8000 bytes are examined.
+/// Binary check: only the first 8000 bytes are examined.
 pub const BINARY_CHECK_BYTES: usize = 8000;
-/// Text test (nodegit.node 0x1802e5380): binary when (printable >> 7) < non-printable,
+/// Text test: binary when (printable >> 7) < non-printable,
 /// i.e. more than one control character per 128 printable ones.
 pub const BINARY_PRINTABLE_SHIFT: u32 = 7;
-/// nodegit.node FUN_1802807a0: an unset/out-of-range rename similarity becomes 50%.
-/// Used by git_status_list_new (0x1802d7b00) through git_diff_find_similar.
+/// An unset or out-of-range rename similarity becomes 50%.
+/// Used for status lists.
 pub const STATUS_RENAME_THRESHOLD: u32 = 50;
-/// nodegit.node FUN_180296e60: merge rename similarity 50%, default candidate limit 1000.
+/// Merge rename similarity 50%, default candidate limit 1000.
 /// A positive configured limit replaces this default; it is not a hard maximum.
 pub const MERGE_RENAME_THRESHOLD: u32 = 50;
 pub const MERGE_RENAME_LIMIT: u32 = 1000;
-/// nodegit.node FUN_18028d000: default email prefix and first sequence number.
+/// Default email prefix and first sequence number.
 pub const PATCH_SUBJECT_PREFIX: &str = "PATCH";
 pub const PATCH_START_NUMBER: usize = 1;
-/// timeSince (render.bundle.js): unit lengths in seconds, largest first, with the colour of each.
+/// Relative time units: unit lengths in seconds, largest first, with the colour of each.
 pub const TIME_YEAR_SECS: u32 = 31556736;
 pub const TIME_MONTH_SECS: u32 = 2630016;
 pub const TIME_WEEK_SECS: u32 = 604800;
@@ -101,31 +100,31 @@ pub const CONFLICT_OUTPUT_COLOR: &str = "#c517b6";
 pub const COMMIT_SUMMARY_COUNTER: u32 = 72;
 /// Auto-fetch interval default in minutes (used from Stage 4).
 pub const AUTO_FETCH_INTERVAL_MIN: u32 = 1;
-/// ZOOM_FACTORS (main.bundle.js / render.bundle.js): zoom in / out moves to the next entry.
+/// Zoom steps: zoom in / out moves to the next entry.
 pub const ZOOM_FACTORS: [f32; 12] = [3.0, 2.5, 2.0, 1.75, 1.5, 1.4, 1.3, 1.2, 1.1, 1.0, 0.9, 0.8];
 /// DEFAULT_ZOOM_FACTOR
 pub const DEFAULT_ZOOM_FACTOR: f32 = 1.0;
 
-/// Working-folder watcher debounce: render.bundle.js passes {debounceMS:2e3} to nsfw.
+/// Working-folder watcher debounce.
 pub const WORKDIR_WATCH_DEBOUNCE_MS: u32 = 2000;
-/// .git-folder watcher debounce: render.bundle.js passes {debounceMS:200} to nsfw.
+/// .git-folder watcher debounce.
 pub const GITDIR_WATCH_DEBOUNCE_MS: u32 = 200;
-/// nsfw.node 0x1800030b0: "options.debounceMS must be >= 1 and <= 60000."
+/// A debounce must be between 1 and 60000 ms.
 pub const WATCH_DEBOUNCE_MIN_MS: u32 = 1;
 pub const WATCH_DEBOUNCE_MAX_MS: u32 = 60000;
 
-/// capture/window.png (930 px window): the original's Undo starts at x 389, against Actions; wider windows centre
-/// the Undo ... Terminal group (reference pictures 3 and 4). The group has styles.css padding-left:20px, so the
+/// In a 930 px window the Undo button starts at x 389, against Actions; wider windows centre
+/// the Undo ... Terminal group. The group has 20 px of left padding, so the
 /// pickers' column ends 20 px earlier: 389 - 20 = 369.
 pub const TOOLBAR_LEFT_MAX: u32 = 369;
-/// Undo ... Terminal group width: styles.css .toolbar-btn{width:48px;margin:0 2px} x 8 buttons, the Pull options
+/// Undo ... Terminal group width: .toolbar-btn{width:48px;margin:0 2px} x 8 buttons, the Pull options
 /// button (width:14px, margin-left:0, + 2 px right), padding-left:20px and the 9 px divider before Terminal.
 pub const TOOLBAR_CENTER_WIDTH: u32 = 461;
-/// Tabs that make room for a dragged tab slide over this long (ms): the sortable list behind the original's
-/// ReorderableListItem uses its default transition, `transform 250ms ease`.
+/// Tabs that make room for a dragged tab slide over this long (ms): the sortable list
+/// uses its default transition, `transform 250ms ease`.
 pub const TAB_SLIDE_TIME_MS: u32 = 250;
 /// The "// WIP" box leaves this much of the row for the change counts:
-/// gitkraken-components styles.css `.work-dir-input{max-width:calc(100% - 75px)}`.
+/// `.work-dir-input{max-width:calc(100% - 75px)}`.
 pub const WIP_BOX_STATS_SPACE: u32 = 75;
 
 #[derive(Serialize, Clone)]

@@ -1,6 +1,6 @@
 import { openFavorite } from "@/components/RepoManagement";
 // Every command GitCraft offers, in one place: the command palette lists them, the keyboard
-// handler runs them, and the shortcut editor changes their keys. Groups follow the original's
+// handler runs them, and the shortcut editor changes their keys. Groups are the
 // Keyboard Shortcuts headers (Repo Actions, Navigation, Command Palette, UI).
 import { api } from "./api";
 import { act, confirmThen, promptBranch, promptStash, promptTag, repoData } from "./repo";
@@ -17,6 +17,8 @@ export interface Command {
   group: Group;
   /** Default shortcut, e.g. "Ctrl+Shift+S" (Ctrl = Cmd on macOS). */
   keys?: string;
+  /** More default shortcuts (some commands have two). */
+  alsoKeys?: string[];
   keywords?: string;
   /** Needs an open repository. */
   repo?: boolean;
@@ -73,7 +75,8 @@ export const COMMANDS: Command[] = [
     run: (p) => confirmThen("Discard all changes?", "All uncommitted changes will be discarded. You can bring them back with Undo.", "Discard All", () => act(p!, { type: "discardAll" })),
   },
   { id: "repo:undo", label: "Undo", group: "Repo Actions", keys: "Ctrl+Z", repo: true, run: (p) => act(p!, { type: "undo" }) },
-  { id: "repo:redo", label: "Redo", group: "Repo Actions", keys: "Ctrl+Y", repo: true, run: (p) => act(p!, { type: "redo" }) },
+  // Ctrl+Shift+Z is the second binding for redo.
+  { id: "repo:redo", label: "Redo", group: "Repo Actions", keys: "Ctrl+Y", alsoKeys: ["Ctrl+Shift+Z"], repo: true, run: (p) => act(p!, { type: "redo" }) },
   {
     id: "repo:focusCommit",
     label: "Focus commit message",
@@ -212,7 +215,10 @@ export function dispatchKey(e: KeyboardEvent, typing: boolean): boolean {
   const hasMod = /Ctrl|Alt/.test(combo) || /^F\d+$/.test(combo);
   if (!hasMod) return false;
   for (const c of COMMANDS) {
-    if (keysOf(c).toUpperCase() !== combo.toUpperCase()) continue;
+    const own = keysOf(c).toUpperCase();
+    // Extra default bindings only apply while the person has not chosen their own shortcut for the command.
+    const extra = st().settings.keybindings?.[c.id] === undefined ? (c.alsoKeys ?? []).map((k) => k.toUpperCase()) : [];
+    if (own !== combo.toUpperCase() && !extra.includes(combo.toUpperCase())) continue;
     if (typing && !c.inInputs) return false; // leave editor and text-box shortcuts with their owner
     const terminal = (e.target as HTMLElement | null)?.closest?.(".xterm");
     if (terminal && c.id !== "ui:terminalPanel" && c.id !== "palette:toggle") return false;

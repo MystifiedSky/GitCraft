@@ -11,7 +11,7 @@ export function setZoom(z: number) {
     });
 }
 
-/** Like the original: zoom in / out moves to the next entry of ZOOM_FACTORS (80 % … 300 %). */
+/** Zoom in / out moves to the next entry of ZOOM_FACTORS (80 % … 300 %). */
 export function stepZoom(dir: 1 | -1) {
   const { metrics, settings } = useStore.getState();
   const levels = [...metrics.zoom_factors].sort((a, b) => a - b);

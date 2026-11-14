@@ -1,6 +1,6 @@
 # GitCraft
 
-GitCraft is a desktop Git client for exploring repository history and managing everyday changes. Its workflow is inspired by GitKraken, with an independent implementation and its own branding. GitCraft is not affiliated with GitKraken.
+GitCraft is a desktop Git client for exploring repository history and managing everyday changes. It is an independent project with its own design and branding.
 
 <img width="3836" height="2086" alt="image" src="https://github.com/user-attachments/assets/8ee127cb-f041-4934-a80d-b8fa91852d09" />
 

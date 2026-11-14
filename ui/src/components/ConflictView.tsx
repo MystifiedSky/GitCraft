@@ -13,7 +13,7 @@ import { cn } from "@/lib/utils";
 import { conflictOutput, hasConflictMarkers, parseConflicts, type ConflictPick as Pick, type Segment } from "@/lib/conflict";
 export { parseConflicts } from "@/lib/conflict";
 
-/** Merge conflict tool: A (current) and B (incoming) on top, Output below, like the original. */
+/** Merge conflict tool: A (current) and B (incoming) on top, Output below. */
 export function ConflictView({ repo, tabId, file }: { repo: RepoView; tabId: string; file: string }) {
   const s = useStore();
   const m = s.metrics;

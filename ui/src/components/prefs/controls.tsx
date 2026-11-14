@@ -6,7 +6,7 @@ import { api } from "@/lib/api";
 
 export const field = "h-[28px] px-2 rounded-[3px] bg-field border border-white/10 text-fg text-[13px] outline-none focus:border-accent min-w-0";
 
-/** A section title, like the original's bold h3. */
+/** A section title: bold h3. */
 export function H({ children, sub }: { children: ReactNode; sub?: boolean }) {
   return <h3 className={cn("font-semibold text-white/95", sub ? "text-[14px] mt-6 mb-2" : "text-[18px] mb-4")}>{children}</h3>;
 }

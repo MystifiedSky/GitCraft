@@ -1,5 +1,5 @@
 //! Stage 4: repository management — remotes, worktrees, submodules, branch clean-up and Gitflow.
-//! Gitflow follows the original's built-in implementation (render.bundle.js): config keys
+//! Gitflow uses these config keys:
 //! `gitflow.branch.master` / `gitflow.branch.develop` / `gitflow.prefix.*`, defaults main, develop,
 //! feature/, release/, hotfix/ and an empty version-tag prefix.
 

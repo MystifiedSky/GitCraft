@@ -49,8 +49,7 @@ const IMAGE_TYPES: [(&str, &str); 8] = [
     ("svg", "image/svg+xml"),
 ];
 
-/// libgit2's binary test as GitKraken runs it (nodegit.node git_blob_is_binary 0x180257b80,
-/// text test 0x1802e5380, byte-order-mark check 0x1802e5430):
+/// A file is binary by libgit2's rules:
 /// look at the first 8000 bytes; a UTF-16 / UTF-32 byte-order mark means binary; a UTF-8 one is
 /// skipped; a NUL byte means binary; otherwise binary when (printable >> 7) < non-printable.
 /// TAB, LF, VT and CR count as neither; BS, FF and ESC count as printable.
@@ -71,7 +70,7 @@ pub fn is_binary(data: &[u8]) -> bool {
         match b {
             0 => return true,
             8 | 12 | 27 => printable += 1,
-            9 | 10 | 11 | 13 => {} // TAB, LF, VT and CR are neutral (0x1802e5380).
+            9 | 10 | 11 | 13 => {} // TAB, LF, VT and CR are neutral.
             0x7f => nonprintable += 1,
             b if b < 0x20 => nonprintable += 1,
             _ => printable += 1,
@@ -212,7 +211,7 @@ pub fn apply_part(dir: &Path, file: &str, untracked: bool, op: PatchOp, hunk: us
     Ok((patch, cached, reverse))
 }
 
-/// Recovered from nodegit.node 0x180245620 and 0x1802453e0:
+/// Hunks are checked exactly:
 /// match the complete preimage bytes at the hunk position, then splice the postimage
 /// before checking the next hunk. Preserve CR and the presence/absence of final LF.
 /// Reverse patches exchange old/new ranges and '+'/'-' lines.

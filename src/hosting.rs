@@ -1,4 +1,4 @@
-//! Integrations, like the original's Preferences > Integrations: GitHub, GitHub Enterprise Server, GitLab,
+//! Integrations (Preferences > Integrations): GitHub, GitHub Enterprise Server, GitLab,
 //! GitLab Self-Managed, Bitbucket, Bitbucket Data Center, Azure DevOps (hosting services) and Jira Cloud,
 //! Jira Data Center, Trello (issue trackers). This file: connections, sign-in, tokens for Git, remotes.
 //! hosting_api.rs: pull requests, issues, Launchpad, repositories to clone, SSH keys.
@@ -26,7 +26,7 @@ pub fn secret_set(name: &str, value: &str) -> Result<(), String> {
     }
 }
 
-/// The original's integration list (render.bundle.js integrationInfo), in its order.
+/// The supported integrations, in display order.
 pub const SERVICES: [&str; 10] = ["github", "github-enterprise", "gitlab", "gitlab-self", "bitbucket", "bitbucket-server", "azure", "jira", "jira-server", "trello"];
 
 pub fn label(id: &str) -> &'static str {
@@ -264,7 +264,7 @@ fn gcm(host: &str, op: &str, input: &str) -> Result<std::process::Output, String
 }
 
 /// Sign in through the browser with Git Credential Manager (the sign-in Git itself uses) and return the token
-/// it hands out - the counterpart of the original's "Connect" button. github.com, gitlab.com, bitbucket.org,
+/// it hands out - the counterpart of the "Connect" button. github.com, gitlab.com, bitbucket.org,
 /// dev.azure.com.
 pub fn browser_sign_in(id: &str) -> Result<String, String> {
     let host = match id {

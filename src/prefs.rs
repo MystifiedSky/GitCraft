@@ -1,6 +1,6 @@
 //! Back end for the Preferences screen: settings that change how Git runs (executable, SSH key, logging),
 //! global / repository Git config values, GPG key tools, and stored-credential clean-up.
-//! Defaults follow the original's getDefaultSettings (main.bundle.js), see MECHANICS.md.
+//! Defaults for the settings below.
 
 use crate::git;
 use serde::{Deserialize, Serialize};
@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
-/// main.bundle.js maxCommitCountMinimum = 500 ("Initial Commits in Graph: Minimum 500").
+/// Initial commits in the graph: minimum 500.
 pub const MIN_INITIAL_COMMITS: usize = 500;
 
 #[derive(Deserialize, Serialize, Clone, Default, Debug)]

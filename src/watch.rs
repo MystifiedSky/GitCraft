@@ -1,4 +1,4 @@
-//! Repository file watching, following the original's rules (see MECHANICS.md):
+//! Repository file watching:
 //! - the working folder is watched with a 2000 ms debounce, leaving out the .git folder,
 //!   `.git/lfs/tmp` and files Git ignores;
 //! - the .git folder is watched separately with a 200 ms debounce, leaving out `.git/lfs/tmp`;
@@ -17,7 +17,7 @@ pub struct RepoWatch {
     _gitdirs: Vec<Debouncer<RecommendedWatcher>>,
 }
 
-/// Clamp a debounce to the range the original's watcher accepts.
+/// Clamp a debounce to the accepted range.
 pub fn debounce(ms: u32) -> Duration {
     Duration::from_millis(ms.clamp(WATCH_DEBOUNCE_MIN_MS, WATCH_DEBOUNCE_MAX_MS) as u64)
 }
@@ -147,7 +147,7 @@ mod tests {
     }
 
     #[test]
-    fn debounce_is_clamped_like_the_original() {
+    fn debounce_is_clamped() {
         assert_eq!(debounce(0), Duration::from_millis(1));
         assert_eq!(debounce(2000), Duration::from_millis(2000));
         assert_eq!(debounce(90_000), Duration::from_millis(60_000));

@@ -1,17 +1,41 @@
-import { Keyboard, List, Loader2, Map as MapIcon, Rocket, ZoomIn } from "lucide-react";
+import { Gift, Keyboard, List, Loader2, Map as MapIcon, Rocket, ZoomIn } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 import { useStore } from "@/lib/store";
+import { hosting } from "@/lib/hosting";
+import { integrationHint } from "@/lib/notices";
 import { api } from "@/lib/api";
 import { resetZoom } from "@/lib/zoom";
-import { installAndRestart, useUpdates } from "@/lib/updates";
+import { installAndRestart, RELEASES_URL, useUpdates } from "@/lib/updates";
+import { useSignedInServices } from "@/lib/integrations";
 
 export function StatusBar() {
   const s = useStore();
   const up = useUpdates();
+  const signedIn = useSignedInServices();
+  const tab = s.tabs.find((t) => t.id === s.activeId);
+  const repoPath = tab?.kind === "repo" ? tab.path : undefined;
+  const remote = useQuery({ queryKey: ["remote", repoPath, ""], queryFn: () => hosting.remote(repoPath!), enabled: !!repoPath && signedIn.isSuccess && signedIn.data.length > 0, staleTime: Infinity, retry: false });
+  const serviceConnected = !!remote.data?.service && !!signedIn.data?.some((x) => x.id === remote.data?.service);
+  // Lists the user's own pull requests; same call as the Launchpad, refreshed every 5 minutes.
+  const prs = useQuery({ queryKey: ["launchpad", s.settings.gitlabHost], queryFn: hosting.launchpad, enabled: serviceConnected, refetchInterval: 5 * 60_000, staleTime: 60_000, retry: false });
+  // "Connect an integration" / "Select an integration" / the first pull request's sentence / "No Pull Requests".
+  const hint = !s.busy && !s.job && signedIn.isSuccess ? integrationHint(signedIn.data.map((x) => x.id), remote.data?.service, prs.data ? prs.data.pull_requests : null) : null;
+  const opensLaunchpad = serviceConnected;
   return (
     <div className="h-[26px] bg-panel flex items-center shrink-0 border-t border-black/30 text-[13px] text-white/90">
       <div className="flex items-center gap-2 pl-[22px] flex-1 min-w-0">
         {s.busy || s.job ? <Loader2 size={14} className="spin text-link" /> : <Rocket size={14} className="text-white/80" />}
-        <span className="truncate">{s.job?.text || s.busy || "Ready"}</span>
+        {hint ? (
+          <button
+            className="truncate hover:underline"
+            title={opensLaunchpad ? "Open the Launchpad" : "Connect GitHub, GitLab, Bitbucket and more"}
+            onClick={() => (opensLaunchpad ? s.openLaunchpad() : s.setDialog({ kind: "accounts" }))}
+          >
+            {hint}
+          </button>
+        ) : (
+          <span className="truncate">{s.job?.text || s.busy || "Ready"}</span>
+        )}
         {s.job?.percent != null && (
           <span className="w-[90px] h-[5px] rounded bg-white/10 overflow-hidden shrink-0">
             <span className="block h-full bg-link" style={{ width: `${s.job.percent}%` }} />
@@ -38,12 +62,15 @@ export function StatusBar() {
       <SB title="Feature plan" onClick={() => s.setDialog({ kind: "plan" })}>
         <MapIcon size={15} />
       </SB>
+      <SB title="What's new (release notes)" onClick={() => void hosting.openUrl(RELEASES_URL)}>
+        <Gift size={15} />
+      </SB>
       <SB title="Reset zoom" onClick={resetZoom}>
         <ZoomIn size={15} />
         <span className="ml-1.5">{Math.round(s.settings.zoom * 100)}%</span>
       </SB>
-      <button className="px-3 text-link hover:underline" onClick={() => s.setDialog({ kind: "shortcuts" })}>
-        Help
+      <button className="px-3 text-link hover:underline" title="Report a problem or ask for help" onClick={() => void hosting.openUrl(RELEASES_URL.replace(/\/releases$/, "/issues"))}>
+        Support
       </button>
       <span className="mx-2 px-1.5 h-[20px] flex items-center rounded-[3px] border border-white/25 mono text-[12px] tracking-wide">{s.version}</span>
     </div>

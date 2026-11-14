@@ -7,7 +7,7 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-/** The 10 graph lane colours of the original's dark theme. */
+/** The 10 graph lane colours of the dark theme. */
 export const GRAPH_COLORS = [
   "#15a0bf",
   "#0669f7",
@@ -56,7 +56,7 @@ export function authorColor(email: string) {
 
 const TIME_COLORS: Record<string, string> = { red: "#ef7a76", orange: "#de9b43", green: "#5cb85c" };
 
-/** The original's timeSince: first unit that fits, e.g. "3d", coloured red / orange / green by age.
+/** timeSince: first unit that fits, e.g. "3d", coloured red / orange / green by age.
  *  Units come from src/metrics.rs (year 31556736 s, month 2630016, week 604800, day 86400, hour 3600, minute 60). */
 export function timeSince(unix: number, units: [number, string, string][], now = Date.now() / 1000): { text: string; color: string | undefined } {
   const secs = Math.floor(now - unix);

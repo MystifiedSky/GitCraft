@@ -3,7 +3,7 @@ import { api } from "./api";
 import { openRepoPath } from "./repo";
 import { DEFAULT_SETTINGS, newId, useStore, type Profile, type Workspace } from "./store";
 
-/** The original ships GitKraken Dark / Light and their high-contrast versions (defaultThemes/*.jsonc-default). */
+/** Themes: Dark / Light and their high-contrast versions. */
 export const THEMES = [
   { id: "dark", label: "Dark" },
   { id: "light", label: "Light" },

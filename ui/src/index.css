@@ -1,6 +1,6 @@
 @import "tailwindcss";
 
-/* Colours measured from the original's dark theme (see MECHANICS.md). */
+/* Dark theme colours. */
 @theme {
   --color-app: #1c1e23;
   --color-panel: #272a31;
@@ -55,7 +55,7 @@ textarea {
   font-family: var(--font-mono);
 }
 
-/* Other themes override the same variables (values from the original's theme files).
+/* Other themes override the same variables.
    text-white / bg-white/x use --color-white, so on light themes they turn dark. */
 :root {
   --menu-bg: #1f1f1f;
@@ -191,7 +191,7 @@ body,
 }
 
 /* Keep menus quick and text crisp: fade without scaling or moving the pointer target.
-   These short fades are GitCraft choices; see AUDIT.md. */
+   These short fades are GitCraft design choices. */
 @keyframes surface-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes surface-out { from { opacity: 1; } to { opacity: 0; } }
 .menu-content[data-state="open"] { animation: surface-in 100ms ease-out; }

@@ -117,7 +117,7 @@ export interface RefView {
 
 export type PatchOp = "stage" | "unstage" | "discard";
 
-/** The original's four interactive rebase actions. */
+/** The four interactive rebase actions. */
 export type Step = "pick" | "reword" | "squash" | "drop";
 
 export interface TodoItem {

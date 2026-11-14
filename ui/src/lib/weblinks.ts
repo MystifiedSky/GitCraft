@@ -84,7 +84,7 @@ export async function openWebLink(path: string, remote: string, target: WebTarge
 }
 
 /**
- * Menu entries shaped like the original's getCopyDeepLinkFor*Items: one remote gives "<label> on remote: <name>",
+ * Menu entries for copying links: one remote gives "<label> on remote: <name>",
  * several give "<label>" with a submenu "On remote: <name>". No remote, no entry.
  */
 export function linkItems(repo: RepoView, label: string, target: WebTarget, remotes: string[] = repo.remotes): MenuEntry[] {

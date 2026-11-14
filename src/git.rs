@@ -113,7 +113,7 @@ impl GitOut {
 }
 
 /// Sign-ins for HTTPS remotes: (host, user name, token). Filled from the services connected in Accounts
-/// (GitHub / GitLab tokens in the system's credential store), like the original's own GitHub sign-in.
+/// (GitHub / GitLab tokens in the system's credential store).
 static HOST_TOKENS: std::sync::RwLock<Vec<(String, String, String)>> = std::sync::RwLock::new(Vec::new());
 
 pub fn set_host_tokens(tokens: Vec<(String, String, String)>) {
@@ -241,7 +241,7 @@ pub fn smart_refs(dir: &Path) -> Vec<String> {
 
 /// Refs under refs/heads, refs/remotes and refs/tags that lead to a commit: `for-each-ref` skips the ones it can't
 /// read (missing or invalid), and a tag of a tree or blob is left out by its peeled type, so the list holds only what
-/// the original's pattern walk keeps (see load_view).
+/// the history view keeps (see load_view).
 pub fn walkable_refs(dir: &Path) -> Vec<String> {
     use std::io::Write;
     // Names only: asking for object types makes for-each-ref stop at a ref whose object is missing.
@@ -383,9 +383,9 @@ pub fn load_view(dir: &Path, max_commits: usize, view: &RefView) -> RepoData {
     // Another broken ref (a branch file that is empty or names a missing commit) still stops the whole log. Then read
     // the history again from only the refs `for-each-ref` could read (it skips broken ones with a warning), so one
     // damaged ref never hides the rest of the history. Hidden refs stay hidden.
-    // The original's rule (nodegit git_revwalk_push_glob -> FUN_1802cf840 / FUN_1802cf550): a ref reached through a
-    // pattern is skipped when it is missing, has an invalid name, or doesn't lead to a commit (GIT_ENOTFOUND -3,
-    // GIT_EINVALIDSPEC -12, GIT_EPEEL -19); every other ref is walked.
+    // Rule: a ref reached through a
+    // pattern is skipped when it is missing, has an invalid name, or doesn't lead to a commit;
+    // every other ref is walked.
     let log = if log.ok || !view.solo.is_empty() {
         log
     } else {
@@ -506,8 +506,7 @@ fn parse_track(s: &str) -> (usize, usize) {
     (a, b)
 }
 
-/// Shared status rules: recurse into untracked folders and use the recovered rename similarity.
-/// nodegit.node git_status_list_new 0x1802d7b00 and FUN_1802807a0.
+/// Shared status rules: recurse into untracked folders and use a 50% rename similarity.
 pub fn status_options() -> [String; 2] {
     ["-uall".into(), format!("--find-renames={}%", crate::metrics::STATUS_RENAME_THRESHOLD)]
 }
@@ -516,11 +515,11 @@ pub fn status(dir: &Path) -> WorkStatus {
     let mut w = WorkStatus::default();
     // --no-optional-locks: don't rewrite the index while reading it, so a status check never
     // wakes the .git watcher and starts another refresh.
-    // The original asks libgit2 (git_status_list_new, nodegit.node 0x1802d7b00) for INCLUDE_UNTRACKED |
-    // RECURSE_UNTRACKED_DIRS | RENAMES_HEAD_TO_INDEX | RENAMES_INDEX_TO_WORKDIR, showing index and working folder.
-    // -uall = untracked files inside untracked folders; --find-renames=50% = rename detection at libgit2's
-    // default similarity, whatever status.renames says in the person's Git config. libgit2 re-reads the index
-    // but only writes it back with UPDATE_INDEX (0x2000), which the original doesn't pass: --no-optional-locks.
+    // Status lists untracked files, recurses into untracked folders, detects renames between HEAD and the index and
+    // between the index and the working folder, and shows both the index and the working folder.
+    // -uall = untracked files inside untracked folders; --find-renames=50% = rename detection at a fixed
+    // similarity, whatever status.renames says in the person's Git config. Reading must not write the index back,
+    // hence --no-optional-locks.
     let options = status_options();
     let o = run(dir, &["--no-optional-locks", "status", "--porcelain=v1", "-z", &options[0], &options[1]]);
     let mut parts = o.stdout.split('\0').peekable();
@@ -656,12 +655,12 @@ pub fn file_diff(dir: &Path, src: &DiffSource, path: &str, untracked: bool, pare
 
 /// Raw unified diff text for a file (used for the hunk view and for building partial patches).
 pub fn diff_text(dir: &Path, src: &DiffSource, path: &str, parent: Option<&str>, ignore_ws: bool) -> String {
-    // The original's diff options (nodegit.node 0x180107360): 3 context lines, hunks never merged.
+    // Diff options: 3 context lines, hunks never merged.
     let ctx = format!("-U{}", crate::metrics::DIFF_CONTEXT_LINES);
     let inter = format!("--inter-hunk-context={}", crate::metrics::DIFF_INTERHUNK_LINES);
     let mut args: Vec<&str> = vec!["diff", "--no-color", "--no-ext-diff", ctx.as_str(), inter.as_str()];
     if ignore_ws {
-        // The original sets libgit2's IGNORE_WHITESPACE flag: ignore all whitespace (git -w).
+        // Ignore all whitespace (git -w).
         args.push("--ignore-all-space");
     }
     let range;

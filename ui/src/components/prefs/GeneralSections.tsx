@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { enableDesktopNotifications } from "@/lib/desktop-notify";
 import { useState } from "react";
 import { api } from "@/lib/api";
 import { useStore, type Settings } from "@/lib/store";
@@ -264,13 +265,13 @@ export function NotificationsSection() {
   return (
     <>
       <H>Notifications</H>
-      <Row label="Enable Desktop Notifications" help="Allow GitCraft to send desktop notifications when a long action (clone, fetch, pull, push) finishes while the window is in the background.">
+      <Row label="Enable Desktop Notifications" help="Allow GitCraft to send desktop notifications.">
         <Toggle
           value={set.desktopNotifications}
           onChange={async (v) => {
-            if (v && "Notification" in window && Notification.permission !== "granted") await Notification.requestPermission().catch(() => undefined);
             put({ desktopNotifications: v });
-            if (v) toast(true, "Desktop notifications enabled");
+            // A native "Desktop notifications enabled" toast is shown; without permission an in-app one stands in.
+            if (v && !(await enableDesktopNotifications())) toast(true, "Desktop notifications enabled");
           }}
         />
       </Row>

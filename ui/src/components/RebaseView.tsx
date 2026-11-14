@@ -14,7 +14,7 @@ const STEPS: { step: Step; label: string; key: string; color: string }[] = [
   { step: "drop", label: "Drop", key: "D", color: "#d9413d" },
 ];
 
-/** Interactive Rebase / Interactive Cherry Pick, opened in the centre like the original.
+/** Interactive Rebase / Interactive Cherry Pick, opened in the centre.
  *  Newest commit at the top. Keys: P / R / S / D set the action, ↑ ↓ select, Ctrl+↑ ↓ move. */
 export function RebaseView({ tabId, path, plan }: { tabId: string; path: string; plan: RebasePlan }) {
   const s = useStore();

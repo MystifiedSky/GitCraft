@@ -6,6 +6,8 @@ import { useStore } from "./store";
 
 export interface RemoteRepo {
   provider: "github" | "gitlab";
+  /** The integration this remote belongs to (an id of SERVICES). */
+  service?: string;
   host: string;
   path: string;
   web: string;

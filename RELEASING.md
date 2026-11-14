@@ -6,9 +6,13 @@ The workflow builds Windows x64 (NSIS and MSI), macOS (universal DMG), and Linux
 
 Use **Re-run failed jobs** in Actions to retry a failed release with the same version. Use **Run workflow** on `main` if you need a fresh build. To change the base version, set it with `npm --prefix ui run version:set -- <version>` and commit the changed manifests and lockfiles. Keep the next calculated version higher than the current release.
 
+## Changelog
+
+Write changes under `## [Unreleased]` in `CHANGELOG.md`. When a release is published, the **changelog** job moves the entries that shipped into a dated `## [x.y.z]` section on `main` (commit `docs(changelog): record vX.Y.Z [skip ci]`), updates the comparison links, and the same entries are used as the GitHub release notes. Entries added after the released commit stay under Unreleased. If the job cannot push (for example because `main` is protected), it prints a warning and you can run `node scripts/changelog-release.mjs record <version> MystifiedSky/GitCraft <changelog-of-the-released-commit>`.
+
 ## Updating installed copies
 
-GitCraft checks GitHub Releases at startup and every hour while it’s open. When it finds a newer version, it downloads the update and verifies the signature using the public key built into the app. Choose **Update Ready (Restart GitCraft)** in the bottom right to install it. Turn off **Automatically download GitCraft updates** in **Preferences → General** to stop background checks and downloads. **File → Check for Update** still works with the setting off.
+GitCraft checks GitHub Releases at startup and every 10 hours while it’s open. When it finds a newer version, it downloads the update and verifies the signature using the public key built into the app. Choose **Update Ready (Restart GitCraft)** in the bottom right to install it. Turn off **Automatically download GitCraft updates** in **Preferences → General** to stop background checks and downloads. **File → Check for Update** still works with the setting off.
 
 Install a published release once if your current build predates the signing key. Linux AppImage builds can update in place; DEB and RPM installations should be upgraded using the matching package from GitHub.
 

@@ -37,7 +37,7 @@ export function Toolbar({ repo, tabId }: { repo: RepoView | undefined; tabId: st
   const labels = s.settings.toolbarLabels;
   const locals = repo?.refs.filter((r) => r.kind === "Local") ?? [];
   const detached = !!repo && !repo.head_branch;
-  // Commits to pull / push for the checked-out branch (shown as small counts like the original).
+  // Commits to pull / push for the checked-out branch (shown as small counts).
   const head = repo?.refs.find((r) => r.kind === "Local" && r.name === repo.head_branch);
   const hasChanges = !!repo && repo.status.unstaged.length + repo.status.staged.length > 0;
   const pulling = useSpinning(path, "pull");
@@ -89,7 +89,7 @@ export function Toolbar({ repo, tabId }: { repo: RepoView | undefined; tabId: st
   ];
 
   return (
-    // Like the original: the Undo ... Terminal group is centred in the window, Actions / Search sit at the right
+    // The Undo ... Terminal group is centred in the window, Actions / Search sit at the right
     // edge. In a narrow window the pickers keep their space and the group slides right until it meets Actions.
     // Left column minimum: clamp(300px, 100vw - (centre group + right group), 389px) - see TOOLBAR_* below.
     <div
@@ -97,7 +97,7 @@ export function Toolbar({ repo, tabId }: { repo: RepoView | undefined; tabId: st
       style={{ gridTemplateColumns: `minmax(clamp(${TOOLBAR_LEFT_MIN}px, calc(100vw - ${s.metrics.toolbar_center + TOOLBAR_RIGHT}px), ${s.metrics.toolbar_left_max}px), 1fr) auto minmax(max-content, 1fr)` }}
     >
       {/* repository / branch pickers */}
-      {/* styles.css .toolbar .upper .bread-crumb{max-width:45vw} */}
+      {/* .toolbar .upper .bread-crumb{max-width:45vw} */}
       <div className="flex items-center h-full min-w-0 max-w-[45vw]">
       <DropMenu
         items={repoMenu}
@@ -122,7 +122,7 @@ export function Toolbar({ repo, tabId }: { repo: RepoView | undefined; tabId: st
         }
       />
       </div>
-      {/* styles.css .toolbar .upper .btn-toolbar{justify-content:center;padding-left:20px} */}
+      {/* .toolbar .upper .btn-toolbar{justify-content:center;padding-left:20px} */}
       <div className="flex items-center justify-center h-full pl-[20px]">
       <TB label="Undo" labels={labels} title={repo?.undo.undo ? `Undo ${repo.undo.undo}` : "Nothing to undo"} disabled={!repo?.undo.undo} onClick={() => path && act(path, { type: "undo" })}>
         <Undo2 size={19} />
@@ -145,8 +145,8 @@ export function Toolbar({ repo, tabId }: { repo: RepoView | undefined; tabId: st
         <DropMenu
           items={pullMenu}
           trigger={
-            // styles.css .toolbar-pull-button button:nth-child(2){margin-left:0;width:14px} (+2 px right margin)
-            // While pulling the original disables the options too (dropdownDisabled: isPulling || ...).
+            // .toolbar-pull-button button:nth-child(2){margin-left:0;width:14px} (+2 px right margin)
+            // While pulling the options are disabled too.
             <button disabled={pulling} className="w-[14px] mr-[2px] flex items-start pt-[13px] justify-center hover:bg-white/5 disabled:opacity-35 outline-none" title="Pull options">
               <ChevronDown size={13} />
             </button>
@@ -189,7 +189,7 @@ export function Toolbar({ repo, tabId }: { repo: RepoView | undefined; tabId: st
   );
 }
 
-/** Widths (px) of the toolbar groups, from styles.css (.toolbar-btn width 48px + margin 0 2px = 52 each):
+/** Widths (px) of the toolbar groups (.toolbar-btn width 48px + margin 0 2px = 52 each):
  *  centre = 20 padding + Undo, Redo, Pull, Push, Branch, Stash, Pop, Terminal (8 x 52) + Pull options (14 + 2)
  *  + divider (9) = metrics.toolbar_center (src/metrics.rs); right = Actions (56) + Search (52). The left column keeps at
  *  least 300 px for the pickers and at most metrics.toolbar_left_max (src/metrics.rs). */
@@ -215,19 +215,19 @@ function TB({
   disabled?: boolean;
   className?: string;
   badge?: number;
-  /** The button's action is running: a spinning circle replaces the icon (like the original's circle-notch). */
+  /** The button's action is running: a spinning circle replaces the icon. */
   spinning?: boolean;
 }) {
   return (
     <button
       title={title}
-      // While it spins, another press does nothing (the original locks Pull the same way).
+      // While it spins, another press does nothing.
       onClick={spinning ? undefined : onClick}
       disabled={disabled}
       aria-busy={spinning || undefined}
       className={cn("flex flex-col items-center justify-center w-[52px] h-full hover:bg-white/5 disabled:opacity-35 outline-none", spinning && "cursor-default", className)}
     >
-      {/* The original shows the label while spinning even when toolbar labels are off: getLabel(showLabels || spinAction). */}
+      {/* The label shows while spinning even when toolbar labels are off. */}
       {(labels || spinning) && <span className="text-[11px] text-white/75 leading-none mb-[5px]">{label}</span>}
       <span className="relative">
         {spinning ? <LoaderCircle size={19} style={{ animation: `spin ${SPIN_TURN_MS}ms linear infinite` }} /> : children}

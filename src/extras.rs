@@ -1,7 +1,7 @@
-//! Stage 6 local stand-ins for the original's cloud features:
-//! - Patches: share changes as a .patch file (instead of GitKraken's hosted Cloud Patches).
+//! Stage 6 local stand-ins for cloud features:
+//! - Patches: share changes as a .patch file (instead of hosted cloud patches).
 //! - Conflict prevention: warn early when your branch would conflict with its target
-//!   (the original's "proactive conflict detection with target branch"), computed locally
+//!   (proactive conflict detection with the target branch), computed locally
 //!   with `git merge-tree` — nothing leaves the computer.
 
 use crate::git;
@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 /// A patch of uncommitted changes (`wip`) or of the given commits (oldest first, mailbox format).
 pub fn make_patch(dir: &Path, shas: &[String]) -> Result<String, String> {
-    // nodegit.node FUN_180107360: preserve the recovered hunk boundaries in every export.
+    // Keep the hunk boundaries unchanged in every export.
     let context = format!("-U{DIFF_CONTEXT_LINES}");
     let interhunk = format!("--inter-hunk-context={DIFF_INTERHUNK_LINES}");
     if shas.is_empty() {
@@ -26,7 +26,7 @@ pub fn make_patch(dir: &Path, shas: &[String]) -> Result<String, String> {
     }
     let mut out = String::new();
     let total = shas.len();
-    // FUN_18028d000 uses PATCH, starts at 1, and has no reroll suffix by default.
+    // The subject prefix is PATCH, numbering starts at 1, and there is no reroll suffix by default.
     // Override personal format.* settings before adding the series numbering ourselves.
     let prefix = format!("--subject-prefix={PATCH_SUBJECT_PREFIX}");
     let start = format!("--start-number={PATCH_START_NUMBER}");
@@ -41,7 +41,7 @@ pub fn make_patch(dir: &Path, shas: &[String]) -> Result<String, String> {
     Ok(out)
 }
 
-/// libgit2's email subject (nodegit.node 0x18028d000): "Subject: [PATCH] …" for one patch,
+/// The email subject: "Subject: [PATCH] …" for one patch,
 /// "[PATCH n/total]" when there are several (start number 1).
 pub fn number_subject(patch: &str, n: usize, total: usize) -> String {
     if total <= 1 {
@@ -54,20 +54,20 @@ pub fn number_subject(patch: &str, n: usize, total: usize) -> String {
     )
 }
 
-/// nodegit.node FUN_180296e60: zero merge limit selects diff; nonpositive result selects 1000.
+/// A zero merge limit selects diff.renamelimit; a nonpositive result selects 1000.
 fn rename_limit(dir: &Path) -> u32 {
     let read = |key: &str| -> i32 {
         let o = git::run(dir, &["config", "--int", "--get", key]);
         if o.ok { o.stdout.trim().parse().unwrap_or(0) } else { 0 }
     };
-    // 0x180296e60 falls back to diff only when merge is zero. A negative merge
+    // diff.renamelimit is used only when merge.renamelimit is zero. A negative merge
     // value goes straight to the default; it must not select diff.renamelimit.
     let merge = read("merge.renamelimit");
     let limit = if merge == 0 { read("diff.renamelimit") } else { merge };
     if limit > 0 { limit as u32 } else { MERGE_RENAME_LIMIT }
 }
 
-/// Shared CLI adaptation of nodegit.node FUN_180296e60: flags=1 enables renames,
+/// Shared merge settings: rename detection is on,
 /// similarity defaults to 50%, and the candidate limit follows rename_limit above.
 /// Use for previews and merges so personal merge.renames settings cannot make them disagree.
 pub fn merge_args(dir: &Path, command: &str, args: &[&str]) -> Vec<String> {
@@ -115,7 +115,7 @@ pub fn repo_summary(dir: &Path) -> RepoSummary {
     if !dir.is_dir() {
         return RepoSummary::default();
     }
-    // Use the same recovered recursion/rename rules as the working-directory lists.
+    // Use the same recursion and rename rules as the working-directory lists.
     // NUL records keep filenames containing line breaks from inflating the count.
     let options = git::status_options();
     let o = git::run(dir, &["--no-optional-locks", "status", "--porcelain=v2", "--branch", "-z", &options[0], &options[1]]);
@@ -236,7 +236,7 @@ mod tests {
         g(&["commit", "-q", "-am", "main change"]);
         assert_eq!(conflict_check(&d, Some("side")).files, vec!["a.txt".to_string()]);
 
-        // Personal email settings must not override the recovered default subject rules.
+        // Personal email settings must not override the default subject rules.
         g(&["config", "format.subjectPrefix", "CUSTOM"]);
         g(&["config", "format.numbered", "true"]);
         g(&["config", "format.coverLetter", "true"]);
@@ -262,7 +262,7 @@ mod tests {
     }
 
     #[test]
-    fn patch_exports_use_recovered_hunk_boundaries() {
+    fn patch_exports_keep_hunk_boundaries() {
         let d = std::env::temp_dir().join(format!("gitcraft-patch-context-{}", std::process::id()));
         fs::create_dir_all(&d).unwrap();
         let g = |a: &[&str]| assert!(git::run(&d, a).ok, "{a:?}");
@@ -292,7 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn rename_limit_uses_recovered_zero_and_negative_rules() {
+    fn rename_limit_uses_zero_and_negative_rules() {
         let d = std::env::temp_dir().join(format!("gitcraft-merge-limits-{}", std::process::id()));
         fs::create_dir_all(&d).unwrap();
         let g = |a: &[&str]| assert!(git::run(&d, a).ok, "{a:?}");

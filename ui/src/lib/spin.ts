@@ -1,16 +1,14 @@
 import { create } from "zustand";
 import type { Action } from "./api";
 
-/** Toolbar buttons that turn into a spinning circle while their action runs. From render.bundle.js ToolbarButton
- *  (`icon: spinAction ? ["far","circle-notch"] : icon, spin: spinAction`) and its callers:
- *  Pull = getIsPulling, Push = getIsPushing (ref.pushPromise), Stash = getIsStashing (stashPromise),
- *  Pop = getIsApplyingStash (applyStashPromise). See MECHANICS.md "Toolbar busy spinner". */
+/** Toolbar buttons that turn into a spinning circle while their action runs:
+ *  Pull while pulling, Push while pushing, Stash while stashing, Pop while applying a stash. */
 export type SpinButton = "pull" | "push" | "stash" | "pop";
 
-/** One full turn of the circle: styles.css `.fa-spin{animation:fa-spin .5s infinite linear}`. */
+/** One full turn of the circle: `animation: spin .5s infinite linear`. */
 export const SPIN_TURN_MS = 500;
 /** Shortest time the circle stays, so an action that finishes at once still shows it was pressed.
- *  The original ties the circle only to the running action; this minimum is GitCraft's (estimated). */
+ *  The circle is tied to the running action; this minimum is GitCraft's (estimated). */
 export const SPIN_MIN_MS = 500;
 
 /** Which toolbar button spins for an action (null: none). A quiet background fetch doesn't spin Pull. */

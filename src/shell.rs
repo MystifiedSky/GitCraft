@@ -1,30 +1,27 @@
-//! Opening files, folders and web links with the system, the way the original does it on Windows.
+//! Opening files, folders and web links with the system.
 //!
-//! Read from gitkraken.exe (Electron's platform_util_win.cc and Chromium's ui/base/win/shell.cc), see MECHANICS.md
-//! "Opening files, folders and links":
-//! - OpenPath (FUN_140466ad0 -> FUN_140466d50 "OpenPathOnThread"): a folder (FUN_1423b1350 DirectoryExists:
-//!   GetFileAttributesW, attribute 0x10) opens with verb "explore" and class "folder" (FUN_142a405a0); anything else
-//!   with its default action (FUN_142a401c0). Failure answers "Failed to open path".
-//! - InvokeShellExecute (FUN_142a402e0): SHELLEXECUTEINFOW cbSize 0x70, fMask SEE_MASK_NOASYNC 0x100 (| 0x1
-//!   SEE_MASK_CLASSNAME with a class), nShow SW_SHOWNORMAL 1, no verb = the default action; success = ShellExecuteExW.
-//! - ShowItemInFolder (FUN_140466720 "ShowItemInFolderOnWorkerThread"): on a COM worker thread, parse the folder and
-//!   the file to item lists and call SHOpenFolderAndSelectItems(folder, 1, [file], 0).
-//! - OpenExternal (FUN_140466fb0 "OpenExternalOnWorkerThread"): verb "open", fMask 0x500 (SEE_MASK_NOASYNC |
-//!   SEE_MASK_FLAG_NO_UI), nShow 1; failure answers "Failed to open: " and the error code.
+//! - Open path: a folder opens with verb "explore" and class "folder"; anything else with its default
+//!   action. Failure answers "Failed to open path".
+//! - Shell execute: SHELLEXECUTEINFOW cbSize 0x70, fMask SEE_MASK_NOASYNC 0x100 (| 0x1 SEE_MASK_CLASSNAME with a
+//!   class), nShow SW_SHOWNORMAL 1, no verb = the default action; success = ShellExecuteExW.
+//! - Show item in folder: on a COM worker thread, parse the folder and the file to item lists and call
+//!   SHOpenFolderAndSelectItems(folder, 1, [file], 0).
+//! - Open external: verb "open", fMask 0x500 (SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI), nShow 1; failure
+//!   answers "Failed to open: " and the error code.
 
 use std::path::Path;
 
-/// The original's answer when a path can't be opened (FUN_140466d50).
+/// The answer when a path can't be opened.
 pub const OPEN_PATH_FAILED: &str = "Failed to open path";
-/// The original's prefix when a web link can't be opened (FUN_140466fb0).
+/// The prefix when a web link can't be opened.
 pub const OPEN_EXTERNAL_FAILED: &str = "Failed to open: ";
 
-/// ShellExecuteEx flags and window state the original uses.
+/// ShellExecuteEx flags and window state.
 pub const SEE_MASK_CLASSNAME: u32 = 0x1;
 pub const SEE_MASK_NOASYNC: u32 = 0x100;
 pub const SEE_MASK_FLAG_NO_UI: u32 = 0x400;
 pub const SW_SHOWNORMAL: i32 = 1;
-/// SHELLEXECUTEINFOW size on 64-bit Windows (the original sets cbSize = 0x70).
+/// SHELLEXECUTEINFOW size on 64-bit Windows (cbSize = 0x70).
 pub const SHELLEXECUTEINFO_SIZE: u32 = 0x70;
 
 /// Open a file with its usual app, or a folder in the file manager.
@@ -47,7 +44,7 @@ pub fn show_item_in_folder(p: &Path) -> Result<(), String> {
     {
         let folder = p.parent().ok_or_else(|| OPEN_PATH_FAILED.to_string())?.to_path_buf();
         let file = p.to_path_buf();
-        // Like the original, on its own thread with COM set up for it.
+        // On its own thread with COM set up for it.
         std::thread::spawn(move || win::open_folder_and_select(&folder, &file)).join().map_err(|_| OPEN_PATH_FAILED.to_string())?
     }
     #[cfg(target_os = "macos")]
@@ -86,7 +83,7 @@ mod win {
         s.encode_wide().chain(std::iter::once(0)).collect()
     }
 
-    /// InvokeShellExecute (FUN_142a402e0). Err holds GetLastError's code.
+    /// Run ShellExecuteEx. Err holds GetLastError's code.
     pub fn shell_execute(file: &OsStr, verb: Option<&str>, class: Option<&str>, mask: u32) -> Result<(), u32> {
         let file = wide(file);
         let verb = verb.map(|v| wide(OsStr::new(v)));
@@ -108,7 +105,7 @@ mod win {
         }
     }
 
-    /// ShowItemInFolderOnWorkerThread (FUN_140466720).
+    /// Show an item in its folder (runs on a COM worker thread).
     pub fn open_folder_and_select(folder: &Path, file: &Path) -> Result<(), String> {
         // SAFETY: plain COM calls on this thread; every item list is freed and COM is closed if it was opened here.
         unsafe {
@@ -144,7 +141,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shell_values_match_the_original() {
+    fn shell_values_are_as_expected() {
         #[cfg(windows)]
         assert_eq!(std::mem::size_of::<windows_sys::Win32::UI::Shell::SHELLEXECUTEINFOW>() as u32, SHELLEXECUTEINFO_SIZE);
         assert_eq!(SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI, 0x500);

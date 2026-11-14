@@ -11,7 +11,7 @@ declare global {
 // Syntax colouring only needs the basic editor worker.
 self.MonacoEnvironment = { getWorker: () => new EditorWorker() };
 
-// Dark theme with GitCraft's colours (see MECHANICS.md: added-line / deleted-line = green / red at 20 %).
+// Dark theme with GitCraft's colours (added-line / deleted-line = green / red at 20 %).
 monaco.editor.defineTheme("gitcraft-dark", {
   base: "vs-dark",
   inherit: true,

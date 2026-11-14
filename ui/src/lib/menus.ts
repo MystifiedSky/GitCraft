@@ -82,7 +82,7 @@ export function branchMenu(repo: RepoView, ref: GitRef): MenuEntry[] {
     items.push({
       label: `Squash merge ${ref.name} into ${head}`,
       onSelect: async () => {
-        // The original's commit message for this: "Squash merge {0} into {1}".
+        // The commit message for this: "Squash merge {0} into {1}".
         if (await act(path, { type: "mergeSquash", branch: ref.name })) useStore.getState().setDraft(path, { summary: `Squash merge ${ref.name} into ${head}`, description: "", amend: false });
       },
     });
@@ -145,7 +145,7 @@ export function branchMenu(repo: RepoView, ref: GitRef): MenuEntry[] {
   items.push({ separator: true });
   items.push({ label: "Copy branch name", onSelect: () => copy(ref.name) });
   items.push({ label: "Copy commit sha", onSelect: () => copy(ref.sha) });
-  // The original's "Copy link to branch" (getCopyDeepLinkForBranchItems): for a remote branch or a local branch's upstream.
+  // "Copy link to branch": for a remote branch or a local branch's upstream.
   const onRemote = splitRemote(repo, ref.kind === "Remote" ? ref.name : ref.upstream);
   if (onRemote) items.push(...linkItems(repo, "Copy link to branch", { kind: "branch", name: onRemote.branch }, [onRemote.remote]));
   return items;
@@ -341,7 +341,7 @@ export function fileMenu(repo: RepoView, file: string, staged: boolean, inCommit
     items.push({ label: "Open in External Merge Tool", onSelect: () => act(path, { type: "externalMerge", file, tool: useStore.getState().settings.mergeTool }) });
   items.push({ separator: true });
   items.push({ label: "Copy file path", onSelect: () => copy(file) });
-  // The original's file menu: "Copy file contents to clipboard" (the version shown: working copy, or the commit's).
+  // File menu: "Copy file contents to clipboard" (the version shown: working copy, or the commit's).
   items.push({
     label: "Copy file contents to clipboard",
     onSelect: () =>

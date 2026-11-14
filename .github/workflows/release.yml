@@ -177,7 +177,13 @@ jobs:
               exit 0
             fi
           else
-            gh release create "$tag" --draft --target "$GITHUB_SHA" --title "GitCraft $tag" --generate-notes
+            # Release notes come from the Unreleased entries of CHANGELOG.md in this commit; without any, GitHub writes them.
+            node scripts/changelog-release.mjs notes CHANGELOG.md > release-notes.md
+            if [[ -s release-notes.md ]]; then
+              gh release create "$tag" --draft --target "$GITHUB_SHA" --title "GitCraft $tag" --notes-file release-notes.md
+            else
+              gh release create "$tag" --draft --target "$GITHUB_SHA" --title "GitCraft $tag" --generate-notes
+            fi
           fi
           gh release upload "$tag" release-assets/* --clobber
 
@@ -188,3 +194,45 @@ jobs:
           latest=false
           if [[ "$newest" == "$tag" ]]; then latest=true; fi
           gh release edit "$tag" --draft=false --latest="$latest"
+
+  # Moves the entries that shipped from "Unreleased" into a dated version section of CHANGELOG.md on main, so the changelog follows
+  # every release without a manual step. The push uses the workflow token, which does not start another Release run.
+  changelog:
+    needs: [version, publish]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Record the release in CHANGELOG.md
+        env:
+          VERSION: ${{ needs.version.outputs.number }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          # Skip a release that is no longer the newest published one (an older run retried late).
+          published=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name')
+          newest=$(printf '%s\n' "$published" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+          if [[ "$newest" != "v$VERSION" ]]; then
+            echo "v$VERSION is not the newest release ($newest); leaving CHANGELOG.md alone."
+            exit 0
+          fi
+          git show "$GITHUB_SHA:CHANGELOG.md" > "$RUNNER_TEMP/shipped-changelog.md"
+          node scripts/changelog-release.mjs record "$VERSION" "$GITHUB_REPOSITORY" "$RUNNER_TEMP/shipped-changelog.md"
+          if git diff --quiet -- CHANGELOG.md; then exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+          git commit -m "docs(changelog): record v$VERSION [skip ci]"
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then exit 0; fi
+            git pull --rebase origin main
+          done
+          echo "::warning::Could not push the changelog update for v$VERSION (is main protected?). Add it by hand."

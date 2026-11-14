@@ -51,7 +51,7 @@ describe("all AI features share the selected connection", () => {
     vi.mocked(invoke).mockResolvedValueOnce(undefined).mockResolvedValueOnce(["Summarize changes", ""]);
     await expect(ai.commitMessage("/repo")).resolves.toEqual(["Summarize changes", ""]);
     expect(invoke).toHaveBeenNthCalledWith(1, "set_ai_config", { config: expect.objectContaining({ provider, cliPath, cliConfigDir }) });
-    expect(invoke).toHaveBeenNthCalledWith(2, "ai_commit_message", { path: "/repo" });
+    expect(invoke).toHaveBeenNthCalledWith(2, "ai_commit_message", { path: "/repo", sha: null });
   });
 });
 

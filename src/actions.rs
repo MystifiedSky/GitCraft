@@ -6,13 +6,11 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
-/// Git's answer when there is nothing to stash; the original's toolbar Stash throws it as an error
-/// (render.bundle.js gitStashAllCriticalSection: `if ("No local changes to save" === result) throw`).
+/// Git's answer when there is nothing to stash; the toolbar Stash treats it as an error
+/// (a stash with no local changes is refused instead of reported as done).
 pub const STASH_NOTHING: &str = "No local changes to save";
 
-/// A stash's name as the original gives it (render.bundle.js getStashMessageOrDefault, en-us.json
-/// WorkInProgressOnBranchAbbr "WIP on {0}"; nodegit git_stash_save_with_opts 0x1802d3760 (message path 0x1802d3848) builds the same "WIP on %s"
-/// when no message is given): the typed message trimmed, else "WIP on <short branch>", or "WIP on (no branch)" when
+/// A stash's name: the typed message trimmed, else "WIP on <short branch>", or "WIP on (no branch)" when
 /// HEAD is detached.
 pub fn stash_message(message: &str, branch: &str) -> String {
     let typed = message.trim();
@@ -86,7 +84,7 @@ pub enum Action {
     FastForward { branch: String, to: String },
     SetUpstream { branch: String, upstream: String },
     StashRename { index: usize, message: String },
-    /// Background fetch of every remote (the original's auto-fetch), optionally pruning.
+    /// Background fetch of every remote (auto-fetch), optionally pruning.
     AutoFetch { prune: bool },
     FetchRemote { remote: String },
     RemoteEdit { name: String, new_name: String, url: String, push_url: String },
@@ -545,9 +543,7 @@ impl Engine {
                 done(self.job(repo, "push", dir, &["push", "--set-upstream", "--progress", &remote, &refspec]), &format!("Pushed {branch}"))
             }
             Action::Stash { message } => {
-                // Like the original's gitStashAllCriticalSection (render.bundle.js): stage everything (new files
-                // too), then `stash push` without --include-untracked, named by stash_message. See MECHANICS.md
-                // "Toolbar Stash and Pop".
+                // Stage everything (new files too), then `stash push` without --include-untracked, named by stash_message.
                 let add = self.git(dir, &["add", "-A"]);
                 if !add.ok {
                     return done(add, "");
@@ -555,7 +551,7 @@ impl Engine {
                 let branch = git::run(dir, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim().to_string();
                 let msg = stash_message(&message, &branch);
                 let o = self.git(dir, &["stash", "push", "-m", &msg]);
-                // The original throws when Git answers "No local changes to save" (nodegit: "there is nothing to stash.").
+                // A stash with no local changes is reported as an error, not as success.
                 if o.ok && o.stdout.trim() == STASH_NOTHING {
                     return ActionResult { ok: false, message: STASH_NOTHING.into() };
                 }
@@ -602,7 +598,7 @@ impl Engine {
             Action::SkipRebase => done(self.git(dir, &["rebase", "--skip"]), "Skipped commit"),
             Action::AutoFetch { prune } => {
                 let o = if prune { self.git(dir, &["fetch", "--all", "--prune", "--quiet"]) } else { self.git(dir, &["fetch", "--all", "--quiet"]) };
-                // Like the original: a failed background fetch only asks to fetch by hand.
+                // A failed background fetch only asks to fetch by hand.
                 if o.ok {
                     ActionResult { ok: true, message: String::new() }
                 } else {
@@ -735,7 +731,7 @@ impl Engine {
                 ActionResult { ok: true, message: format!("Created {} commits", commits.len()) }
             }
             Action::StashFiles { paths, message } => {
-                // libgit2 (nodegit.node 0x1802d3490) refuses the whole stash if any chosen file is unchanged.
+                // A stash is refused as a whole if any chosen file is unchanged.
                 for p in &paths {
                     if git::run(dir, &["status", "--porcelain", "--untracked-files=all", "--", p]).stdout.trim().is_empty() {
                         return ActionResult { ok: false, message: "cannot stash changes - one of the files does not have any changes to stash.".into() };
@@ -951,7 +947,7 @@ impl Engine {
     }
 
     fn discard(&self, repo: &str, dir: &Path, paths: Option<Vec<String>>) -> ActionResult {
-        // Like the original: keep an automatic stash so the discard can be undone.
+        // Keep an automatic stash so the discard can be undone.
         let mut a = vec!["stash", "push", "--include-untracked", "-m", "Auto stash before discard"];
         if let Some(p) = &paths {
             a.push("--");
@@ -1214,7 +1210,7 @@ mod tests {
     }
 
     #[test]
-    fn stash_names_follow_the_original() {
+    fn stash_names_follow_the_rules() {
         assert_eq!(stash_message("", "main"), "WIP on main");
         assert_eq!(stash_message("  fix later \n", "main"), "fix later");
         assert_eq!(stash_message("", ""), "WIP on (no branch)");
@@ -1258,7 +1254,7 @@ mod tests {
         // 3. A damaged local branch file: the rest of the history still shows.
         fs::write(d.join(".git/refs/heads/damaged"), "0000000000000000000000000000000000000001\n").unwrap();
         assert_eq!(git::load(&d, 100).commits.len(), 1, "damaged branch");
-        // 4. A tag of a tree (not a commit) is skipped like the original's GIT_EPEEL case; real refs stay.
+        // 4. A tag of a tree (not a commit) is skipped; real refs stay.
         assert!(git::run(&d, &["tag", "treetag", "HEAD^{tree}"]).ok);
         let walk = git::walkable_refs(&d);
         assert!(!walk.iter().any(|r| r == "refs/tags/treetag"), "{walk:?}");
@@ -1268,7 +1264,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_preview_and_actions_share_recovered_rename_rules() {
+    fn merge_preview_and_actions_share_rename_rules() {
         let d = temp_repo("merge-native-rules");
         let repo = d.to_string_lossy().to_string();
         let e = Engine::default();
@@ -1355,11 +1351,11 @@ mod tests {
         assert_eq!(git::load(&d, 100).stashes.len(), 1);
         assert!(git::status(&d).unstaged.is_empty());
         assert!(e.perform(&repo, Action::StashPop { index: 0 }).ok);
-        // The original stages everything before stashing, so a new file comes back staged (git stash pop re-adds it).
+        // Everything is staged before stashing, so a new file comes back staged (git stash pop re-adds it).
         let st = git::status(&d);
         assert_eq!(st.unstaged.len() + st.staged.len(), 1);
         assert_eq!(st.staged.len(), 1);
-        // With nothing to stash the original reports an error instead of success.
+        // With nothing to stash an error is reported instead of success.
         assert!(e.perform(&repo, Action::StageAll).ok);
         assert!(e.perform(&repo, Action::Stash { message: String::new() }).ok);
         let named = git::run(&d, &["stash", "list", "--format=%s"]).stdout;

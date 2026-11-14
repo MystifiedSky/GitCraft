@@ -1,5 +1,5 @@
 // Front-end logic tests (run with `npm test`): the merge tool's parser, the command palette's
-// fuzzy matching, shortcut parsing, the rebase todo order and the original's time format.
+// fuzzy matching, shortcut parsing, the rebase todo order and the relative time format.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "./lib/api";
 import { parseConflicts } from "./components/ConflictView";
@@ -56,7 +56,7 @@ describe("interactive rebase", () => {
   });
 });
 
-describe("time format (the original's timeSince)", () => {
+describe("time format (timeSince)", () => {
   const units = DEFAULT_METRICS.time_units;
   const now = 2_000_000_000;
   it("uses the first unit that fits, coloured by age", () => {
@@ -120,7 +120,7 @@ describe("sign-in problems", () => {
 });
 
 describe("conflict prevention rules", () => {
-  it("matches the original's base branch patterns", () => {
+  it("matches the base branch patterns", () => {
     expect(globMatch("origin/main", "origin/main")).toBe(true);
     expect(globMatch("origin/**", "origin/feature/x")).toBe(true);
     expect(globMatch("origin/feature/**", "origin/bugfix/x")).toBe(false);

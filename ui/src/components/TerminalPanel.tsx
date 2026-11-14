@@ -8,7 +8,7 @@ import "@xterm/xterm/css/xterm.css";
 import { useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 
-// Colours from the original's terminal theme (terminal__* in the dark theme file).
+// Terminal colours.
 const THEME = {
   background: "#000000",
   foreground: "#FFFFFF",

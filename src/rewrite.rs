@@ -1,14 +1,14 @@
 //! Stage 3: interactive rebase / cherry pick and merge-conflict information.
 //!
-//! Like the original (render.bundle.js), an interactive rebase writes its own todo list and points
+//! An interactive rebase writes its own todo list and points
 //! GIT_SEQUENCE_EDITOR at a small shell loop that copies that list over git's `git-rebase-todo`.
-//! The actions are the original's four: pick, reword, squash, drop.
+//! The actions are four: pick, reword, squash, drop.
 
 use crate::git::{self, Commit};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// The original's GIT_SEQUENCE_EDITOR: copy our todo file line by line into git's todo file.
+/// GIT_SEQUENCE_EDITOR: copy our todo file line by line into git's todo file.
 const SEQUENCE_EDITOR: &str = r#"while IFS= read -r line || [ -n "$line" ]; do printf '%s\n' "$line"; done < "$GITCRAFT_REBASE_TODO_PATH" >"#;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

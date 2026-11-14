@@ -26,7 +26,7 @@ const PLACEHOLDER: Record<string, string> = {
   workspace: "Search for a workspace to open",
 };
 
-/** Command palette (Ctrl+Shift+P) and its pickers, like the original's "Fuzzy Finder". */
+/** Command palette (Ctrl+Shift+P) and its pickers (the "Fuzzy Finder"). */
 export function CommandPalette() {
   const s = useStore();
   const mode = s.palette;

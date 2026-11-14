@@ -68,6 +68,25 @@ export interface Draft {
   amend: boolean;
 }
 
+/** One entry of the bell's menu. */
+export interface Notice {
+  id: number;
+  text: string;
+  at: number;
+  readAt: number | null;
+}
+export type NoticeFilter = "All" | "Read" | "Unread";
+
+/** Most notifications kept (an estimate). */
+export const NOTICE_LIMIT = 100;
+/** Unread = no readAt, Read = has readAt, All = everything. */
+export const noticeVisible = (n: Notice, f: NoticeFilter) => (f === "All" ? true : f === "Unread" ? !n.readAt : !!n.readAt);
+/** getUnreadNotificationCountString: unread notifications, "50+" from 50 on. */
+export const unreadCountString = (notices: Notice[]) => {
+  const n = notices.filter((x) => !x.readAt).length;
+  return n >= 50 ? "50+" : String(n);
+};
+
 export interface Toast {
   id: number;
   ok: boolean;
@@ -129,7 +148,7 @@ export interface Settings {
   hidden: Record<string, string[]>;
   solo: Record<string, string[]>;
   lazyLoad: boolean;
-  /** Minutes between background fetches (0 = off); the original's default is 1. */
+  /** Minutes between background fetches (0 = off); the default is 1. */
   autoFetchMin: number;
   autoPrune: boolean;
   /** "Default Branch Name" for new repositories. */
@@ -165,7 +184,7 @@ export interface Settings {
   ghostRefs: boolean;
   /** Self-managed GitLab host (empty = gitlab.com only). */
   gitlabHost: string;
-  // ---- Preferences screen (defaults: the original's getDefaultSettings in main.bundle.js) ----
+  // ---- Preferences screen ----
   /** General > Keep submodules up to date (autoUpdateSubmodules: true). */
   autoUpdateSubmodules: boolean;
   /** General > Delete ".orig" files after merging (deleteOrigAfterMerge: false). */
@@ -496,6 +515,17 @@ interface Store {
   drafts: Record<string, Draft>;
   settings: Settings;
   toasts: Toast[];
+  /** Notification center (the bell): failures stay here after their toast fades. Not saved between runs. */
+  notices: Notice[];
+  noticeFilter: NoticeFilter;
+  /** The bell menu is open (a clicked desktop notification opens it). */
+  noticeMenuOpen: boolean;
+  setNoticeMenuOpen: (open: boolean) => void;
+  setNoticeFilter: (f: NoticeFilter) => void;
+  markNotice: (id: number, read: boolean) => void;
+  /** "Mark all as read / unread": applies to the notifications the current filter shows. */
+  markAllNotices: (read: boolean) => void;
+  removeNotice: (id: number) => void;
   dialog: DialogState;
   busy: string | null;
   /** Running clone / fetch / pull / push with its latest progress line. */
@@ -538,6 +568,15 @@ export const useStore = create<Store>((set, get) => {
     drafts: {},
     settings: DEFAULT_SETTINGS,
     toasts: [],
+    notices: [],
+    noticeFilter: "All",
+    noticeMenuOpen: false,
+    setNoticeMenuOpen: (noticeMenuOpen) => set({ noticeMenuOpen }),
+    setNoticeFilter: (noticeFilter) => set({ noticeFilter }),
+    markNotice: (id, read) => set((s) => ({ notices: s.notices.map((n) => (n.id === id ? { ...n, readAt: read ? Date.now() : null } : n)) })),
+    markAllNotices: (read) =>
+      set((s) => ({ notices: s.notices.map((n) => (noticeVisible(n, s.noticeFilter) ? { ...n, readAt: read ? Date.now() : null } : n)) })),
+    removeNotice: (id) => set((s) => ({ notices: s.notices.filter((n) => n.id !== id) })),
     dialog: null,
     busy: null,
     job: null,
@@ -573,7 +612,7 @@ export const useStore = create<Store>((set, get) => {
       }
       const active = s.tabs.find((t) => t.id === s.activeId);
       const tab: Tab = { id: newId(), kind: "repo", path, title: s.settings.aliases?.[path] || name };
-      // Opening from a "New Tab" replaces it, like the original.
+      // Opening from a "New Tab" replaces it.
       if (active && active.kind === "start") {
         set({
           tabs: s.tabs.map((t) => (t.id === active.id ? tab : t)),
@@ -634,7 +673,10 @@ export const useStore = create<Store>((set, get) => {
     setSettings: (patch) => set((s) => ({ settings: { ...s.settings, ...patch } })),
     toast: (ok, text) => {
       const id = Date.now() + Math.random();
-      set((s) => ({ toasts: [...s.toasts.slice(-3), { id, ok, text }] }));
+      set((s) => {
+        const notices = ok ? s.notices : [...s.notices.slice(-(NOTICE_LIMIT - 1)), { id, text, at: Date.now(), readAt: null }];
+        return { toasts: [...s.toasts.slice(-3), { id, ok, text }], notices };
+      });
       setTimeout(() => get().dropToast(id), ok ? 3500 : 7000);
     },
     dropToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),

@@ -205,7 +205,7 @@ function OpenDialog({ onClose }: { onClose: () => void }) {
     await openRepoPath(p.trim());
   };
   useEffect(() => {
-    // Go straight to the system folder picker, like the original's Open Repo.
+    // Go straight to the system folder picker.
     api.pickFolder("Open a Git repository").then(async (r) => {
       if (r) {
         onClose();
@@ -981,7 +981,7 @@ function Check({ label, value, onChange }: { label: string; value: boolean; onCh
 export function Toasts() {
   const toasts = useStore((s) => s.toasts);
   const drop = useStore((s) => s.dropToast);
-  // UI Customization > Notification Location (the original's default: bottom left).
+  // UI Customization > Notification Location (default: bottom left).
   const where = useStore((s) => s.settings.notificationLocation) ?? "bottom-left";
   const pos = { "top-left": "left-3 top-[100px]", "top-right": "right-3 top-[100px]", "bottom-left": "left-3 bottom-9", "bottom-right": "right-3 bottom-9" }[where];
   return (
@@ -1007,7 +1007,7 @@ export function Toasts() {
   );
 }
 
-/** The original's "Copy error message to clipboard" on an error notice. */
+/** "Copy error message to clipboard" on an error notice. */
 function CopyErrorButton({ text }: { text: string }) {
   const [done, setDone] = useState(false);
   return (

@@ -630,7 +630,7 @@ fn clone_link(v: &Value, name: &str) -> String {
     list(v).iter().find(|l| l["name"] == name).map(|l| s(&l["href"])).unwrap_or_default()
 }
 
-/// "GitKraken will help you find stuff on {0} when cloning": your repositories on a connected service.
+/// Your repositories on a connected service, for finding a repository to clone.
 pub fn repositories(id: &str) -> Result<Vec<HostedRepo>, String> {
     let repo = |name: String, full_name: String, description: String, private: bool, https_url: String, ssh_url: String, updated: String| HostedRepo { name, full_name, description, private, https_url, ssh_url, updated };
     Ok(match id {

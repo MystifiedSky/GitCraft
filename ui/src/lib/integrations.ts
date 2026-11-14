@@ -2,6 +2,8 @@
 // GPG and credential helpers. Settings that change how Git runs are pushed to Rust whenever they change.
 import { invoke } from "@tauri-apps/api/core";
 import { invokeAi } from "./ai-connection";
+import { useQuery } from "@tanstack/react-query";
+import { queryClient } from "./repo";
 import { useStore, type AiSettings, type Settings } from "./store";
 
 export interface ServiceStatus {
@@ -39,7 +41,7 @@ export interface ServiceInfo {
   /** Can reuse the GitHub CLI's sign-in. */
   gh?: boolean;
   fields: ServiceField[];
-  /** Where to create a token (the original's generateTokenPath values), from the integration settings. */
+  /** Where to create a token, from the integration settings. */
   tokenUrl: (i: Settings["integrations"]) => string;
   tokenHelp: string;
   /** Needs these settings before connecting. */
@@ -48,7 +50,7 @@ export interface ServiceInfo {
 
 const host = (h: string) => h.trim().replace(/^https?:\/\//, "").replace(/\/$/, "");
 
-/** The original's integrations (render.bundle.js integrationInfo), in its order. */
+/** The supported integrations, in display order. */
 export const SERVICES: ServiceInfo[] = [
   {
     id: "github",
@@ -242,4 +244,22 @@ export function formatDate(d: Date, fmt: string, locale = "en-US"): string {
     start = close + 1;
   }
   return result + formatTokens(fmt.slice(start));
+}
+
+
+/** Services with a saved sign-in. Shared by the status bar ("Select an integration" when none) and File > Sign Out. */
+const SIGNED_IN_KEY = ["signedInServices"];
+const fetchSignedIn = () =>
+  integrations.statuses(SERVICES.filter((x) => x.kind === "hosting").map((x) => x.id)).then((all) => all.filter((x) => x.connected && !x.error));
+export function useSignedInServices() {
+  return useQuery({ queryKey: SIGNED_IN_KEY, queryFn: fetchSignedIn, staleTime: 5 * 60_000, retry: false });
+}
+
+/** Removes every saved service token (File > Sign Out). Returns how many were removed. */
+export async function signOutAll(): Promise<number> {
+  const connected = await queryClient.fetchQuery({ queryKey: SIGNED_IN_KEY, queryFn: fetchSignedIn, staleTime: 0 });
+  await Promise.all(connected.map((x) => integrations.setToken(x.id, "")));
+  queryClient.invalidateQueries({ queryKey: SIGNED_IN_KEY });
+  queryClient.invalidateQueries({ queryKey: ["integrationStatuses"] });
+  return connected.length;
 }

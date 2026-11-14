@@ -181,7 +181,7 @@ export function LeftPanel({ repo, tabId, onSelectSha }: { repo: RepoView | undef
                     ? [
                         { label: `Fetch ${rem}`, onSelect: () => act(repo.path, { type: "fetchRemote", remote: rem }) },
                         { label: `Edit ${rem}`, onSelect: () => editRemote(repo.path, rem) },
-                        // The original's "Open Remote: {0}" - the remote's page on its hosting site.
+                        // "Open Remote: {0}" - the remote's page on its hosting site.
                         { label: `Open Remote: ${rem}`, onSelect: () => openWebLink(repo.path, rem, { kind: "repo" }) },
                         { separator: true },
                         ...hideAllMenu(repo, refs, `${rem} branches`)(),
@@ -375,7 +375,7 @@ function Section({
   );
 }
 
-/** "Hide all <what>" / "Show all <what>" for a section's refs, like the original (the checked-out branch stays). */
+/** "Hide all <what>" / "Show all <what>" for a section's refs (the checked-out branch stays). */
 function hideAllMenu(repo: RepoView | undefined, refs: GitRef[], what: string): () => MenuEntry[] {
   return () => {
     if (!repo || refs.length === 0) return [];

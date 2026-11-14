@@ -1,5 +1,5 @@
 import { EDITORS } from "./prefs/GeneralSections";
-import { checkForUpdates, download, installAndRestart, RELEASES_URL, updateMenuLabel, useUpdates } from "@/lib/updates";
+import { checkForUpdates, download, installAndRestart, RELEASES_URL, updateMenuItems, useUpdates } from "@/lib/updates";
 import { hosting } from "@/lib/hosting";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Minus, Square, X } from "lucide-react";
@@ -7,6 +7,7 @@ import { DropMenu, type MenuEntry } from "./ui/menu";
 import { useStore } from "@/lib/store";
 import { api } from "@/lib/api";
 import { act } from "@/lib/repo";
+import { signOutAll } from "@/lib/integrations";
 import { MOD } from "@/lib/utils";
 import { resetZoom, stepZoom } from "@/lib/zoom";
 import { AppMark } from "./Icons";
@@ -57,7 +58,7 @@ export function MenuBar() {
   const up = useUpdates();
 
   const file: MenuEntry[] = [
-    // Same order as the original's File menu (reference picture 1).
+    // File menu order.
     { label: "New Tab", shortcut: `${MOD}+T`, onSelect: s.newTab },
     { label: "Close Tab", shortcut: `${MOD}+W`, onSelect: () => s.closeTab(s.activeId) },
     { label: "Reopen Closed Tab", shortcut: `${MOD}+Shift+T`, disabled: s.closed.length === 0, onSelect: s.reopenTab },
@@ -75,12 +76,19 @@ export function MenuBar() {
     { separator: true },
     { label: "Preferences...", shortcut: `${MOD}+,`, onSelect: () => s.setDialog({ kind: "prefs" }) },
     { separator: true },
+    // Update lines (only those that fit the current update state).
+    ...updateMenuItems(up).map((item) => ({
+      label: item.label,
+      disabled: item.disabled,
+      onSelect: () => (item.run === "install" ? installAndRestart() : item.run === "download" ? download() : item.run === "check" ? checkForUpdates(true) : undefined),
+    })),
     {
-      label: updateMenuLabel(up),
-      disabled: up.phase === "checking" || up.phase === "downloading",
-      onSelect: () => (up.phase === "ready" ? installAndRestart() : up.phase === "available" ? download() : checkForUpdates(true)),
+      // Sign out signs out at once and shows a "Successfully signed out" toast.
+      // GitCraft has no separate account, so signing out removes every saved service token.
+      label: "Sign Out",
+      onSelect: () => signOutAll().then(() => s.toast(true, "Successfully signed out"), (e) => s.toast(false, String(e))),
     },
-    { label: "Exit", onSelect: () => win().close() },
+    { label: "Exit", shortcut: "Alt+F4", onSelect: () => win().close() },
   ];
   const edit: MenuEntry[] = [
     { label: "Undo", shortcut: `${MOD}+Z`, disabled: !repoPath, onSelect: () => repoPath && act(repoPath, { type: "undo" }) },

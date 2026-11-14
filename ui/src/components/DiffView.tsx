@@ -35,7 +35,7 @@ export function sourceLabel(src: DiffSource, shaLen: number) {
   }
 }
 
-/** A file's changes, opened over the graph like the original: Hunk / Inline / Split diff, or File View. */
+/** A file's changes, opened over the graph: Hunk / Inline / Split diff, or File View. */
 export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: string; target: DiffTarget }) {
   const s = usePanelStore();
   const set = s.settings;
@@ -182,7 +182,7 @@ export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: strin
         <div className="flex-1 flex items-center gap-1.5 min-w-0">
           {editable && !editing && (
             <Button size="sm" variant="primary" className="h-[22px]" onClick={() => (setEditing(true), setView("file"))} title="Edit the working-folder copy of this file">
-              <Pencil size={12} /> Edit This File
+              <Pencil size={12} /> {target.source.kind === "Staged" ? "Edit in Working Directory" : "Edit This File"}
             </Button>
           )}
           {editing && (

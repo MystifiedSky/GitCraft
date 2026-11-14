@@ -21,8 +21,9 @@ import {
   Type,
   Users,
   Wrench,
-  X,
+  ArrowLeft,
   ArrowLeftRight,
+  Folder,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { api } from "@/lib/api";
@@ -36,7 +37,7 @@ import { H, Row, Text } from "./controls";
 
 type Item = { id: string; label: string; icon: ReactNode; render: (path: string) => ReactNode };
 
-/** The original's Preferences tabs (render.bundle.js labelAndIconByTabType). */
+/** The Preferences tabs. */
 const GENERAL: Item[] = [
   { id: "general", label: "General", icon: <Cog size={15} />, render: () => <GeneralSection /> },
   { id: "profiles", label: "Profiles", icon: <Users size={15} />, render: () => <ProfilesSection /> },
@@ -65,7 +66,7 @@ const REPO: Item[] = [
   { id: "submodules", label: "Submodules", icon: <Layers size={15} />, render: (p) => <SubmodulesSection path={p} /> },
 ];
 
-/** Full-window Preferences, like the original: section list on the left, the section on the right. */
+/** Full-window Preferences: section list on the left, the section on the right. */
 export function PreferencesScreen({ onClose, section }: { onClose: () => void; section?: string }) {
   const s = useStore();
   const tab = s.tabs.find((t) => t.id === s.activeId);
@@ -81,13 +82,21 @@ export function PreferencesScreen({ onClose, section }: { onClose: () => void; s
   return (
     <section aria-label="Preferences" className="fixed left-0 right-0 top-[56px] bottom-0 z-[45] flex bg-app">
       <div className="w-[250px] shrink-0 bg-panel border-r border-black/30 overflow-y-auto pb-4">
-        <div className="flex items-center h-[48px] px-4 text-[16px] font-semibold text-white">Preferences</div>
+        <button title="Exit Preferences (Esc)" onClick={onClose} className="w-full flex items-center gap-2 h-[40px] px-3 text-[15px] text-white hover:bg-hoverrow text-left">
+          <ArrowLeft size={16} /> Exit Preferences
+        </button>
+        <div className="px-3 pt-1 pb-1 text-[12px] text-fg2">Current profile</div>
+        <div className="flex items-center gap-2 h-[32px] px-4 bg-white/[0.04] text-[13px] text-white">
+          <Users size={15} className="text-white/70" />
+          <span className="truncate">{s.profiles.find((x) => x.id === s.activeProfile)?.name ?? "Default Profile"}</span>
+        </div>
+        <div className="px-3 pt-4 pb-1 text-[12px] text-fg2">Preferences</div>
         {GENERAL.map(nav)}
         {path && (
           <>
-            <div className="px-4 pt-5 pb-1 text-[11px] font-semibold tracking-wider text-fg3">REPO-SPECIFIC PREFERENCES</div>
-            <div className="px-4 pb-1 text-[12px] text-fg2 truncate" title={path}>
-              Repo: {tab?.title ?? path.split(/[\\/]/).pop()}
+            <div className="px-3 pt-5 pb-1 text-[12px] text-fg2">Repo-Specific Preferences</div>
+            <div className="px-3 pb-1 text-[12px] text-fg2 truncate flex items-center gap-1.5" title={path}>
+              <Folder size={12} /> Repo:{tab?.title ?? path.split(/[\\/]/).pop()}
             </div>
             {REPO.map(nav)}
           </>
@@ -96,9 +105,6 @@ export function PreferencesScreen({ onClose, section }: { onClose: () => void; s
       <div className="flex-1 min-w-0 overflow-y-auto">
         <div className="max-w-[1000px] px-8 py-6">{item.render(path)}</div>
       </div>
-      <button title="Exit Preferences (Esc)" onClick={onClose} className="absolute top-3 right-4 h-[30px] px-3 rounded-[3px] border border-white/10 bg-white/[0.06] text-[12.5px] text-fg hover:bg-white/10 flex items-center gap-1.5">
-        <X size={14} /> Exit Preferences
-      </button>
     </section>
   );
 }

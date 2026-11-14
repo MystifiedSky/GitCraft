@@ -30,7 +30,7 @@ describe("automatic GitCraft updates", () => {
     vi.useRealTimers();
   });
 
-  it("checks at launch by default, then hourly, and cancels the schedule on cleanup", async () => {
+  it("checks at launch by default, then every 10 hours, and cancels the schedule on cleanup", async () => {
     expect(useStore.getState().settings.autoUpdate).toBe(true);
     stop = updates.startUpdateChecks();
     await vi.advanceTimersByTimeAsync(0);
@@ -99,5 +99,23 @@ describe("automatic GitCraft updates", () => {
     await Promise.all([updates.checkForUpdates(false), updates.checkForUpdates(true)]);
     expect(mocks.invoke).toHaveBeenCalledTimes(1);
     expect(mocks.check).toHaveBeenCalledTimes(1);
+  });
+
+  it("checks every 10 hours", () => {
+    expect(updates.CHECK_EVERY_MS).toBe(36_000_000);
+  });
+
+  it("shows the update menu lines for each state, with 'Last checked' cleared by a failure", () => {
+    const now = 1_800_000_000_000;
+    const base = { version: null, lastChecked: null, errorAt: null };
+    const labels = (state: Parameters<typeof updates.updateMenuItems>[0]) => updates.updateMenuItems(state, now).map((i) => i.label);
+    expect(labels({ ...base, phase: "idle" })).toEqual(["Check for Update"]);
+    expect(labels({ ...base, phase: "none", lastChecked: now - 5_000 })).toEqual(["Check for Update (Last checked a few seconds ago)"]);
+    expect(labels({ ...base, phase: "checking" })).toEqual(["Checking for updates..."]);
+    expect(labels({ ...base, phase: "downloading" })).toEqual(["Downloading Update..."]);
+    expect(labels({ ...base, phase: "ready" })).toEqual(["Restart and Install Update"]);
+    expect(labels({ ...base, phase: "available", version: "0.2.0" })).toEqual(["Update available (0.2.0)"]);
+    expect(labels({ ...base, phase: "error", errorAt: now - 120_000 })).toEqual(["Check for Update", "Update Errored (2 minutes ago)"]);
+    expect(updates.updateMenuItems({ ...base, phase: "error", errorAt: now }, now).map((i) => i.disabled)).toEqual([false, true]);
   });
 });

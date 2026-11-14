@@ -422,7 +422,7 @@ fn open_url(url: String) -> Result<(), String> {
     if !(url.starts_with("https://") || url.starts_with("http://")) {
         return Err("Only web links can be opened".into());
     }
-    // The original's shell.openExternal (gitkraken.exe FUN_140466fb0): ShellExecuteExW "open".
+    // Open a web link with the system: ShellExecuteExW "open".
     shell::open_external(&url)
 }
 
@@ -691,15 +691,15 @@ fn open_terminal(path: String, tool: Option<String>, exe: Option<String>, args: 
 
 #[tauri::command]
 fn open_file_manager(path: String) -> Result<(), String> {
-    // A folder opens with the "explore" verb, like the original's shell.openPath (gitkraken.exe FUN_140466d50).
+    // A folder opens with the "explore" verb.
     shell::open_path(Path::new(&path))
 }
 
-/// File menu "Open file in default program" (the original's label): the system opens it with its usual app.
+/// File menu "Open file in default program": the system opens it with its usual app.
 #[tauri::command]
 fn open_default(path: String, file: String) -> Result<(), String> {
     let p = files::repo_file(Path::new(&path), &file)?;
-    // The original's shell.openPath (gitkraken.exe FUN_140466d50): default action, "Failed to open path" on failure.
+    // Default action; "Failed to open path" on failure.
     if !p.exists() {
         return Err(shell::OPEN_PATH_FAILED.into());
     }
@@ -710,8 +710,8 @@ fn open_default(path: String, file: String) -> Result<(), String> {
 #[tauri::command]
 fn reveal_file(path: String, file: String) -> Result<(), String> {
     let p = files::repo_file(Path::new(&path), &file)?;
-    // The original's shell.showItemInFolder (gitkraken.exe FUN_140466720: SHOpenFolderAndSelectItems). For a file
-    // that is gone the original does nothing; GitCraft opens the folder it was in instead (MECHANICS.md).
+    // Opens the folder with the file selected (SHOpenFolderAndSelectItems). For a file
+    // that is gone, GitCraft opens the folder it was in instead.
     if !p.exists() {
         return shell::open_path(p.parent().unwrap_or(Path::new(&path)));
     }

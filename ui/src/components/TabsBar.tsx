@@ -1,4 +1,4 @@
-import { Bell, ChevronDown, Folder, GitBranch, Plus, Rocket, Settings, X } from "lucide-react";
+import { ChevronDown, Folder, GitBranch, Plus, Rocket, Settings, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useStore, usePanelStore } from "@/lib/store";
 import { DropMenu, type MenuEntry } from "./ui/menu";
@@ -6,19 +6,20 @@ import { CtxMenu } from "./ui/menu";
 import { ProfileMark } from "./Icons";
 import { switchProfile } from "@/lib/prefs";
 import { cn, MOD } from "@/lib/utils";
+import { NotificationMenu } from "./NotificationMenu";
 
 const DEFAULT_TAB_WIDTH = 97;
 const MIN_TAB_WIDTH = 76;
 const MAX_TAB_WIDTH = 480;
 const tabWidth = (value: number = DEFAULT_TAB_WIDTH) => Number.isFinite(value) ? Math.max(MIN_TAB_WIDTH, Math.min(MAX_TAB_WIDTH, value)) : DEFAULT_TAB_WIDTH;
 
-/** Tab dragging, from the original's tab bar: ReorderableList.Root({activationDistance: 20, axis: "x"}) - the drag
- *  starts after 20 px along the row; the dragged tab is drawn at half opacity with a grabbing cursor
- *  (ReorderableListItem: opacity isDragging ? .5 : 1, cursor grabbing). Tabs that make room slide over in 250 ms
+/** Tab dragging: the drag
+ *  starts after 20 px along the row; the dragged tab is drawn at half opacity with a grabbing cursor.
+ *  Tabs that make room slide over in 250 ms
  *  (the sortable library's default transition, `transform 250ms ease`). */
 const TAB_DRAG_START = 20;
 const TAB_DRAG_OPACITY = 0.5;
-/** Within this distance of the strip's edge a drag scrolls the strip (GitCraft's choice; the original's list autoscrolls too). */
+/** Within this distance of the strip's edge a drag scrolls the strip (GitCraft's choice). */
 const TAB_DRAG_EDGE = 32;
 
 /** Slide a tab from `fromX` px away into its place, metrics.tab_slide_ms (src/metrics.rs TAB_SLIDE_TIME_MS) long with an ease curve. */
@@ -32,7 +33,7 @@ function slideTab(el: HTMLElement, fromX: number) {
 
 type TabDrag = { id: string; pointerId: number; startX: number; originLeft: number; dx: number; active: boolean; scale: number; order: string[] };
 
-/** Repository tabs, like the original's tab strip. */
+/** Repository tabs. */
 export function TabsBar() {
   const s = usePanelStore();
   const strip = useRef<HTMLDivElement>(null);
@@ -155,7 +156,6 @@ export function TabsBar() {
     ...s.tabs.map((t) => ({ label: t.title, onSelect: () => s.setActive(t.id) })),
     ...(s.closed.length ? [{ separator: true }, { heading: "Closed Recently" }, ...s.closed.slice().reverse().map((t) => ({ label: t.title, onSelect: () => s.openRepoTab(t.path!, t.title) }))] : []),
   ];
-  const notifications: MenuEntry[] = [{ heading: "Notifications" }, { label: "You're all caught up", disabled: true }];
 
   return (
     <div className="h-[30px] bg-tabs flex items-stretch shrink-0 border-b border-black/30">
@@ -264,15 +264,7 @@ export function TabsBar() {
           </button>
         }
       />
-      <DropMenu
-        align="end"
-        items={notifications}
-        trigger={
-          <button className="w-[33px] shrink-0 flex items-center justify-center text-white/80 hover:text-white outline-none" title="Notifications">
-            <Bell size={15} />
-          </button>
-        }
-      />
+      <NotificationMenu />
       <IconTab title="Preferences" onClick={() => s.setDialog({ kind: "prefs" })}>
         <Settings size={15} />
       </IconTab>

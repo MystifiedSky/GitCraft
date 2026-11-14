@@ -1,4 +1,5 @@
 import { Eye, EyeOff, MessageSquare, Network, Settings2, X, ChevronUp, ChevronDown, Loader2 } from "lucide-react";
+import { assignTimeline, showsTimeline, TIMELINE_REFRESH_MS } from "@/lib/timeline";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Commit, GitRef, RepoView, Stats } from "@/lib/api";
 import { api } from "@/lib/api";
@@ -19,7 +20,7 @@ interface Props {
 type Extra = "author" | "date" | "sha" | "changes";
 
 export function GraphView({ repo, tabId }: Props) {
-  // Sizes from the original's graph constants (src/metrics.rs, MECHANICS.md).
+  // Sizes from the graph constants (src/metrics.rs).
   const m = useStore((s) => s.metrics);
   const cols = useStore((s) => s.settings.columns) ?? DEFAULT_COLUMNS;
   const lazyLoad = useStore((s) => s.settings.lazyLoad);
@@ -83,6 +84,13 @@ export function GraphView({ repo, tabId }: Props) {
 
   // Search (Ctrl+F)
   const q = ui.search.trim().toLowerCase();
+  // Date lines ("20 hours ago", "yesterday") between rows, rebuilt every 15 minutes.
+  const [timelineNow, setTimelineNow] = useState(() => new Date());
+  useEffect(() => {
+    const id = setInterval(() => setTimelineNow(new Date()), TIMELINE_REFRESH_MS);
+    return () => clearInterval(id);
+  }, []);
+  const timelines = useMemo(() => assignTimeline(repo.commits.map((c) => c.time * 1000), timelineNow), [repo.commits, timelineNow]);
   const matches = useMemo(() => {
     if (!q) return [] as number[];
     const out: number[] = [];
@@ -348,7 +356,7 @@ export function GraphView({ repo, tabId }: Props) {
         >
           <button type="button" aria-label="Select working changes" aria-pressed={sel} className="absolute inset-0 focus-visible:outline focus-visible:-outline-offset-2 focus-visible:outline-accent" onClick={() => select({ type: "wip" })} />
           <div style={{ width: refW + graphW }} className="shrink-0" />
-          {/* The original's WorkDirMessageInput: a "// WIP" box to type the commit summary in, sized to its text,
+          {/* A "// WIP" box to type the commit summary in, sized to its text,
               with the change counts beside it (not inside it). */}
           <div className="flex-1 min-w-0 flex items-center gap-[10px] mr-[4px] text-[13px]" style={{ height: m.row_inner, paddingLeft: m.summary_margin }}>
             <WipInput path={repo.path} onFocus={() => select({ type: "wip" })} />
@@ -397,6 +405,7 @@ export function GraphView({ repo, tabId }: Props) {
         hovered={hoverRow === i}
         onHoverRow={setHoverRow}
         rowH={ROW}
+        timeline={showsTimeline(d, cols.date, q.length > 0) ? timelines.get(i) : undefined}
         showDesc={cols.description}
         stats={stats.get(c.sha)}
         onClick={clickCommit}
@@ -548,6 +557,7 @@ function CommitRow({
   onHoverRow,
   hovered,
   rowH,
+  timeline,
   showDesc,
   stats,
   onClick,
@@ -571,6 +581,8 @@ function CommitRow({
   hovered: boolean;
   onHoverRow: (i: number | null) => void;
   rowH: number;
+  /** The timeline entry for this row ("yesterday"): a line along the row's top edge with a label at its right end. */
+  timeline?: string;
   showDesc: boolean;
   stats: Stats | undefined;
   onClick: (c: Commit, i: number, e: React.MouseEvent) => void;
@@ -595,6 +607,17 @@ function CommitRow({
           if (!bg) e.currentTarget.style.background = "";
         }}
       >
+        {timeline && (
+          <>
+            <div className="absolute left-0 right-0 top-0 h-0 border-t border-line pointer-events-none" aria-hidden />
+            <span
+              className="absolute right-0 -top-[8px] z-[3] px-[6px] pb-px rounded-[2px] bg-panel text-fg2 text-[10px] leading-[13px] whitespace-nowrap pointer-events-none"
+              data-timeline={timeline}
+            >
+              {timeline}
+            </span>
+          </>
+        )}
         <button
           type="button"
           aria-label={c.summary}
@@ -710,15 +733,15 @@ function StateBanner({ repo }: { repo: RepoView }) {
   );
 }
 
-/** Extra width beside the typed text: work-dir-input wrapper = text width + 35 px (render.bundle.js). */
+/** Extra width beside the typed text: the input wrapper is the text width + 35 px. */
 const WIP_INPUT_PAD = 35;
-/** gitkraken-components styles.css .work-dir-input{min-width:100px; max-width:calc(100% - 75px)}, input height 22px. */
+/** .work-dir-input{min-width:100px; max-width:calc(100% - 75px)}, input height 22px. */
 const WIP_INPUT_MIN = 100;
 const WIP_INPUT_HEIGHT = 22;
 
 /**
  * The "// WIP" row's box: types the commit summary (the same text as the Commit panel's summary), grows with the text
- * like the original, Ctrl+Enter commits (the app's shortcut), and other keys stay in the box.
+ * Ctrl+Enter commits (the app's shortcut), and other keys stay in the box.
  */
 function WipInput({ path, onFocus }: { path: string; onFocus: () => void }) {
   const summary = useStore((s) => s.drafts[path]?.summary ?? "");
