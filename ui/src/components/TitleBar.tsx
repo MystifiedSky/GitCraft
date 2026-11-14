@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { EDITORS } from "./prefs/GeneralSections";
 import { checkForUpdates, download, installAndRestart, RELEASES_URL, updateMenuItems, useUpdates } from "@/lib/updates";
 import { hosting } from "@/lib/hosting";
@@ -51,7 +52,7 @@ function WinButton({ children, onClick, label, danger }: { children: React.React
 }
 
 export function MenuBar() {
-  const s = useStore();
+  const s = useStore(useShallow((s) => ({ tabs: s.tabs, activeId: s.activeId, settings: s.settings, closed: s.closed, closeTab: s.closeTab, newTab: s.newTab, reopenTab: s.reopenTab, setDialog: s.setDialog, setPalette: s.setPalette, setSettings: s.setSettings, toast: s.toast })));
   const tab = s.tabs.find((t) => t.id === s.activeId);
   const repoPath = tab?.kind === "repo" ? tab.path : undefined;
   const set = s.settings;

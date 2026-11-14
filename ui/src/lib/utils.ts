@@ -9,16 +9,16 @@ export function cn(...inputs: ClassValue[]) {
 
 /** The 10 graph lane colours of the dark theme. */
 export const GRAPH_COLORS = [
-  "#15a0bf",
-  "#0669f7",
-  "#8e00c2",
-  "#c517b6",
-  "#d90171",
-  "#cd0101",
-  "#f25d2e",
-  "#f2ca33",
-  "#7bd938",
-  "#2ece9d",
+  "#23adc1",
+  "#568fdf",
+  "#ab78cf",
+  "#c57bb7",
+  "#d77c9b",
+  "#d47777",
+  "#dc996b",
+  "#d5bc6d",
+  "#91b879",
+  "#67b6a3",
 ];
 
 export function laneColor(i: number) {

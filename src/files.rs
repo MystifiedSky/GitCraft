@@ -25,8 +25,36 @@ pub fn contents(dir: &Path, rev: &str, file: &str) -> Option<Vec<u8>> {
     run_bytes(dir, &["show", &spec])
 }
 
+/// Automatic previews are bounded before bytes cross the desktop bridge.
+pub const PREVIEW_MAX: usize = 2 * 1024 * 1024;
+pub const LARGE_PREVIEW_MAX: usize = 20 * 1024 * 1024;
+
+fn preview_contents(dir: &Path, rev: &str, file: &str, limit: usize) -> Result<Option<Vec<u8>>, ()> {
+    use std::io::Read;
+    if rev == WORKDIR {
+        let Ok(input) = std::fs::File::open(dir.join(file)) else { return Ok(None) };
+        if input.metadata().map(|m| m.len() > limit as u64).unwrap_or(false) { return Err(()) }
+        let mut bytes = Vec::new();
+        if input.take(limit as u64 + 1).read_to_end(&mut bytes).is_err() { return Ok(None) }
+        return if bytes.len() > limit { Err(()) } else { Ok(Some(bytes)) };
+    }
+    let spec = if rev == ":" { format!(":{file}") } else { format!("{rev}:{file}") };
+    let size = run(dir, &["cat-file", "-s", &spec]);
+    if !size.ok { return Ok(None) }
+    if size.stdout.trim().parse::<u64>().map(|n| n > limit as u64).unwrap_or(true) { return Err(()) }
+    let Ok(mut child) = git::git_cmd(dir).args(["show", &spec])
+        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn() else { return Ok(None) };
+    let mut bytes = Vec::new();
+    let read = child.stdout.take().unwrap().take(limit as u64 + 1).read_to_end(&mut bytes);
+    if bytes.len() > limit || read.is_err() { let _ = child.kill(); }
+    let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+    if bytes.len() > limit { Err(()) } else if ok && read.is_ok() { Ok(Some(bytes)) } else { Ok(None) }
+}
+
 #[derive(Serialize, Default)]
 pub struct FileVersions {
+    pub too_large: bool,
+    pub preview_limit: usize,
     pub old: Option<String>,
     pub new: Option<String>,
     pub binary: bool,
@@ -94,10 +122,19 @@ pub fn sides(src: &DiffSource, parent: Option<&str>) -> (Option<String>, String)
     }
 }
 
+#[cfg(test)]
 pub fn versions(dir: &Path, src: &DiffSource, file: &str, parent: Option<&str>, untracked: bool) -> FileVersions {
+    versions_with_limit(dir, src, file, parent, untracked, false)
+}
+
+pub fn versions_with_limit(dir: &Path, src: &DiffSource, file: &str, parent: Option<&str>, untracked: bool, allow_large: bool) -> FileVersions {
+    let limit = if allow_large { LARGE_PREVIEW_MAX } else { PREVIEW_MAX };
     let (old_rev, new_rev) = sides(src, parent);
-    let old = if untracked { None } else { old_rev.as_deref().and_then(|r| contents(dir, r, file)) };
-    let new = contents(dir, &new_rev, file);
+    let old = if untracked { Ok(None) } else { old_rev.as_deref().map(|r| preview_contents(dir, r, file, limit)).unwrap_or(Ok(None)) };
+    let new = preview_contents(dir, &new_rev, file, limit);
+    let (Ok(old), Ok(new)) = (old, new) else {
+        return FileVersions { too_large: true, preview_limit: limit, ..Default::default() };
+    };
     let mut v = FileVersions { encoding: "UTF-8".into(), editable: new_rev == WORKDIR, ..Default::default() };
     if let Some(mime) = mime_of(file) {
         let enc = |b: &Vec<u8>| format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(b));
@@ -680,5 +717,39 @@ mod file_action_tests {
     fn repo_file_uses_only_backslashes_on_windows() {
         let p = repo_file(Path::new(r"C:\repo"), "src/ui/main.rs").unwrap();
         assert_eq!(p.to_string_lossy(), r"C:\repo\src\ui\main.rs");
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+    #[test]
+    fn oversized_working_files_require_an_explicit_preview_and_keep_small_sides() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("large.txt");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(PREVIEW_MAX as u64 + 1).unwrap();
+        let src = DiffSource::Unstaged;
+        let preview = versions_with_limit(dir.path(), &src, "large.txt", None, true, false);
+        assert!(preview.too_large);
+        assert!(preview.new.is_none());
+        assert!(!preview.editable);
+        assert!(preview_contents(dir.path(), WORKDIR, "large.txt", LARGE_PREVIEW_MAX).unwrap().is_some());
+        file.set_len(LARGE_PREVIEW_MAX as u64 + 1).unwrap();
+        assert!(versions_with_limit(dir.path(), &src, "large.txt", None, true, true).too_large);
+        std::fs::write(&path, "small file").unwrap();
+        let small = versions_with_limit(dir.path(), &src, "large.txt", None, true, false);
+        assert!(!small.too_large);
+        assert_eq!(small.new.as_deref(), Some("small file"));
+    }
+
+    #[test]
+    fn oversized_git_blobs_are_rejected_before_previewing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(run(dir.path(), &["init"]).ok);
+        std::fs::write(dir.path().join("large.txt"), vec![b'x'; PREVIEW_MAX + 1]).unwrap();
+        assert!(run(dir.path(), &["add", "large.txt"]).ok);
+        assert!(preview_contents(dir.path(), ":", "large.txt", PREVIEW_MAX).is_err());
+        assert_eq!(preview_contents(dir.path(), ":", "large.txt", LARGE_PREVIEW_MAX).unwrap().unwrap().len(), PREVIEW_MAX + 1);
     }
 }

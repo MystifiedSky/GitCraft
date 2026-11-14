@@ -66,6 +66,8 @@ pub struct Worktree {
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct RepoData {
+    #[serde(skip)]
+    pub history_revs: Vec<String>,
     pub commits: Vec<Commit>,
     pub refs: Vec<GitRef>,
     pub stashes: Vec<Stash>,
@@ -319,7 +321,14 @@ pub fn load_view(dir: &Path, max_commits: usize, view: &RefView) -> RepoData {
     // History, newest first, every branch.
     // One more than asked for tells us whether there is more history to load.
     let n = format!("-n{}", max_commits + 1);
-    let revs = log_revs(view);
+    let requested_revs = log_revs(view);
+    let mut resolve_args = vec!["rev-parse", "--revs-only"];
+    resolve_args.extend(requested_revs.iter().map(String::as_str));
+    let resolved = run(dir, &resolve_args);
+    let revs: Vec<String> = if resolved.ok {
+        resolved.stdout.lines().map(str::to_owned).collect()
+    } else { requested_revs };
+    d.history_revs = revs.clone();
     let mut log_args: Vec<&str> = vec!["log"];
     log_args.extend(revs.iter().map(|s| s.as_str()));
     log_args.extend(["--date-order", n.as_str(), "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%s%x1f%b%x1e", "--"]);
@@ -342,7 +351,7 @@ pub fn load_view(dir: &Path, max_commits: usize, view: &RefView) -> RepoData {
         });
         let head = s.spawn(|| run(dir, &["symbolic-ref", "--short", "-q", "HEAD"]));
         let head_sha = s.spawn(|| run(dir, &["rev-parse", "HEAD"]));
-        let log = s.spawn(|| run(dir, &log_args));
+        let log = s.spawn(|| if resolved.ok { history_log(dir, &revs, 0, max_commits) } else { run(dir, &log_args) });
         let st = s.spawn(|| run(dir, &["stash", "list", "--format=%H%x1f%gs"]));
         let wt = s.spawn(|| run(dir, &["worktree", "list", "--porcelain"]));
         let sm = s.spawn(|| run(dir, &["config", "--file", ".gitmodules", "--get-regexp", "path"]));
@@ -403,29 +412,15 @@ pub fn load_view(dir: &Path, max_commits: usize, view: &RefView) -> RepoData {
             let mut args: Vec<&str> = vec!["log"];
             args.extend(start.iter().map(|s| s.as_str()));
             args.extend(["--date-order", n.as_str(), "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%s%x1f%b%x1e", "--"]);
-            run(dir, &args)
+            let result = run(dir, &args);
+            let mut resolve = vec!["rev-parse", "--revs-only"];
+            resolve.extend(start.iter().map(String::as_str));
+            d.history_revs = run(dir, &resolve).stdout.lines().map(str::to_owned).collect();
+            result
         }
     };
 
-    for rec in log.stdout.split('\x1e') {
-        let rec = rec.trim_start_matches(['\n', '\r']);
-        if rec.is_empty() {
-            continue;
-        }
-        let f: Vec<&str> = rec.splitn(7, '\x1f').collect();
-        if f.len() < 7 {
-            continue;
-        }
-        d.commits.push(Commit {
-            sha: f[0].to_string(),
-            parents: f[1].split_whitespace().map(|s| s.to_string()).collect(),
-            author: f[2].to_string(),
-            email: f[3].to_string(),
-            time: f[4].parse().unwrap_or(0),
-            summary: f[5].to_string(),
-            body: f[6].trim().to_string(),
-        });
-    }
+    d.commits = parse_commits(&log.stdout);
     if d.commits.len() > max_commits {
         d.commits.truncate(max_commits);
         d.has_more = true;
@@ -727,4 +722,86 @@ pub fn last_commit_message(dir: &Path) -> (String, String) {
 
 pub fn repo_name(path: &Path) -> String {
     path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string())
+}
+
+/// Parse both initial history and subsequent pages identically.
+pub fn parse_commits(text: &str) -> Vec<Commit> {
+    let mut commits = Vec::new();
+    for rec in text.split('\x1e') {
+        let rec = rec.trim_start_matches(['\n', '\r']);
+        if rec.is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = rec.splitn(7, '\x1f').collect();
+        if f.len() < 7 {
+            continue;
+        }
+        commits.push(Commit {
+            sha: f[0].to_string(),
+            parents: f[1].split_whitespace().map(|s| s.to_string()).collect(),
+            author: f[2].to_string(),
+            email: f[3].to_string(),
+            time: f[4].parse().unwrap_or(0),
+            summary: f[5].to_string(),
+            body: f[6].trim().to_string(),
+        });
+    }
+    commits
+}
+
+fn history_log(dir: &Path, revs: &[String], offset: usize, max: usize) -> GitOut {
+    use std::io::Write;
+    // Stdin avoids the Windows command-line limit for repositories with many branch/tag tips.
+    let child = git_cmd(dir).args(["log", "--stdin", "--date-order", &format!("--skip={offset}"), &format!("-n{}", max + 1),
+        "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%s%x1f%b%x1e", "--"])
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn();
+    let mut child = match child { Ok(child) => child, Err(e) => return GitOut::failed(&e.to_string()) };
+    let input = revs.join("\n") + "\n";
+    let writer = child.stdin.take().map(|mut stdin| std::thread::spawn(move || stdin.write_all(input.as_bytes())));
+    let output = child.wait_with_output();
+    if let Some(writer) = writer { let _ = writer.join(); }
+    match output {
+        Ok(output) => GitOut { ok: output.status.success(), stdout: String::from_utf8_lossy(&output.stdout).into_owned(), stderr: String::from_utf8_lossy(&output.stderr).into_owned() },
+        Err(e) => GitOut::failed(&e.to_string()),
+    }
+}
+
+pub fn history_page(dir: &Path, revs: &[String], offset: usize, max: usize) -> Result<(Vec<Commit>, bool), String> {
+    if revs.is_empty() || revs.iter().any(|r| !matches!(r.len(), 40 | 64) || !r.bytes().all(|b| b.is_ascii_hexdigit())) {
+        return Err("History changed; reload the repository to continue.".into());
+    }
+    let output = history_log(dir, revs, offset, max);
+    if !output.ok { return Err(output.message()); }
+    let mut commits = parse_commits(&output.stdout);
+    let has_more = commits.len() > max;
+    commits.truncate(max);
+    Ok((commits, has_more))
+}
+
+#[cfg(test)]
+mod paging_tests {
+    use super::*;
+    #[test]
+    fn history_pages_keep_their_snapshot_when_a_branch_moves() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        assert!(run(dir, &["init", "-b", "main"]).ok);
+        assert!(run(dir, &["config", "user.name", "Test"]).ok);
+        assert!(run(dir, &["config", "user.email", "test@example.com"]).ok);
+        for name in ["one", "two", "three", "four"] {
+            assert!(run(dir, &["commit", "--allow-empty", "-m", name]).ok);
+        }
+        let original = load_view(dir, 2, &RefView::default());
+        assert!(original.has_more);
+        let all = load_view(dir, 20, &RefView::default());
+        assert!(run(dir, &["commit", "--allow-empty", "-m", "new tip"]).ok);
+        let (page, more) = history_page(dir, &original.history_revs, 2, 2).unwrap();
+        assert!(!more);
+        let many_tips = vec![original.history_revs[0].clone(); 1000];
+        let (many, _) = history_page(dir, &many_tips, 0, 2).unwrap();
+        assert_eq!(many[0].sha, original.commits[0].sha);
+        let actual: Vec<_> = original.commits.iter().chain(page.iter()).map(|c| &c.sha).collect();
+        assert_eq!(actual, all.commits.iter().map(|c| &c.sha).collect::<Vec<_>>());
+        assert!(history_page(dir, &["--all".into()], 0, 2).is_err());
+    }
 }

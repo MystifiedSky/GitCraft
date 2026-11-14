@@ -1,11 +1,12 @@
+import { groupCommitRefs, type RefGroup } from "@/lib/commit-refs";
 import { Check, ChevronDown, Cloud, Laptop, Tag } from "lucide-react";
-import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { GitRef, RepoView } from "@/lib/api";
 import { act } from "@/lib/repo";
 import { branchMenu } from "@/lib/menus";
 import { useStore } from "@/lib/store";
-import { cn, mix } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import { CtxMenu } from "./ui/menu";
 
 interface Props {
@@ -14,13 +15,12 @@ interface Props {
   color: string;
   hovered: boolean;
   selected: boolean;
-  roomy: boolean;
   onSelect: (e: React.MouseEvent) => void;
   onHover: (active: boolean) => void;
 }
 
 /** Expand grouped refs into a colored label stack, outside the virtual scroller. */
-export function CommitRefs({ repo, refs, color, hovered, selected, roomy, onSelect, onHover }: Props) {
+export function CommitRefs({ repo, refs, color, hovered, selected, onSelect, onHover }: Props) {
   const m = useStore((s) => s.metrics);
   const id = useId();
   const anchor = useRef<HTMLButtonElement>(null);
@@ -30,12 +30,17 @@ export function CommitRefs({ repo, refs, color, hovered, selected, roomy, onSele
   const contextOpen = useRef(false);
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState({ left: 0, top: 0, maxHeight: 0, width: 0, above: false });
-  const first = refs[0];
-  const showPopup = open && refs.length > 1;
-  const remoteSame = first.kind === "Local" && refs.some((r) => r.kind === "Remote" && r.name.endsWith("/" + first.name));
-  const more = refs.length - 1 - (remoteSame ? 1 : 0);
-  // Put tags immediately below the local label, as in the reference; remote refs remain accessible.
-  const expanded = [first, ...refs.slice(1).filter((r) => r.kind !== "Remote"), ...refs.slice(1).filter((r) => r.kind === "Remote")].slice(0, m.ref_max);
+  const groups = useMemo(() => groupCommitRefs(refs), [refs]);
+  const firstGroup = groups[0];
+  const first = firstGroup.ref;
+  const showPopup = open && groups.length > 1;
+  const more = groups.length - 1;
+  const expanded = groups.slice(0, m.ref_max);
+  const menuFor = (group: RefGroup) => group.remote ? [
+    ...branchMenu(repo, group.ref),
+    { separator: true },
+    { label: `Remote branch: ${group.remote.name}`, children: branchMenu(repo, group.remote) },
+  ] : branchMenu(repo, group.ref);
 
   const cancelClose = () => clearTimeout(timer.current);
   const reveal = () => {
@@ -104,14 +109,13 @@ export function CommitRefs({ repo, refs, color, hovered, selected, roomy, onSele
   /** The hover tooltip: the name and what kind of label it is, e.g. "v0.1.3 (Tag)". */
   const describe = (r: GitRef) =>
     `${r.name} (${r.kind === "Tag" ? "Tag" : r.kind === "Remote" ? "Remote Branch" : r.name === repo.head_branch ? "Current Branch" : "Local Branch"})`;
-  const icons = (r: GitRef, compact = false) => (
+  const icons = ({ ref: r, remote }: RefGroup, compact = false) => (
     <>
       {r.kind === "Local" && r.name === repo.head_branch && <Check size={13} strokeWidth={3} className="shrink-0" />}
       <span className={cn("min-w-0", compact ? "truncate font-semibold" : "break-all text-left")}>{r.name}</span>
       {r.kind === "Tag" && <Tag size={12} className="shrink-0" />}
-      {r.kind === "Local" && (!compact || roomy) && <Laptop size={13} className="shrink-0 opacity-90" />}
-      {(r.kind === "Remote" || (compact && remoteSame)) && <Cloud size={13} className="shrink-0 opacity-90" />}
-      {compact && roomy && more > 0 && <span className="shrink-0 text-[11px] opacity-80">+{more}</span>}
+      {r.kind === "Local" && <Laptop size={13} className="shrink-0 opacity-90" />}
+      {(r.kind === "Remote" || remote) && <Cloud size={13} className="shrink-0 opacity-90" />}
       {r.kind === "Local" && (r.ahead > 0 || r.behind > 0) && (
         <span className="shrink-0 text-[10.5px] opacity-90" aria-label={`${r.ahead} ahead, ${r.behind} behind ${r.upstream}`}>
           {r.ahead > 0 && `↑${r.ahead}`}{r.behind > 0 && `↓${r.behind}`}
@@ -123,17 +127,17 @@ export function CommitRefs({ repo, refs, color, hovered, selected, roomy, onSele
     if (r.kind === "Local" && r.name !== repo.head_branch) void act(repo.path, { type: "checkout", target: r.name });
     if (r.kind === "Remote") void act(repo.path, { type: "checkoutRemote", remoteBranch: r.name });
   };
-  const labelClass = "relative flex items-center gap-[4px] px-[5px] rounded-[3px] min-w-0 max-w-full text-[12.5px] text-white outline-none focus-visible:ring-1 focus-visible:ring-accent";
+  const labelClass = "relative flex items-center gap-[4px] px-[5px] rounded-[2px] min-w-0 max-w-full text-[12px] text-fg outline-none focus-visible:ring-1 focus-visible:ring-accent";
   return (
     <>
-      <CtxMenu items={() => branchMenu(repo, first)} onOpenChange={menuChanged}>
+      <CtxMenu items={() => menuFor(firstGroup)} onOpenChange={menuChanged}>
         <button
           ref={anchor}
           type="button"
           tabIndex={selected ? 0 : -1}
-          aria-label={`${first.name}; ${refs.length} branch or tag labels`}
-          title={describe(first)}
-          aria-expanded={refs.length > 1 ? showPopup : undefined}
+          aria-label={`${first.name}${firstGroup.remote ? ` tracking ${firstGroup.remote.name}` : ""}; ${groups.length} branch or tag labels`}
+          title={describe(first) + (firstGroup.remote ? `; ${describe(firstGroup.remote)}` : "")}
+          aria-expanded={groups.length > 1 ? showPopup : undefined}
           aria-controls={showPopup ? id : undefined}
           onFocus={reveal}
           onBlur={closeSoon}
@@ -142,7 +146,7 @@ export function CommitRefs({ repo, refs, color, hovered, selected, roomy, onSele
           onClick={(e) => { e.stopPropagation(); onSelect(e); reveal(); }}
           onDoubleClick={(e) => { e.stopPropagation(); checkout(first); }}
           onKeyDown={(e) => {
-            if (e.key === "ArrowDown" && refs.length > 1) {
+            if (e.key === "ArrowDown" && groups.length > 1) {
               e.preventDefault();
               e.stopPropagation();
               reveal();
@@ -150,19 +154,29 @@ export function CommitRefs({ repo, refs, color, hovered, selected, roomy, onSele
             }
           }}
           className={cn(labelClass, "z-[1]")}
-          style={{ background: mix(color, 0.45), height: m.row_inner, opacity: showPopup ? 0 : 1 }}
+          style={{ background: `color-mix(in srgb, ${color} 28%, var(--color-app))`, height: m.row_inner, opacity: showPopup ? 0 : 1 }}
         >
-          {icons(first, true)}
+          {icons(firstGroup, true)}
         </button>
       </CtxMenu>
+      {more > 0 && (
+        <>
+          <span aria-hidden className="w-[5px] h-[2px] shrink-0" style={{ background: color, opacity: showPopup ? 0 : 1 }} />
+          <button type="button" aria-label={`Show ${more} more branch or tag labels`} aria-expanded={showPopup} aria-controls={showPopup ? id : undefined}
+            className="shrink-0 rounded-[2px] px-[4px] text-[11px] text-fg focus-visible:outline focus-visible:outline-accent"
+            style={{ background: `color-mix(in srgb, ${color} 28%, var(--color-app))`, height: m.row_inner, opacity: showPopup ? 0 : 1 }}
+            onFocus={reveal} onBlur={closeSoon} onMouseEnter={() => { reveal(); onHover(true); }} onMouseLeave={() => { closeSoon(); onHover(false); }}
+            onClick={(e) => { e.stopPropagation(); reveal(); }}>+{more}</button>
+        </>
+      )}
       {showPopup && createPortal(
         <div
           id={id}
           ref={popup}
           role="group"
           aria-label="Branches and tags on this commit"
-          className="commit-ref-stack fixed z-40 flex flex-col items-start overflow-y-auto rounded-[3px]"
-          style={{ left: position.left, top: position.top, maxHeight: position.maxHeight, maxWidth: position.width, minWidth: Math.min(anchor.current?.offsetWidth ?? 0, position.width), background: mix(color, 0.25), transformOrigin: position.above ? "bottom left" : "top left" }}
+          className="commit-ref-stack fixed z-40 flex flex-col items-stretch overflow-y-auto rounded-[2px]"
+          style={{ left: position.left, top: position.top, maxHeight: position.maxHeight, maxWidth: position.width, minWidth: Math.min(anchor.current?.offsetWidth ?? 0, position.width), background: `color-mix(in srgb, ${color} 28%, var(--color-app))`, transformOrigin: position.above ? "bottom left" : "top left" }}
           onMouseEnter={() => { pointerInPopup.current = true; cancelClose(); onHover(true); }}
           onMouseLeave={() => { pointerInPopup.current = false; closeSoon(); onHover(false); }}
           onFocus={cancelClose}
@@ -174,18 +188,18 @@ export function CommitRefs({ repo, refs, color, hovered, selected, roomy, onSele
             if (next >= 0) { e.preventDefault(); e.stopPropagation(); buttons[next]?.focus(); }
           }}
         >
-          {expanded.map((r) => (
-            <CtxMenu key={r.full} items={() => branchMenu(repo, r)} onOpenChange={menuChanged}>
+          {expanded.map((group) => (
+            <CtxMenu key={group.ref.full} items={() => menuFor(group)} onOpenChange={menuChanged}>
               <button
                 type="button"
-                title={describe(r)}
-                className={cn(labelClass, "commit-ref-label shrink-0 hover:brightness-125")}
-                style={{ background: mix(color, 0.45), minHeight: m.row_inner }}
+                title={describe(group.ref) + (group.remote ? `; ${describe(group.remote)}` : "")}
+                className={cn(labelClass, "commit-ref-label shrink-0 w-full rounded-none hover:bg-white/10")}
+                style={{ minHeight: m.row_inner }}
                 onClick={(e) => { e.stopPropagation(); onSelect(e); }}
-                onDoubleClick={(e) => { e.stopPropagation(); checkout(r); }}
+                onDoubleClick={(e) => { e.stopPropagation(); checkout(group.ref); }}
               >
-                {icons(r)}
-                {r === first && expanded.length > 1 && <ChevronDown size={11} className="shrink-0 opacity-60" />}
+                {icons(group, true)}
+                {group === firstGroup && expanded.length > 1 && <ChevronDown size={11} className="shrink-0 opacity-60" />}
               </button>
             </CtxMenu>
           ))}

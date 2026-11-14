@@ -48,7 +48,19 @@ export interface GraphRow {
   merge: boolean;
 }
 
+export interface HistoryCursor {
+  revs: string[];
+  offset: number;
+  layout: { lanes: (string | null)[]; pinned_next: string | null; pinned: boolean; width: number };
+}
+export interface HistoryPage {
+  commits: Commit[];
+  graph: { rows: GraphRow[]; width: number };
+  has_more: boolean;
+  history_cursor: HistoryCursor | null;
+}
 export interface RepoView {
+  history_cursor?: HistoryCursor | null;
   path: string;
   name: string;
   commits: Commit[];
@@ -78,6 +90,8 @@ export type DiffSource =
 export const WORKDIR = "WORKDIR";
 
 export interface FileVersions {
+  too_large?: boolean;
+  preview_limit?: number;
   old: string | null;
   new: string | null;
   binary: boolean;
@@ -370,9 +384,10 @@ export const api = {
   launchOptions: () => invoke<{ screenshot: boolean; shot_view: string | null; version: string; metrics: Metrics }>("launch_options"),
   repoStatus: (path: string) => invoke<RepoView["status"]>("repo_status", { path }),
   openRepo: (path: string, max?: number, view?: RefView) => invoke<RepoView>("open_repo", { path, max: max ?? null, view: view ?? null }),
+  historyPage: (path: string, cursor: HistoryCursor, max = 2000) => invoke<HistoryPage>("history_page", { path, cursor, max }),
   commitFiles: (path: string, sha: string) => invoke<FileChange[]>("commit_files", { path, sha }),
-  fileVersions: (path: string, source: DiffSource, file: string, untracked: boolean, parent: string | null) =>
-    invoke<FileVersions>("file_versions", { path, source, file, untracked, parent }),
+  fileVersions: (path: string, source: DiffSource, file: string, untracked: boolean, parent: string | null, allowLarge = false) =>
+    invoke<FileVersions>("file_versions", { path, source, file, untracked, parent, allowLarge }),
   saveFile: (path: string, file: string, content: string) => invoke<void>("save_file", { path, file, content }),
   fileHistory: (path: string, file: string) => invoke<HistoryEntry[]>("file_history", { path, file }),
   blame: (path: string, file: string, rev: string | null) => invoke<BlameLine[]>("blame", { path, file, rev }),

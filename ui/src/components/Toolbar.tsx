@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import {
   ArrowDownToLine,
   ArrowUpFromLine,
@@ -32,7 +33,7 @@ const PULL_LABELS: Record<string, string> = {
 
 /** The toolbar under the tabs: repository and branch pickers plus the main Git buttons. */
 export function Toolbar({ repo, tabId }: { repo: RepoView | undefined; tabId: string }) {
-  const s = useStore();
+  const s = useStore(useShallow((s) => ({ settings: s.settings, metrics: s.metrics, tabs: s.tabs, setActive: s.setActive, setDialog: s.setDialog, setSettings: s.setSettings, setUi: s.setUi })));
   const path = repo?.path;
   const labels = s.settings.toolbarLabels;
   const locals = repo?.refs.filter((r) => r.kind === "Local") ?? [];

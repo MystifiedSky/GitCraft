@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/api";
@@ -28,7 +29,7 @@ const PLACEHOLDER: Record<string, string> = {
 
 /** Command palette (Ctrl+Shift+P) and its pickers (the "Fuzzy Finder"). */
 export function CommandPalette() {
-  const s = useStore();
+  const s = useStore(useShallow((s) => ({ tabs: s.tabs, activeId: s.activeId, settings: s.settings, palette: s.palette, profiles: s.profiles, activeProfile: s.activeProfile, setPalette: s.setPalette, setSettings: s.setSettings })));
   const mode = s.palette;
   const [q, setQ] = useState("");
   const [sel, setSel] = useState(0);

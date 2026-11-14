@@ -6,13 +6,13 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Commit, GitRef, RepoView, Stats } from "@/lib/api";
 import { api } from "@/lib/api";
 import { DEFAULT_COLUMNS, useStore, useTabUi, type GraphColumns } from "@/lib/store";
-import { act, clearSolo, showAllRefs, toggleHidden, WIP_COMMIT_EVENT } from "@/lib/repo";
+import { act, loadMoreRepo, clearSolo, showAllRefs, toggleHidden, WIP_COMMIT_EVENT } from "@/lib/repo";
 import { commitMenu } from "@/lib/menus";
 import { CommitRefs } from "./CommitRefs";
 import { CtxMenu, DropMenu, type MenuEntry } from "./ui/menu";
 import { Button } from "./ui/button";
 import { Avatar } from "./Icons";
-import { cn, fullDate, initials, laneColor, mix } from "@/lib/utils";
+import { cn, fullDate, laneColor } from "@/lib/utils";
 
 interface Props {
   repo: RepoView;
@@ -23,14 +23,15 @@ type Extra = "author" | "date" | "sha" | "changes";
 
 /** Width of the marker strip (estimated). */
 const MARKER_STRIP_WIDTH = 12;
+const NO_REFS: string[] = [];
 
 export function GraphView({ repo, tabId }: Props) {
   // Sizes from the graph constants (src/metrics.rs).
   const m = useStore((s) => s.metrics);
   const cols = useStore((s) => s.settings.columns) ?? DEFAULT_COLUMNS;
   const lazyLoad = useStore((s) => s.settings.lazyLoad);
-  const hidden = useStore((s) => s.settings.hidden[repo.path]) ?? [];
-  const solo = useStore((s) => s.settings.solo[repo.path]) ?? [];
+  const hidden = useStore((s) => s.settings.hidden[repo.path]) ?? NO_REFS;
+  const solo = useStore((s) => s.settings.solo[repo.path]) ?? NO_REFS;
   const setSettings = useStore((s) => s.setSettings);
   const commitIndex = useMemo(() => new Map(repo.commits.map((c, i) => [c.sha, i])), [repo.commits]);
   const ROW = m.row;
@@ -53,22 +54,12 @@ export function GraphView({ repo, tabId }: Props) {
   const [hoverRef, setHoverRef] = useState<number | null>(null);
   const [hoverRow, setHoverRow] = useState<number | null>(null);
   const ghostOn = useStore((s) => s.settings.ghostRefs);
-  /** Nearest label above a commit in the same lane (the branch it belongs to). */
-  const ghostFor = (i: number): GitRef | undefined => {
-    const lane = repo.graph.rows[i]?.col;
-    for (let j = i - 1; j >= 0; j--) {
-      if (repo.graph.rows[j]?.col !== lane) continue;
-      const r = refsBySha.get(repo.commits[j].sha);
-      if (r?.length) return r[0];
-    }
-    return undefined;
-  };
 
   const wipFiles = useMemo(() => {
     const all = new Map<string, string>();
     for (const f of [...repo.status.staged, ...repo.status.unstaged]) if (!all.has(f.path)) all.set(f.path, f.status);
     return [...all.values()];
-  }, [repo]);
+  }, [repo.status]);
   const wip = wipFiles.length > 0;
   const off = wip ? 1 : 0;
   const total = repo.commits.length + off + (repo.has_more ? 1 : 0);
@@ -76,19 +67,34 @@ export function GraphView({ repo, tabId }: Props) {
   const refsBySha = useMemo(() => {
     const map = new Map<string, GitRef[]>();
     const order = (r: GitRef) => (r.kind === "Local" && r.name === repo.head_branch ? 0 : r.kind === "Local" ? 1 : r.kind === "Remote" ? 2 : 3);
+    const hiddenRefs = new Set(hidden);
     for (const r of repo.refs) {
-      if (hidden.includes(r.full)) continue; // hidden branches don't get a label
+      if (hiddenRefs.has(r.full)) continue; // hidden branches don't get a label
       map.set(r.sha, [...(map.get(r.sha) ?? []), r]);
     }
     for (const [k, v] of map) map.set(k, v.sort((a, b) => order(a) - order(b)));
     return map;
-  }, [repo, hidden]);
+  }, [repo.refs, repo.head_branch, hidden]);
+
+
+  const ghostRefs = useMemo(() => {
+    const lanes = new Map<number, GitRef>();
+    return repo.commits.map((c, i) => {
+      const lane = repo.graph.rows[i]?.col;
+      const previous = lanes.get(lane);
+      const refs = refsBySha.get(c.sha);
+      if (refs?.length) lanes.set(lane, refs[0]);
+      return previous;
+    });
+  }, [repo.commits, repo.graph.rows, refsBySha]);
 
   const headIdx = commitIndex.get(repo.head_sha) ?? -1;
   const selectedIdx = ui.selection.type === "commit" ? commitIndex.get(ui.selection.sha) ?? -1 : -1;
+  const markersEnabled = useStore((st) => st.settings.scrollMarkers);
   const markerRows = useMemo(() => {
     const rows: Partial<Record<MarkerType, number[]>> = { head: [], localBranches: [], remoteBranches: [], tags: [] };
     const upstream: number[] = [];
+    if (!markersEnabled) return { rows, upstream };
     const upstreams = new Set(repo.refs.filter((r) => r.kind === "Local" && r.upstream).map((r) => r.upstream));
     repo.commits.forEach((c, i) => {
       const refs = refsBySha.get(c.sha) ?? [];
@@ -99,10 +105,9 @@ export function GraphView({ repo, tabId }: Props) {
       if (refs.some((r) => r.kind === "Remote")) rows.remoteBranches!.push(row);
       if (refs.some((r) => r.kind === "Remote" && upstreams.has(r.name))) upstream.push(row);
     });
-    rows.selection = selectedIdx >= 0 ? [selectedIdx + off] : [];
     return { rows, upstream };
-  }, [repo, refsBySha, off, selectedIdx]);
-  const showMarkers = useStore((st) => st.settings.scrollMarkers) && total * ROW > viewH;
+  }, [repo.commits, repo.refs, repo.head_sha, refsBySha, off, markersEnabled]);
+  const showMarkers = markersEnabled && total * ROW > viewH;
   // The date lines and the markers belong to the scrollbar column: they exist only while the list is taller than the view.
   const overflowing = total * ROW > viewH;
   const [stripH, setStripH] = useState(0);
@@ -115,7 +120,7 @@ export function GraphView({ repo, tabId }: Props) {
     setStripH(el.clientHeight);
     return () => ro.disconnect();
   }, [showMarkers]);
-  const rects = useMemo(() => markerRects(DEFAULT_MARKERS, markerRows.rows, markerRows.upstream, total, stripH, MARKER_STRIP_WIDTH), [markerRows, total, stripH]);
+  const rects = useMemo(() => markerRects(DEFAULT_MARKERS, { ...markerRows.rows, selection: selectedIdx >= 0 ? [selectedIdx + off] : [] }, markerRows.upstream, total, stripH, MARKER_STRIP_WIDTH), [markerRows, total, stripH, selectedIdx, off]);
   const headLane = headIdx >= 0 ? repo.graph.rows[headIdx]?.col ?? 0 : 0;
 
   // Search (Ctrl+F)
@@ -134,7 +139,7 @@ export function GraphView({ repo, tabId }: Props) {
       if (c.summary.toLowerCase().includes(q) || c.author.toLowerCase().includes(q) || c.sha.startsWith(q) || c.body.toLowerCase().includes(q)) out.push(i);
     });
     return out;
-  }, [repo, q]);
+  }, [repo.commits, q]);
   const matchSet = useMemo(() => new Set(matches), [matches]);
 
   // Rows that belong to a hovered label. A tag marks only its own commit; a branch marks its commit and the unlabelled
@@ -147,7 +152,7 @@ export function GraphView({ repo, tabId }: Props) {
     const labelled = new Set(refsBySha.keys());
     const isTag = (refsBySha.get(repo.commits[hoverRef]?.sha ?? "") ?? [])[0]?.kind === "Tag";
     return hoverSegment(repo.commits, labelled, hoverRef, isTag);
-  }, [hoverRef, repo, refsBySha]);
+  }, [hoverRef, repo.commits, refsBySha]);
   const hoverActive = hoverRef !== null && highlighted.size > 0;
 
   // Zone widths: default widths when the pane has room, otherwise the branch/tag zone gives way
@@ -156,7 +161,7 @@ export function GraphView({ repo, tabId }: Props) {
   const extraWidth: Record<Extra, number> = { author: m.author_zone, date: m.date_zone, sha: m.sha_zone, changes: m.changes_zone };
   const wanted = (["author", "date", "sha", "changes"] as Extra[]).filter((k) => cols[k]);
   const baseRef = cols.refs ? m.ref_zone : 0;
-  const baseGraph = cols.graph ? m.graph_zone : 0;
+  const baseGraph = cols.graph ? Math.min(m.graph_zone, 108) : 0;
   // Extra columns that don't fit next to a minimum-width message are left out (rightmost first).
   const extras: Extra[] = [];
   for (const k of wanted) {
@@ -165,7 +170,7 @@ export function GraphView({ repo, tabId }: Props) {
   }
   const extrasW = extras.reduce((a, e) => a + extraWidth[e], 0);
   const roomy = paneW - extrasW >= baseRef + baseGraph + m.message_zone;
-  const graphW = !cols.graph ? 0 : roomy ? Math.max(m.graph_zone, lanesW) : Math.max(0, Math.min(lanesW, paneW - extrasW - (cols.refs ? m.ref_zone_min : 0) - m.message_min));
+  const graphW = !cols.graph ? 0 : roomy ? Math.max(baseGraph, lanesW) : Math.max(0, Math.min(lanesW, paneW - extrasW - (cols.refs ? m.ref_zone_min : 0) - m.message_min));
   const refW = !cols.refs
     ? 0
     : roomy
@@ -189,17 +194,22 @@ export function GraphView({ repo, tabId }: Props) {
   const last = Math.min(total - 1, Math.ceil((scrollTop + viewH) / ROW) + 4);
 
   // Lazy loading: read more history once the view is GRAPH_ROW_LAZY_LOAD_COMMITS_OFFSET rows from the end.
-  const loadingMore = useRef(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [pageError, setPageError] = useState<string | null>(null);
+  const more = () => {
+    setLoadingMore(true);
+    setPageError(null);
+    void loadMoreRepo(repo.path).catch((e) => setPageError(String(e))).finally(() => { setLoadingMore(false); });
+  };
   useEffect(() => {
-    loadingMore.current = false;
+    setLoadingMore(false);
   }, [repo.commits.length]);
   useEffect(() => {
-    if (!lazyLoad || !repo.has_more || loadingMore.current) return;
+    if (!lazyLoad || !repo.has_more || loadingMore || pageError || !repo.history_cursor) return;
     if (last >= repo.commits.length - m.lazy_offset) {
-      loadingMore.current = true;
-      setUi(tabId, { limit: repo.commits.length + m.initial_commits });
+      more();
     }
-  }, [last, repo.has_more, repo.commits.length, lazyLoad]);
+  }, [last, repo.has_more, repo.commits.length, repo.history_cursor, lazyLoad, loadingMore, pageError]);
 
   // Keep the selected row in view.
   const selIdx = ui.selection.type === "wip" ? (wip ? 0 : -1) : (commitIndex.get((ui.selection as { sha: string }).sha) ?? -1) + off;
@@ -314,7 +324,7 @@ export function GraphView({ repo, tabId }: Props) {
         g.strokeStyle = col;
         g.lineWidth = 2;
         g.beginPath();
-        g.moveTo(refW - m.ref_margin_right, yc);
+        g.moveTo(refW, yc);
         g.lineTo(x - NODE / 2, yc);
         g.stroke();
       }
@@ -323,25 +333,10 @@ export function GraphView({ repo, tabId }: Props) {
         g.beginPath();
         g.arc(x, yc, 6, 0, Math.PI * 2);
         g.fill();
-      } else {
-        g.fillStyle = col;
-        g.beginPath();
-        g.arc(x, yc, NODE / 2, 0, Math.PI * 2);
-        g.fill();
-        // Avatar inside the ring: initials on the default avatar background.
-        g.fillStyle = m.avatar_bg;
-        g.beginPath();
-        g.arc(x, yc, m.avatar_inner / 2, 0, Math.PI * 2);
-        g.fill();
-        g.fillStyle = "#ffffff";
-        g.font = "600 8.5px 'Open Sans', 'Segoe UI', sans-serif";
-        g.textAlign = "center";
-        g.textBaseline = "middle";
-        g.fillText(initials(c.author), x, yc + 0.5);
       }
       g.globalAlpha = 1;
     }
-  }, [repo, first, last, scrollTop, viewH, refW, graphW, off, headLane, headIdx, refsBySha, m, cols.graph, cols.refs, q, matchSet]);
+  }, [repo.graph, repo.commits, first, last, scrollTop, viewH, refW, graphW, off, headLane, headIdx, refsBySha, m, cols.graph, cols.refs, q, matchSet]);
 
   const select = (sel: { type: "wip" } | { type: "commit"; sha: string }) => setUi(tabId, { selection: sel, diff: null, multi: [], compareWorkdir: null, history: null });
 
@@ -409,7 +404,7 @@ export function GraphView({ repo, tabId }: Props) {
       if (repo.has_more && i === repo.commits.length)
         rows.push(
           <div key="more" className="absolute left-0 right-0 flex items-center justify-center gap-2 text-[12px] text-fg3" style={{ top: d * ROW, height: ROW }}>
-            <Loader2 size={13} className="spin" /> Loading more commits…
+            {pageError ? <button className="text-link" title={pageError} onClick={more}>Could not load history. Retry</button> : !lazyLoad ? <button className="text-link" onClick={more}>Load more commits</button> : <><Loader2 size={13} className="spin" /> Loading more commits…</>}
           </div>,
         );
       continue;
@@ -424,6 +419,8 @@ export function GraphView({ repo, tabId }: Props) {
         top={d * ROW}
         refW={refW}
         graphW={graphW}
+        nodeX={laneX(gr.col)}
+        merge={gr.merge}
         extras={extras}
         extraWidth={extraWidth}
         color={laneColor(gr.color)}
@@ -432,7 +429,7 @@ export function GraphView({ repo, tabId }: Props) {
         match={matchSet.has(i)}
         dim={q.length > 0 && !matchSet.has(i)}
         refs={refsBySha.get(c.sha)}
-        ghost={ghostOn && !refsBySha.get(c.sha) && (hoverRow === i || sel) ? ghostFor(i) : undefined}
+        ghost={ghostOn && !refsBySha.get(c.sha) && (hoverRow === i || sel) ? ghostRefs[i] : undefined}
         hovered={hoverRow === i}
         onHoverRow={setHoverRow}
         rowH={ROW}
@@ -585,6 +582,8 @@ function CommitRow({
   top,
   refW,
   graphW,
+  nodeX,
+  merge,
   extras,
   extraWidth,
   color,
@@ -609,6 +608,8 @@ function CommitRow({
   top: number;
   refW: number;
   graphW: number;
+  nodeX: number;
+  merge: boolean;
   extras: Extra[];
   extraWidth: Record<Extra, number>;
   color: string;
@@ -662,7 +663,7 @@ function CommitRow({
           className="absolute inset-0 focus-visible:outline focus-visible:-outline-offset-2 focus-visible:outline-accent"
         />
         {refW > 0 && (
-          <div style={{ width: refW, paddingLeft: m.ref_margin_left, paddingRight: m.ref_margin_right }} className="shrink-0 h-full flex items-center min-w-0">
+          <div style={{ width: refW, paddingLeft: m.ref_margin_left }} className="shrink-0 h-full flex items-center min-w-0 [&>button]:max-w-[calc(100%-6px)]">
             {!first && ghost && (
               <div
                 className="flex items-center gap-[4px] px-[5px] rounded-[3px] min-w-0 max-w-full text-[12.5px] text-white border border-dashed opacity-60"
@@ -679,22 +680,37 @@ function CommitRow({
                 color={color}
                 hovered={hovered}
                 selected={selected}
-                roomy={refW >= 120}
                 onSelect={(e) => onClick(c, index, e)}
                 onHover={(active) => onHoverRef(active ? index : null)}
               />
             )}
+            {(first || ghost) && graphW > 0 && <span aria-hidden className="flex-1 min-w-[6px] h-[2px] pointer-events-none" style={{ background: color }} />}
           </div>
         )}
-        {graphW > 0 && <div style={{ width: graphW }} className="shrink-0" />}
+        {graphW > 0 && (
+          <div style={{ width: graphW }} className="shrink-0 h-full relative pointer-events-none overflow-hidden" aria-hidden>
+            <span className="absolute right-0" data-commit-band style={{
+              left: Math.max(0, nodeX - refW), top: (rowH - m.row_inner) / 2, height: m.row_inner,
+              background: `color-mix(in srgb, ${color} ${selected ? 22 : 12}%, var(--color-app))`,
+            }} />
+            {!merge && nodeX - refW <= graphW && (
+              <span data-commit-avatar className="absolute z-[1] flex items-center justify-center rounded-full" style={{
+                left: nodeX - refW - m.node / 2, top: (rowH - m.node) / 2,
+                width: m.node, height: m.node, background: color,
+              }}>
+                <Avatar name={c.author} email={c.email} size={m.avatar_inner} />
+              </span>
+            )}
+          </div>
+        )}
         <div
-          className="flex-1 min-w-0 flex items-center pr-2 text-[13px] text-white/90 bg-panel/70"
-          style={{ height: m.row_inner, paddingLeft: m.summary_margin, boxShadow: `inset 3px 0 0 ${color}`, background: bg ? "transparent" : undefined }}
+          className="flex-1 min-w-0 flex items-center pr-2 text-[12.5px] text-fg"
+          style={{ height: m.row_inner, paddingLeft: m.summary_margin, borderLeft: `2px solid ${color}` }}
         >
           {match && <span className="w-1.5 h-1.5 rounded-full bg-[#f2ca33] mr-1.5 shrink-0" />}
           <span className="graph-row-text truncate" data-dimmed={dimmed ? "true" : undefined}>
             {c.summary}
-            {desc && <span className="text-white/50 ml-2">{desc}</span>}
+            {desc && <span className="text-fg3 ml-2">{desc}</span>}
           </span>
         </div>
         {extras.map((k) => (

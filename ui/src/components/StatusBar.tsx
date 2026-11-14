@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { Gift, Keyboard, List, Loader2, Map as MapIcon, Rocket, ZoomIn } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { useStore } from "@/lib/store";
@@ -9,7 +10,7 @@ import { installAndRestart, RELEASES_URL, useUpdates } from "@/lib/updates";
 import { useSignedInServices } from "@/lib/integrations";
 
 export function StatusBar() {
-  const s = useStore();
+  const s = useStore(useShallow((s) => ({ tabs: s.tabs, activeId: s.activeId, settings: s.settings, busy: s.busy, job: s.job, openLaunchpad: s.openLaunchpad, setDialog: s.setDialog, version: s.version })));
   const up = useUpdates();
   const signedIn = useSignedInServices();
   const tab = s.tabs.find((t) => t.id === s.activeId);

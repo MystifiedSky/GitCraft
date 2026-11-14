@@ -5,7 +5,7 @@ import { api, type RepoView } from "@/lib/api";
 import { ai, applyPatch, patchName, savePatch, type AgentSession } from "@/lib/ai";
 import { act, copy, openRepoPath } from "@/lib/repo";
 import { conflictTarget } from "@/lib/conflict";
-import { runInTerminal } from "./TerminalPanel";
+import { runInTerminal } from "@/lib/terminal-launch";
 import { useStore } from "@/lib/store";
 import { cn, timeSince } from "@/lib/utils";
 import { CtxMenu, DropMenu } from "./ui/menu";

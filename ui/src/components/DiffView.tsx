@@ -19,7 +19,7 @@ import { useStore, usePanelStore } from "@/lib/store";
 import { act, confirmThen, refresh } from "@/lib/repo";
 import { Button } from "./ui/button";
 import { StatusIcon } from "./Icons";
-import { MonacoDiff, MonacoFile, type DiffHandle } from "./MonacoViews";
+import { MonacoDiff, MonacoFile, type DiffHandle } from "./LazyEditors";
 import { cn } from "@/lib/utils";
 
 export function sourceLabel(src: DiffSource, shaLen: number) {
@@ -41,6 +41,9 @@ export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: strin
   const set = s.settings;
   const m = s.metrics;
   const [view, setView] = useState<"diff" | "file">("diff");
+  const [largeTarget, setLargeTarget] = useState<string | null>(null);
+  const targetKey = JSON.stringify(target);
+  const allowLarge = largeTarget === targetKey;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<string | null>(null);
   const handle = useRef<DiffHandle | null>(null);
@@ -49,13 +52,13 @@ export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: strin
 
   const statusKey = target.source.kind === "Commit" ? "" : JSON.stringify(repo.status);
   const versions = useQuery({
-    queryKey: ["versions", repo.path, JSON.stringify(target), statusKey],
-    queryFn: () => api.fileVersions(repo.path, target.source, target.file, target.untracked, target.parent),
+    queryKey: ["versions", repo.path, JSON.stringify(target), statusKey, allowLarge],
+    queryFn: () => api.fileVersions(repo.path, target.source, target.file, target.untracked, target.parent, allowLarge),
   });
   const lines = useQuery({
     queryKey: ["diff", repo.path, JSON.stringify(target), statusKey, set.ignoreWhitespace],
     queryFn: () => api.fileDiff(repo.path, target.source, target.file, target.untracked, target.parent, set.ignoreWhitespace),
-    enabled: set.diffMode === "hunk",
+    enabled: versions.isSuccess && !versions.data?.too_large && !versions.data?.binary && view === "diff" && set.diffMode === "hunk",
   });
 
   useEffect(() => {
@@ -108,6 +111,7 @@ export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: strin
   let body: React.ReactNode;
   if (versions.isLoading) body = <Note>Loading…</Note>;
   else if (versions.isError) body = <Note error>{String(versions.error)}</Note>;
+  else if (v?.too_large) body = <Note>This file exceeds the {Math.round((v.preview_limit ?? 0) / 1048576)} MB preview limit. {allowLarge ? "Open it in an external editor to inspect it." : <button className="text-link underline" onClick={() => setLargeTarget(targetKey)}>Load preview (up to 20 MB)</button>}</Note>;
   else if (v && (v.old_image || v.new_image)) body = <ImageDiff before={v.old_image} after={v.new_image} />;
   else if (v?.binary) body = <Note>This is a binary file, so there is no text to compare.</Note>;
   else if (v && view === "file")

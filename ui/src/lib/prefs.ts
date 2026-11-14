@@ -1,3 +1,4 @@
+import { updateEditorTheme } from "./editor-theme";
 // Themes, profiles and local workspaces.
 import { api } from "./api";
 import { openRepoPath } from "./repo";
@@ -13,7 +14,7 @@ export const THEMES = [
 
 export function applyTheme(id: string) {
   document.documentElement.dataset.theme = id;
-  import("./monaco").then((m) => m.monaco.editor.setTheme(m.editorTheme())).catch(() => {});
+  updateEditorTheme();
 }
 
 const st = () => useStore.getState();

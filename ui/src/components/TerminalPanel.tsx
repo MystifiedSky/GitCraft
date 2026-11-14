@@ -1,3 +1,5 @@
+import { useShallow } from "zustand/react/shallow";
+import { pendingRuns } from "@/lib/terminal-launch";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Plus, SquareTerminal, X } from "lucide-react";
@@ -43,19 +45,9 @@ interface Tab {
   agentEnv?: Record<string, string>;
 }
 
-type TerminalRun = { command: string; title: string; cwd?: string; agentEnv?: Record<string, string> };
-const pendingRuns: TerminalRun[] = [];
-
-/** Open a new in-app terminal tab that runs `command` (shows the terminal panel). */
-export function runInTerminal(command: string, title: string, cwd?: string, agentEnv?: Record<string, string>) {
-  pendingRuns.push({ command, title, cwd, agentEnv });
-  useStore.getState().setSettings({ showTerminal: true });
-  window.dispatchEvent(new Event("gitcraft-terminal-run"));
-}
-
 /** In-app terminal under the graph, with terminal tabs (Ctrl+` toggles it). */
 export function TerminalPanel({ cwd, visible }: { cwd: string; visible: boolean }) {
-  const s = useStore();
+  const s = useStore(useShallow((s) => ({ settings: s.settings, setSettings: s.setSettings })));
   const [tabs, setTabs] = useState<Tab[]>([{ key: 1, id: null, title: "Terminal 1" }]);
   const [active, setActive] = useState(1);
   useEffect(() => {

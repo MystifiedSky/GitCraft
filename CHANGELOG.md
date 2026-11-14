@@ -18,6 +18,16 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Changed
 
+- Graph labels combine local branches with their matching tracking refs, count additional grouped labels in a separate badge, and expand into one clean label stack with both local and remote actions available.
+
+- The Windows terminal resolves the shell executable directly, avoiding an extra discovery process and launch failures when inherited environment names differ in casing.
+
+- Startup loads the code editor and terminal only when needed. Repository tabs reuse their first read, append history in bounded pages, preserve graph lanes between pages, and release cached data when closed. Hidden tabs defer refresh work, graph calculations avoid unrelated updates, and checkout/merge watcher events are combined with the final action refresh.
+
+- File and history previews automatically load files up to 2 MB, offer an explicit preview up to 20 MB, and keep larger files out of the in-app editor.
+
+- The commit graph uses softer branch colours, connected labels, author pictures inside lane rings, and a translucent band linking each commit to its message. Message rows no longer have heavy filled backgrounds.
+
 - When a remembered repository tab points at a folder that no longer exists, the error screen shows the folder and offers Try again, Locate folder and Close tab.
 
 - Hovering a tag or branch label no longer tints every commit below it. Only the commit of a tag (or a branch's own stretch of unlabelled commits, down to the next labelled commit) stays bright while the other rows fade, and labels show a tooltip such as "v0.1.3 (Tag)". The selected row uses the selection colour, rows and buttons ease their hover colours, and menus, dialogs and notifications slide in gently. The tag icon now follows the tag name and the graph's column titles use a small monospace style.

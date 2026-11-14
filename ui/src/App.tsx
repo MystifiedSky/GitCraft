@@ -1,12 +1,13 @@
+import { useShallow } from "zustand/react/shallow";
 import { startBackendSync } from "@/lib/integrations";
 import { syncGitCredentials } from "@/lib/hosting";
-import { onWatcherChange } from "@/lib/repo";
+import { onWatcherChange, releaseRepo } from "@/lib/repo";
 import { startUpdateChecks } from "@/lib/updates";
 import { listen } from "@tauri-apps/api/event";
 import { ChevronRight } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
-import { DEFAULT_METRICS, DEFAULT_SETTINGS, newId, restoreTabs, tabUi, useStore, usePanelStore, type Profile, type Settings, type Tab } from "@/lib/store";
+import { DEFAULT_METRICS, DEFAULT_SETTINGS, newId, restoreTabs, tabUi, useStore, useTabUi, type Profile, type Settings, type Tab } from "@/lib/store";
 import { act, openRepoPath, promptBranch, queryClient, refresh, repoData, useRepo } from "@/lib/repo";
 import { resetZoom, setZoom, stepZoom } from "@/lib/zoom";
 import { withSpin } from "@/lib/spin";
@@ -25,7 +26,7 @@ import { HistoryView } from "./components/HistoryView";
 import { RebaseView } from "./components/RebaseView";
 import { openRebase } from "@/lib/rewrite";
 import { ConflictView } from "./components/ConflictView";
-import { TerminalPanel } from "./components/TerminalPanel";
+const TerminalPanel = lazy(() => import("./components/TerminalPanel").then((m) => ({ default: m.TerminalPanel })));
 import { IssueView, PullRequestView } from "./components/PullRequestView";
 import { LeftStrip } from "./components/LeftPanel";
 import { RightPanel } from "./components/RightPanel";
@@ -34,7 +35,7 @@ import { LaunchpadScreen, StartScreen } from "./components/StartScreen";
 import { Dialogs, Toasts } from "./components/Dialogs";
 
 export default function App() {
-  const s = usePanelStore();
+  const s = useStore(useShallow((s) => ({ tabs: s.tabs, activeId: s.activeId })));
   const active = s.tabs.find((t) => t.id === s.activeId) ?? s.tabs[0];
   const settingsLoaded = useStartup();
   useShortcuts();
@@ -74,13 +75,13 @@ function LazyRepoScreen({ tab, active }: { tab: Tab; active: boolean }) {
 }
 
 function RepoScreen({ tab, active }: { tab: Tab; active: boolean }) {
-  const s = usePanelStore();
-  const q = useRepo(tab.path, tab.id);
-  const viewing = !!(s.ui[tab.id]?.diff || s.ui[tab.id]?.history || s.ui[tab.id]?.conflict || s.ui[tab.id]?.rebase);
+  const s = useStore(useShallow((s) => ({ settings: s.settings, setUi: s.setUi, setSettings: s.setSettings, closeTab: s.closeTab })));
+  const ui = useTabUi(tab.id);
+  const q = useRepo(tab.path, active);
+  const viewing = !!(ui?.diff || ui?.history || ui?.conflict || ui?.rebase);
   const [peek, setPeek] = useState(false);
   useEffect(() => setPeek(false), [viewing]);
   const repo = q.isError ? undefined : q.data;
-  const ui = s.ui[tab.id];
   const set = s.settings;
   const leftPanelRef = useRef<HTMLDivElement>(null);
   const rightPanelRef = useRef<HTMLDivElement>(null);
@@ -93,9 +94,9 @@ function RepoScreen({ tab, active }: { tab: Tab; active: boolean }) {
 
   return (
     <>
-      <Toolbar repo={repo} tabId={tab.id} />
+      {active && <Toolbar repo={repo} tabId={tab.id} />}
       <div className="flex-1 flex min-h-0">
-        {set.showLeft && !(viewing && !peek) ? (
+        {active && set.showLeft && !(viewing && !peek) ? (
           <>
             <div ref={leftPanelRef} style={{ width: set.leftWidth, minWidth: 200 }} className="shrink min-w-0">
               <LeftPanel repo={repo} tabId={tab.id} onSelectSha={selectSha} />
@@ -104,7 +105,7 @@ function RepoScreen({ tab, active }: { tab: Tab; active: boolean }) {
           </>
         ) : (
           // While a file is open (or the panel is hidden) the left panel shrinks to icons.
-          <LeftStrip repo={repo} onExpand={() => (set.showLeft ? setPeek(true) : s.setSettings({ showLeft: true }))} />
+          <LeftStrip repo={active ? repo : undefined} onExpand={() => (set.showLeft ? setPeek(true) : s.setSettings({ showLeft: true }))} />
         )}
         {/* Reserve readable graph space; side panels yield on smaller windows. */}
         <div style={{ minWidth: "min(440px, calc(100% - 504px))" }} className="flex-1 min-w-[160px] flex flex-col min-h-0">
@@ -137,7 +138,7 @@ function RepoScreen({ tab, active }: { tab: Tab; active: boolean }) {
             </div>
           )}
           {!repo && q.isLoading && <div className="h-full flex items-center justify-center text-fg3">Loading repository…</div>}
-          {repo &&
+          {repo && active &&
             (ui?.pr ? (
               <PullRequestView repo={repo} tabId={tab.id} number={ui.pr} />
             ) : ui?.issue ? (
@@ -156,11 +157,11 @@ function RepoScreen({ tab, active }: { tab: Tab; active: boolean }) {
           </div>
           {terminalOpened && repo && (
             <div className={set.showTerminal ? "shrink-0" : "hidden"}>
-              <TerminalPanel cwd={repo.path} visible={active && set.showTerminal} />
+              <Suspense fallback={<div role="status" className="p-3 text-fg3">Loading terminal…</div>}><TerminalPanel cwd={repo.path} visible={active && set.showTerminal} /></Suspense>
             </div>
           )}
         </div>
-        {set.showRight && repo && (
+        {active && set.showRight && repo && (
           <>
             <Resizer onDrag={(dx) => s.setSettings({ rightWidth: clamp((rightPanelRef.current?.offsetWidth ?? useStore.getState().settings.rightWidth) - dx, 300, 640) })} />
             <div ref={rightPanelRef} style={{ width: set.rightWidth, minWidth: 300 }} className="shrink min-w-0">
@@ -252,6 +253,10 @@ function useStartup() {
             await openRebase(tab.id, repo.path, repo.commits[4].sha, repo.commits[4].sha.slice(0, st.metrics.sha_len), (items) =>
               items.map((it, i) => (i === 1 ? { ...it, action: "squash" } : i === 2 ? { ...it, action: "reword", message: it.message + " (reworded)" } : i === 3 ? { ...it, action: "drop" } : it)),
             );
+          }
+          if (opts.shot_view === "refs") {
+            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+            document.querySelector<HTMLButtonElement>('button[aria-expanded="false"][aria-label*="branch or tag labels"]')?.focus();
           }
           await new Promise((r) => setTimeout(r, 1500));
         }
@@ -371,7 +376,10 @@ function useWatchers() {
   useEffect(() => {
     const now = new Set(tabs.filter((t) => t.kind === "repo" && t.path).map((t) => t.path!));
     for (const p of now) if (!watched.current.has(p)) api.watchRepo(p).catch(() => {});
-    for (const p of watched.current) if (!now.has(p)) api.unwatchRepo(p).catch(() => {});
+    for (const p of watched.current) if (!now.has(p)) {
+      releaseRepo(p);
+      api.unwatchRepo(p).catch(() => {});
+    }
     watched.current = now;
   }, [tabs]);
 }

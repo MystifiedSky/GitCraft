@@ -19,14 +19,23 @@ pub struct Terminals {
     next: AtomicU32,
 }
 
+/// Resolve the executable once; passing its full path also avoids PTY environment casing differences on Windows.
+fn program_path(name: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os("PATH").and_then(|paths| std::env::split_paths(&paths).map(|p| p.join(name)).find(|p| p.is_file()))
+}
+
+fn shell_command(name: &str) -> CommandBuilder {
+    CommandBuilder::new(program_path(name).unwrap_or_else(|| name.into()))
+}
+
 /// Preferences > In-App Terminal > Default In-App Terminal: powershell, pwsh, cmd, gitbash, wsl (Windows);
 /// default, bash, zsh, fish elsewhere.
 pub fn shell_for(name: &str) -> CommandBuilder {
     match name {
-        "powershell" if cfg!(windows) => CommandBuilder::new("powershell.exe"),
-        "pwsh" => CommandBuilder::new(if cfg!(windows) { "pwsh.exe" } else { "pwsh" }),
-        "cmd" if cfg!(windows) => CommandBuilder::new("cmd.exe"),
-        "wsl" if cfg!(windows) => CommandBuilder::new("wsl.exe"),
+        "powershell" if cfg!(windows) => shell_command("powershell.exe"),
+        "pwsh" => shell_command(if cfg!(windows) { "pwsh.exe" } else { "pwsh" }),
+        "cmd" if cfg!(windows) => shell_command("cmd.exe"),
+        "wsl" if cfg!(windows) => shell_command("wsl.exe"),
         "gitbash" if cfg!(windows) => {
             // Git for Windows: <install>\cmd\git.exe -> <install>\bin\bash.exe
             let git = std::process::Command::new("where").arg("git").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or_default().trim().to_string()).unwrap_or_default();
@@ -43,8 +52,10 @@ pub fn shell_for(name: &str) -> CommandBuilder {
 /// The shell to start: PowerShell on Windows, the user's shell elsewhere.
 fn default_shell() -> CommandBuilder {
     if cfg!(windows) {
-        let pwsh = std::process::Command::new("where").arg("pwsh").output().map(|o| o.status.success()).unwrap_or(false);
-        CommandBuilder::new(if pwsh { "pwsh.exe" } else { "powershell.exe" })
+        match program_path("pwsh.exe") {
+            Some(path) => CommandBuilder::new(path),
+            None => shell_command("powershell.exe"),
+        }
     } else {
         CommandBuilder::new(std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()))
     }

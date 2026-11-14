@@ -5,7 +5,7 @@ import type { BlameLine, RepoView } from "@/lib/api";
 import { api } from "@/lib/api";
 import { useStore, usePanelStore } from "@/lib/store";
 import { Avatar } from "./Icons";
-import { MonacoDiff } from "./MonacoViews";
+import { MonacoDiff } from "./LazyEditors";
 import { cn, fullDate, GRAPH_COLORS, timeSince } from "@/lib/utils";
 
 function Since({ time }: { time: number }) {
@@ -91,9 +91,12 @@ export function HistoryView({ repo, tabId, file, mode, sha }: { repo: RepoView; 
 
 function HistoryDiff({ repo, file, sha, parent, onGraph }: { repo: RepoView; file: string; sha: string; parent: string | null; onGraph: () => void }) {
   const set = useStore((s) => s.settings);
+  const [largeKey, setLargeKey] = useState<string | null>(null);
+  const key = JSON.stringify([file, sha, parent]);
+  const allowLarge = largeKey === key;
   const v = useQuery({
-    queryKey: ["versions", repo.path, file, sha, parent],
-    queryFn: () => api.fileVersions(repo.path, { kind: "Commit", sha }, file, false, parent),
+    queryKey: ["versions", repo.path, file, sha, parent, allowLarge],
+    queryFn: () => api.fileVersions(repo.path, { kind: "Commit", sha }, file, false, parent, allowLarge),
     staleTime: Infinity,
   });
   return (
@@ -105,7 +108,9 @@ function HistoryDiff({ repo, file, sha, parent, onGraph }: { repo: RepoView; fil
         </button>
       </div>
       <div className="flex-1 min-h-0">
-        {v.data && !v.data.binary ? (
+        {v.isError ? <div className="p-4 text-fg3">{String(v.error)}</div> : v.data?.too_large ? (
+          <div className="p-4 text-fg3">This file exceeds the {Math.round((v.data.preview_limit ?? 0) / 1048576)} MB preview limit. {allowLarge ? "Open it in an external editor to inspect it." : <button className="text-link underline" onClick={() => setLargeKey(key)}>Load preview (up to 20 MB)</button>}</div>
+        ) : v.data && !v.data.binary ? (
           <MonacoDiff
             original={v.data.old ?? ""}
             modified={v.data.new ?? ""}

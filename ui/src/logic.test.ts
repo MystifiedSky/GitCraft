@@ -137,6 +137,7 @@ describe("repository cache refreshes", () => {
   it("refreshes open diffs, history and blame after a save or HEAD change", async () => {
     const kinds = ["repo", "diff", "versions", "history", "blame", "range", "conflict"];
     for (const kind of kinds) queryClient.setQueryData([kind, "/refresh-test"], { value: "old" });
+    useStore.getState().openRepoTab("/refresh-test", "refresh");
     await refresh("/refresh-test");
     for (const kind of kinds) expect(queryClient.getQueryState([kind, "/refresh-test"])?.isInvalidated).toBe(true);
   });
@@ -145,6 +146,7 @@ describe("repository cache refreshes", () => {
     const status = { unstaged: [{ path: "a.txt", status: "M" }], staged: [], conflicted: false };
     vi.spyOn(api, "repoStatus").mockResolvedValue(status);
     queryClient.setQueryData(["versions", "/status-test", "a.txt"], { new: "old contents" });
+    useStore.getState().openRepoTab("/status-test", "status");
     await refreshStatus("/status-test");
     expect(queryClient.getQueryState(["versions", "/status-test", "a.txt"])?.isInvalidated).toBe(true);
   });
@@ -154,6 +156,7 @@ describe("repository cache refreshes", () => {
     let finish!: (value: typeof status) => void;
     const pending = new Promise<typeof status>((resolve) => { finish = resolve; });
     const read = vi.spyOn(api, "repoStatus").mockReturnValueOnce(pending).mockResolvedValue(status);
+    useStore.getState().openRepoTab("/burst-test", "burst");
     const first = refreshStatus("/burst-test");
     const second = refreshStatus("/burst-test");
     const third = refreshStatus("/burst-test");

@@ -1,5 +1,6 @@
 // Monaco (the code editor) bundled locally — no network needed.
 import * as monaco from "monaco-editor";
+import { registerEditorTheme } from "./editor-theme";
 import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 
 declare global {
@@ -59,6 +60,8 @@ export function languageFor(file: string): string {
   }
   return "plaintext";
 }
+
+registerEditorTheme(() => monaco.editor.setTheme(editorTheme()));
 
 export const EDITOR_FONT = "'Cascadia Mono', Consolas, 'Courier New', monospace";
 

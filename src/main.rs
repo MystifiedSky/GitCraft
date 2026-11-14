@@ -25,7 +25,7 @@ mod terminal;
 mod watch;
 
 use actions::{Action, ActionResult, Engine, UndoInfo};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -58,7 +58,34 @@ struct RepoView {
     #[serde(flatten)]
     data: git::RepoData,
     graph: graph::GraphLayout,
+    history_cursor: Option<HistoryCursor>,
     undo: UndoInfo,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct HistoryCursor {
+    revs: Vec<String>,
+    offset: usize,
+    layout: graph::LayoutCursor,
+}
+
+#[derive(Serialize)]
+struct HistoryPage {
+    commits: Vec<git::Commit>,
+    graph: graph::GraphLayout,
+    has_more: bool,
+    history_cursor: Option<HistoryCursor>,
+}
+
+#[tauri::command]
+async fn history_page(path: String, cursor: HistoryCursor, max: Option<usize>) -> Result<HistoryPage, String> {
+    blocking(move || {
+        let mut cursor = cursor;
+        let (commits, has_more) = git::history_page(Path::new(&path), &cursor.revs, cursor.offset, max.unwrap_or(2000).clamp(100, 5000))?;
+        let graph = cursor.layout.append(&commits);
+        cursor.offset += commits.len();
+        Ok(HistoryPage { commits, graph, has_more, history_cursor: has_more.then_some(cursor) })
+    }).await?
 }
 
 fn err<E: ToString>(e: E) -> String {
@@ -86,9 +113,11 @@ async fn open_repo(path: String, max: Option<usize>, view: Option<git::RefView>,
         }
         let root = git::repo_root(&p).ok_or_else(|| format!("{path} is not a Git repository"))?;
         let view = view.unwrap_or_default();
-        let data = git::load_view(&root, max.unwrap_or(INITIAL_COMMITS).max(prefs::MIN_INITIAL_COMMITS), &view);
+        let data = git::load_view(&root, max.unwrap_or(INITIAL_COMMITS).clamp(prefs::MIN_INITIAL_COMMITS, 5000), &view);
         let pinned_sha = view.pinned.as_ref().and_then(|p| data.refs.iter().find(|r| &r.full == p)).map(|r| r.sha.clone());
-        let graph = graph::layout_pinned(&data.commits, pinned_sha.as_deref());
+        let mut layout = graph::LayoutCursor::new(pinned_sha.as_deref());
+        let graph = layout.append(&data.commits);
+        let history_cursor = data.has_more.then(|| HistoryCursor { revs: data.history_revs.clone(), offset: data.commits.len(), layout });
         // Windows paths use backslashes; on macOS/Linux the path must stay as-is (a blanket replace turns /Users/x into \Users\x).
         let root_s = if cfg!(windows) { root.to_string_lossy().replace('/', "\\") } else { root.to_string_lossy().into_owned() };
         Ok(RepoView {
@@ -97,6 +126,7 @@ async fn open_repo(path: String, max: Option<usize>, view: Option<git::RefView>,
             path: root_s,
             data,
             graph,
+            history_cursor,
         })
     })
     .await?
@@ -135,8 +165,8 @@ async fn file_diff(
 }
 
 #[tauri::command]
-async fn file_versions(path: String, source: git::DiffSource, file: String, untracked: bool, parent: Option<String>) -> Result<files::FileVersions, String> {
-    blocking(move || files::versions(Path::new(&path), &source, &file, parent.as_deref(), untracked)).await
+async fn file_versions(path: String, source: git::DiffSource, file: String, untracked: bool, parent: Option<String>, allow_large: Option<bool>) -> Result<files::FileVersions, String> {
+    blocking(move || files::versions_with_limit(Path::new(&path), &source, &file, parent.as_deref(), untracked, allow_large.unwrap_or(false))).await
 }
 
 #[tauri::command]
@@ -912,6 +942,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             launch_options,
             open_repo,
+            history_page,
             commit_files,
             file_diff,
             file_versions,

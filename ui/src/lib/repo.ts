@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { QueryClient, useQuery } from "@tanstack/react-query";
 import { postDesktopNotifications } from "./desktop-notify";
 import { invoke } from "@tauri-apps/api/core";
@@ -9,7 +10,7 @@ export const queryClient = new QueryClient({
   defaultOptions: { queries: { refetchOnWindowFocus: true, staleTime: 2000, retry: false } },
 });
 
-/** Latest data per repository, whatever graph view (limit / hidden / solo) it was read with. */
+/** Latest data per repository, whatever graph view (hidden / solo / pinned) it was read with. */
 const latest = new Map<string, RepoView>();
 
 export function refView(path: string): RefView {
@@ -17,40 +18,122 @@ export function refView(path: string): RefView {
   return { hidden: st.hidden[path] ?? [], solo: st.solo[path] ?? [] };
 }
 
-export function useRepo(path: string | undefined, tabId: string) {
-  const limit = useStore((s) => s.ui[tabId]?.limit ?? 0);
-  const hidden = useStore((s) => (path ? s.settings.hidden[path] : undefined));
-  const solo = useStore((s) => (path ? s.settings.solo[path] : undefined));
-  const pinned = useStore((s) => (path ? s.settings.pinned?.[path] : undefined));
-  // General > Initial Commits in Graph / Show All Commits; UI Customization > Smart Branch Visibility.
-  const initial = useStore((s) => (s.settings.showAllCommits ? 10000000 : Math.max(500, s.settings.initialCommits || 2000)));
-  const smart = useStore((s) => !!s.settings.smartBranches);
-  const view: RefView = { hidden: hidden ?? [], solo: solo ?? [], pinned: pinned ?? null, smart };
-  return useQuery({
-    queryKey: ["repo", path, limit, view, initial],
+function repoRequest(path: string) {
+  const s = useStore.getState().settings;
+  const initial = Math.min(5000, Math.max(500, s.initialCommits || 2000));
+  const view: RefView = { hidden: s.hidden[path] ?? [], solo: s.solo[path] ?? [], pinned: s.pinned?.[path] ?? null, smart: !!s.smartBranches };
+  return { initial, view, key: ["repo", path, view, initial] as const };
+}
+
+function isOpen(path: string) { return useStore.getState().tabs.some((t) => t.path === path); }
+
+function isActive(path: string) {
+  const s = useStore.getState();
+  return s.tabs.some((t) => t.id === s.activeId && t.path === path);
+}
+const deferred = new Map<string, boolean>();
+const pageLoads = new Map<string, Promise<void>>();
+let nextGeneration = 0;
+const generations = new Map<string, number>();
+function generationFor(path: string) {
+  if (!generations.has(path)) generations.set(path, ++nextGeneration);
+  return generations.get(path)!;
+}
+const actionChanges = new Map<string, { full: boolean }>();
+const fullRefreshes = new Map<string, { again: boolean; promise: Promise<void> }>();
+
+export function useRepo(path: string | undefined, active = true) {
+  // Subscribe to request inputs without coupling repository reads to unrelated preferences.
+  const settings = useStore((s) => s.settings);
+  const request = repoRequest(path ?? "");
+  const q = useQuery({
+    queryKey: request.key,
     queryFn: async () => {
-      const r = await api.openRepo(path!, limit || initial, view);
-      latest.set(path!, r);
+      const generation = generationFor(path!);
+      const r = await api.openRepo(path!, request.initial, request.view);
+      if (generations.get(path!) === generation && JSON.stringify(repoRequest(path!).key) === JSON.stringify(request.key)) latest.set(path!, r);
       return r;
     },
-    enabled: !!path,
-    // The file watcher already reports every change, so switching back to the window doesn't reload everything.
+    enabled: !!path && active,
+    staleTime: Infinity,
+    gcTime: 60_000,
     refetchOnWindowFocus: false,
-    // Keep the graph while changing its view, but never show another repository's data.
     placeholderData: (prev, query) => (query?.queryKey[1] === path ? prev : undefined),
   });
+  useEffect(() => {
+    if (!path || !active || !deferred.has(path)) return;
+    const full = deferred.get(path);
+    deferred.delete(path);
+    if (full) void refresh(path); else void refreshStatus(path);
+  }, [path, active]);
+  useEffect(() => {
+    if (!path || !active || !(settings.showAllCommits || (q.data?.commits.length ?? 0) < Math.max(500, settings.initialCommits || 2000)) || !q.data?.history_cursor || q.isFetching || q.isPlaceholderData) return;
+    // Yield between bounded pages; hiding or closing the tab stops further requests.
+    const timer = window.setTimeout(() => void loadMoreRepo(path).catch((e) => useStore.getState().toast(false, String(e))), 25);
+    return () => clearTimeout(timer);
+  }, [path, active, settings.showAllCommits, settings.initialCommits, q.data?.history_cursor, q.isFetching, q.isPlaceholderData]);
+  return q;
+}
+
+export function loadMoreRepo(path: string): Promise<void> {
+  const request = repoRequest(path);
+  const key = JSON.stringify(request.key);
+  const pending = pageLoads.get(key);
+  if (pending) return pending;
+  const before = queryClient.getQueryData<RepoView>(request.key);
+  if (!before?.history_cursor || !isActive(path) || deferred.has(path)) return Promise.resolve();
+  const cursor = before.history_cursor;
+  const generation = generationFor(path);
+  const task = (async () => {
+    const page = await api.historyPage(path, cursor, request.initial);
+    if (generations.get(path) !== generation || !isActive(path) || JSON.stringify(repoRequest(path).key) !== key) return;
+    queryClient.setQueryData<RepoView>(request.key, (current) => {
+      if (!current || current.history_cursor !== cursor) return current;
+      const next = { ...current, commits: [...current.commits, ...page.commits], graph: { rows: [...current.graph.rows, ...page.graph.rows], width: page.graph.width }, has_more: page.has_more, history_cursor: page.history_cursor };
+      latest.set(path, next);
+      return next;
+    });
+  })().finally(() => { if (pageLoads.get(key) === task) pageLoads.delete(key); });
+  pageLoads.set(key, task);
+  return task;
+}
+
+/** Closing the final tab releases snapshots, queries and pending page results for that repository. */
+export function releaseRepo(path: string) {
+  generations.delete(path);
+  latest.delete(path);
+  deferred.delete(path);
+  for (const key of pageLoads.keys()) if (JSON.parse(key)[1] === path) pageLoads.delete(key);
+  void queryClient.cancelQueries({ predicate: (q) => q.queryKey[1] === path });
+  queryClient.removeQueries({ predicate: (q) => q.queryKey[1] === path });
 }
 
 export function repoData(path: string): RepoView | undefined {
   return latest.get(path);
 }
 
-export async function refresh(path: string) {
-  // HEAD changes and file saves also change open diffs, blame and file history.
-  // Status can remain "M" while the file's contents change, so its status alone isn't a cache key.
-  await Promise.all(["repo", "diff", "versions", "history", "blame", "range", "conflict"].map((kind) =>
-    queryClient.invalidateQueries({ queryKey: [kind, path] }),
-  ));
+export async function refresh(path: string): Promise<void> {
+  if (!isOpen(path)) return;
+  generations.set(path, ++nextGeneration);
+  if (!isActive(path)) {
+    if (isOpen(path)) deferred.set(path, true);
+    return;
+  }
+  const current = fullRefreshes.get(path);
+  if (current) { current.again = true; return current.promise; }
+  const task = { again: false, promise: Promise.resolve() };
+  fullRefreshes.set(path, task);
+  task.promise = (async () => {
+    try {
+      do {
+        task.again = false;
+        await Promise.all(["repo", "diff", "versions", "history", "blame", "range", "conflict"].map((kind) =>
+          queryClient.invalidateQueries({ queryKey: [kind, path] }, { cancelRefetch: false }),
+        ));
+      } while (task.again && isActive(path));
+    } finally { fullRefreshes.delete(path); }
+  })();
+  return task.promise;
 }
 
 /** Put new file lists into every cached view of the repository, keeping commits and graph as they are
@@ -65,6 +148,10 @@ const statusRefreshes = new Map<string, { again: boolean; promise: Promise<void>
 
 /** Coalesce watcher bursts; an event during a read requests one trailing read instead of concurrent Git processes. */
 export function refreshStatus(path: string): Promise<void> {
+  if (!isActive(path)) {
+    if (isOpen(path) && !deferred.has(path)) deferred.set(path, false);
+    return Promise.resolve();
+  }
   const current = statusRefreshes.get(path);
   if (current) {
     current.again = true;
@@ -80,7 +167,7 @@ export function refreshStatus(path: string): Promise<void> {
         await Promise.all(["diff", "versions", "blame", "range", "conflict"].map((kind) =>
           queryClient.invalidateQueries({ queryKey: [kind, path] }),
         ));
-      } while (task.again);
+      } while (task.again && isActive(path));
     } catch {
       await refresh(path);
     } finally {
@@ -93,6 +180,9 @@ export function refreshStatus(path: string): Promise<void> {
 /** File watcher: working-folder edits and index changes refresh the file lists only; anything else
  *  (commits, branches, HEAD) reloads the repository. */
 export function onWatcherChange(path: string, full: boolean) {
+  if (!isOpen(path)) return;
+  const action = actionChanges.get(path);
+  if (action) { action.full ||= full; return; }
   if (!full) return void refreshStatus(path);
   // Never suppress an external change just because our own action recently finished.
   void refresh(path);
@@ -184,6 +274,7 @@ async function runAct(path: string, action: Action, quiet: boolean): Promise<boo
     if (guess) setStatus(path, guess);
   }
   let ok = false;
+  actionChanges.set(path, { full: false });
   try {
     const r = await api.run(path, action);
     if (!r.ok && action.type === "push" && !action.force && /rejected|non-fast-forward|fetch first/i.test(r.message)) {
@@ -203,11 +294,12 @@ async function runAct(path: string, action: Action, quiet: boolean): Promise<boo
     return false;
   } finally {
     // Keep the busy note until the lists are up to date, so there is always something showing it's working.
-    if (light && ok) await refreshStatus(path);
-    else {
-      await refresh(path);
-    }
-    st.setBusy(null);
+    const changes = actionChanges.get(path);
+    actionChanges.delete(path);
+    try {
+      if (light && ok && !changes?.full) await refreshStatus(path);
+      else await refresh(path);
+    } finally { st.setBusy(null); }
   }
 }
 
@@ -339,7 +431,10 @@ export function currentBranch(repo: RepoView | undefined): GitRef | undefined {
 export async function openRepoPath(path: string) {
   const st = useStore.getState();
   try {
-    const r = await api.openRepo(path);
+    const request = repoRequest(path);
+    const r = await api.openRepo(path, request.initial, request.view);
+    const canonical = repoRequest(r.path);
+    if (JSON.stringify(canonical.view) === JSON.stringify(request.view)) queryClient.setQueryData(canonical.key, r);
     latest.set(r.path, r);
     const main = r.worktrees[0]?.path;
     st.openRepoTab(r.path, r.name, main && main.replace(/\\/g, "/").toLowerCase() !== r.path.replace(/\\/g, "/").toLowerCase() ? main : undefined);
