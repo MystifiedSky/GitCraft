@@ -230,3 +230,28 @@ button:focus-visible, [role="button"]:focus-visible, a:focus-visible {
 @media (prefers-reduced-motion: reduce) {
   .section-collapse { transition: none; }
 }
+
+/* ---- Polish: hover, selection and entrance motion ---- */
+.graph-row { transition: background-color 120ms ease-out; }
+.graph-row:not([data-selected="true"]):hover { background: var(--color-hoverrow); }
+/* A row that lacks the hovered label: its text drops to 20% strength (50% when selected) after a 1 s pause, easing over 0.5 s. */
+.graph-row-text { transition: color 100ms ease-in-out; }
+.graph-row-text[data-dimmed="true"] { color: color-mix(in srgb, var(--color-white) 20%, transparent); transition: color 500ms ease-out 1s; }
+.graph-row[data-selected="true"] .graph-row-text[data-dimmed="true"] { color: color-mix(in srgb, var(--color-white) 50%, transparent); }
+
+button, [role="button"], [role="option"], [role="tab"], input, select, textarea {
+  transition: background-color 120ms ease-out, border-color 120ms ease-out, color 120ms ease-out, box-shadow 120ms ease-out;
+}
+.menu-item { transition: background-color 80ms ease-out; }
+::selection { background: rgb(77 136 255 / 0.4); }
+
+@keyframes menu-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes dialog-in { from { opacity: 0; transform: translateY(-8px) scale(0.985); } to { opacity: 1; transform: none; } }
+@keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.menu-content[data-state="open"] { animation: menu-in 130ms cubic-bezier(0.2, 0.8, 0.2, 1); }
+.dialog-surface { animation: dialog-in 190ms cubic-bezier(0.2, 0.8, 0.2, 1); }
+.dialog-overlay { animation: surface-in 160ms ease-out; }
+.toast-in { animation: toast-in 200ms cubic-bezier(0.2, 0.8, 0.2, 1); }
+@media (prefers-reduced-motion: reduce) {
+  .graph-row, .graph-row-text, .menu-item { transition: none; }
+}

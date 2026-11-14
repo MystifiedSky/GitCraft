@@ -26,14 +26,16 @@ export async function switchProfile(id: string) {
   if (!target) return;
   const profiles = s.profiles.map((p) => (p.id === s.activeProfile ? { ...p, settings: s.settings } : p));
   useStore.setState({ profiles, activeProfile: id, settings: { ...DEFAULT_SETTINGS, ...(target.settings ?? {}), recents: s.settings.recents } });
-  if (target.gitName) await api.setGitConfig(null, "global", "user.name", target.gitName).catch(() => {});
-  if (target.gitEmail) await api.setGitConfig(null, "global", "user.email", target.gitEmail).catch(() => {});
+  if (useStore.getState().settings.keepGitconfigUpdated) {
+    if (target.gitName) await api.setGitConfig(null, "global", "user.name", target.gitName).catch(() => {});
+    if (target.gitEmail) await api.setGitConfig(null, "global", "user.email", target.gitEmail).catch(() => {});
+  }
   s.toast(true, `Switched to profile ${target.name}`);
 }
 
-export function addProfile(name: string, gitName: string, gitEmail: string) {
+export function addProfile(name: string, gitName: string, gitEmail: string, options: { icon?: number; copySettings?: boolean } = {}) {
   const s = st();
-  const p: Profile = { id: newId(), name: name.trim() || "Profile", gitName: gitName.trim(), gitEmail: gitEmail.trim(), settings: { ...s.settings } };
+  const p: Profile = { id: newId(), name: name.trim() || "Profile", gitName: gitName.trim(), gitEmail: gitEmail.trim(), icon: options.icon ?? 0, settings: options.copySettings === false ? null : { ...s.settings } };
   useStore.setState({ profiles: [...s.profiles, p] });
   return p;
 }

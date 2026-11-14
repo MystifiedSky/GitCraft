@@ -1677,12 +1677,21 @@ mod tests {
         let repo = d.to_string_lossy().to_string();
         let e = Engine::default();
         // Starting files and the first commit.
-        let opts = crate::manage::InitOptions { branch: String::new(), gitignore: vec!["Node".into(), "Rust".into()], license: "MIT".into(), readme: true };
+        let opts = crate::manage::InitOptions { branch: String::new(), gitignore: vec!["Node".into(), "Rust".into()], license: "MIT".into(), readme: true, lfs: false };
         assert!(crate::manage::init_files(&d, "demo", &opts, &|a: &[&str]| e.git(&d, a)).ok);
         let gi = fs::read_to_string(d.join(".gitignore")).unwrap();
         assert!(gi.contains("node_modules/") && gi.contains("/target/"));
         assert!(fs::read_to_string(d.join("LICENSE")).unwrap().starts_with("MIT License"));
         assert_eq!(git::run(&d, &["log", "--format=%s"]).stdout.trim(), "Initial commit");
+
+        // With nothing to add the first commit is still made, and it is empty.
+        let empty = temp_repo("empty-init");
+        git::run(&empty, &["config", "user.name", "T"]);
+        git::run(&empty, &["config", "user.email", "t@example.com"]);
+        let none = crate::manage::InitOptions { branch: String::new(), gitignore: vec![], license: String::new(), readme: false, lfs: false };
+        assert!(crate::manage::init_files(&empty, "demo", &none, &|a: &[&str]| e.git(&empty, a)).ok);
+        assert_eq!(git::run(&empty, &["log", "--format=%s"]).stdout.trim(), "Initial commit");
+        assert!(git::run(&empty, &["ls-tree", "-r", "HEAD"]).stdout.trim().is_empty());
 
         // Ignore helpers: add once, untrack a tracked file.
         fs::write(d.join("secret.log"), "x").unwrap();

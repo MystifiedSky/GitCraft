@@ -78,6 +78,8 @@ fn launch_options(state: State<'_, AppState>) -> LaunchOptions {
 async fn open_repo(path: String, max: Option<usize>, view: Option<git::RefView>, state: State<'_, AppState>) -> Result<RepoView, String> {
     let engine = state.engine.clone();
     blocking(move || {
+        // Tabs saved by versions that turned /Users/x into \Users\x on macOS/Linux: restore the slashes.
+        let path = if cfg!(not(windows)) && path.starts_with('\\') { path.replace('\\', "/") } else { path };
         let p = PathBuf::from(&path);
         if !p.exists() {
             return Err(format!("The folder {path} doesn't exist"));
@@ -87,7 +89,8 @@ async fn open_repo(path: String, max: Option<usize>, view: Option<git::RefView>,
         let data = git::load_view(&root, max.unwrap_or(INITIAL_COMMITS).max(prefs::MIN_INITIAL_COMMITS), &view);
         let pinned_sha = view.pinned.as_ref().and_then(|p| data.refs.iter().find(|r| &r.full == p)).map(|r| r.sha.clone());
         let graph = graph::layout_pinned(&data.commits, pinned_sha.as_deref());
-        let root_s = root.to_string_lossy().replace('/', "\\");
+        // Windows paths use backslashes; on macOS/Linux the path must stay as-is (a blanket replace turns /Users/x into \Users\x).
+        let root_s = if cfg!(windows) { root.to_string_lossy().replace('/', "\\") } else { root.to_string_lossy().into_owned() };
         Ok(RepoView {
             name: git::repo_name(&root),
             undo: engine.undo_info(&root_s),
@@ -648,6 +651,10 @@ async fn init_repo(parent: String, name: String, options: Option<manage::InitOpt
             if !f.ok {
                 return Err(f.message());
             }
+            // Git LFS is set up last, after the first commit; a problem there does not undo the new repository.
+            if opts.lfs {
+                let _ = engine.git(&dir, &["lfs", "install", "--local"]);
+            }
             Ok(dir.to_string_lossy().into_owned())
         } else {
             Err(o.message())
@@ -656,29 +663,83 @@ async fn init_repo(parent: String, name: String, options: Option<manage::InitOpt
     .await?
 }
 
+/// What the Clone dialog can ask for besides the address and folder.
+#[derive(serde::Deserialize, Default)]
+struct CloneOptions {
+    /// Only the newest this-many commits (--depth).
+    depth: Option<u32>,
+    /// Only commits newer than this date, YYYY-MM-DD (--shallow-since).
+    since: Option<String>,
+    /// Clone just this branch (--single-branch --branch).
+    branch: Option<String>,
+    /// Extra flags, split on spaces, passed as typed.
+    custom_flags: Option<String>,
+    /// Start with a sparse checkout (--sparse) and check out only `sparse_paths`.
+    sparse: Option<bool>,
+    sparse_paths: Option<Vec<String>>,
+    /// Leave file contents out of the first download (--filter blob:none).
+    blobless: Option<bool>,
+}
+
+/// The `git clone` arguments in a fixed order: branch, depth, progress, since, custom flags, sparse, filter.
+fn clone_args(o: &CloneOptions) -> Vec<String> {
+    let mut a: Vec<String> = Vec::new();
+    if let Some(b) = o.branch.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
+        a.extend(["--single-branch".to_string(), "--branch".to_string(), b.to_string()]);
+    }
+    if let Some(d) = o.depth.filter(|d| *d > 0) {
+        a.extend(["--depth".to_string(), d.to_string()]);
+    }
+    a.push("--progress".into());
+    if let Some(since) = o.since.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        a.extend(["--shallow-since".to_string(), since.to_string()]);
+    }
+    if let Some(flags) = o.custom_flags.as_deref() {
+        a.extend(flags.split_whitespace().map(str::to_string));
+    }
+    if o.sparse == Some(true) {
+        a.push("--sparse".into());
+    }
+    if o.blobless == Some(true) {
+        a.extend(["--filter".to_string(), "blob:none".to_string()]);
+    }
+    a
+}
+
 #[tauri::command]
-async fn clone_repo(url: String, parent: String, depth: Option<u32>, state: State<'_, AppState>) -> Result<String, String> {
+async fn clone_repo(url: String, parent: String, options: Option<CloneOptions>, state: State<'_, AppState>) -> Result<String, String> {
     let engine = state.engine.clone();
     let parent = PathBuf::from(parent);
     tokio::fs::create_dir_all(&parent).await.map_err(err)?;
     blocking(move || {
+        let opts = options.unwrap_or_default();
         let name = url.trim_end_matches('/').rsplit(['/', '\\', ':']).next().unwrap_or("repo").trim_end_matches(".git").to_string();
         let dest = parent.join(&name);
-        // Shallow clone: only the newest `depth` commits.
-        let depth_arg = depth.filter(|d| *d > 0).map(|d| format!("--depth={d}"));
-        let mut args = vec!["clone", "--progress"];
-        if let Some(a) = depth_arg.as_deref() {
-            args.push(a);
-        }
         let dest_s = dest.to_string_lossy().into_owned();
-        args.push(url.trim());
-        args.push(&dest_s);
-        let o = engine.job("clone", "clone", &parent, &args);
-        if o.ok {
-            Ok(dest.to_string_lossy().into_owned())
-        } else {
-            Err(o.message())
+        let mut args: Vec<String> = vec!["clone".into()];
+        args.extend(clone_args(&opts));
+        args.push(url.trim().to_string());
+        args.push(dest_s);
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let o = engine.job("clone", "clone", &parent, &refs);
+        if !o.ok {
+            return Err(o.message());
         }
+        if opts.sparse == Some(true) {
+            // Only the chosen paths are checked out; with none, only the files in the top folder.
+            let mut set: Vec<String> = vec!["sparse-checkout".into(), "set".into()];
+            let paths: Vec<String> = opts.sparse_paths.unwrap_or_default().into_iter().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect();
+            if !paths.is_empty() {
+                set.push("--".into());
+                set.extend(paths);
+            }
+            let refs: Vec<&str> = set.iter().map(String::as_str).collect();
+            let s = engine.git(&dest, &refs);
+            if !s.ok {
+                return Err(format!("The repository was cloned, but the sparse checkout could not be set: {}", s.message()));
+            }
+        }
+        Ok(dest.to_string_lossy().into_owned())
     })
     .await?
 }
@@ -947,4 +1008,29 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running GitCraft");
+}
+
+#[cfg(test)]
+mod clone_tests {
+    use super::*;
+
+    #[test]
+    fn clone_arguments_keep_a_fixed_order() {
+        let all = CloneOptions {
+            depth: Some(5),
+            since: Some("2025-01-31".into()),
+            branch: Some("dev".into()),
+            custom_flags: Some("--no-tags   --quiet".into()),
+            sparse: Some(true),
+            sparse_paths: None,
+            blobless: Some(true),
+        };
+        assert_eq!(
+            clone_args(&all),
+            ["--single-branch", "--branch", "dev", "--depth", "5", "--progress", "--shallow-since", "2025-01-31", "--no-tags", "--quiet", "--sparse", "--filter", "blob:none"]
+        );
+        assert_eq!(clone_args(&CloneOptions::default()), ["--progress"]);
+        let blank = CloneOptions { branch: Some("  ".into()), depth: Some(0), ..Default::default() };
+        assert_eq!(clone_args(&blank), ["--progress"]);
+    }
 }

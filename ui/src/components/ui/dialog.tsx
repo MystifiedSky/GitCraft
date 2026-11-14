@@ -11,6 +11,7 @@ export function Dialog({
   children,
   footer,
   width = 440,
+  sidebar,
 }: {
   open: boolean;
   onClose: () => void;
@@ -18,6 +19,8 @@ export function Dialog({
   children: ReactNode;
   footer?: ReactNode;
   width?: number;
+  /** A list down the left side (for dialogs with several sources); the children fill the right side. */
+  sidebar?: ReactNode;
 }) {
   const content = useRef<HTMLDivElement>(null);
   return (
@@ -43,7 +46,14 @@ export function Dialog({
               <X size={16} />
             </D.Close>
           </div>
-          <div className="p-4 overflow-auto">{children}</div>
+          {sidebar ? (
+            <div className="flex min-h-[320px] overflow-hidden">
+              <aside className="w-[195px] shrink-0 bg-black/20 border-r border-line py-px overflow-auto">{sidebar}</aside>
+              <div className="flex-1 min-w-0 p-4 overflow-auto">{children}</div>
+            </div>
+          ) : (
+            <div className="p-4 overflow-auto">{children}</div>
+          )}
           {footer && <div className="flex justify-end gap-2 px-4 pb-4">{footer}</div>}
         </D.Content>
       </D.Portal>

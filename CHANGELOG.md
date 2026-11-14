@@ -6,6 +6,8 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Added
 
+- An optional strip of coloured ticks beside the graph's scrollbar (Preferences > UI Customization > Show markers beside the graph scrollbar) can mark branches, tags, remote branches, the checked-out commit and the selection. It is off by default, so the graph looks as before.
+
 - Desktop notifications are off by default, sent only while GitCraft is in the background, several at once become "You have N new notifications", an unclicked one is dismissed after 20 seconds, clicking one brings GitCraft forward and opens the bell menu, reading or removing a notification closes its pop-up, and turning the setting on shows a "Desktop notifications enabled" pop-up.
 
 - The graph draws date lines between commits ("20 hours ago", "yesterday", "a month ago", ...) while the date column is hidden or a search is active. The status bar gains a what's-new gift icon and a Support link.
@@ -16,6 +18,15 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Changed
 
+- When a remembered repository tab points at a folder that no longer exists, the error screen shows the folder and offers Try again, Locate folder and Close tab.
+
+- Hovering a tag or branch label no longer tints every commit below it. Only the commit of a tag (or a branch's own stretch of unlabelled commits, down to the next labelled commit) stays bright while the other rows fade, and labels show a tooltip such as "v0.1.3 (Tag)". The selected row uses the selection colour, rows and buttons ease their hover colours, and menus, dialogs and notifications slide in gently. The tag icon now follows the tag name and the graph's column titles use a small monospace style.
+
+- Cloning follows Git's usual order of options and offers more control: Shallow Clone can limit history by commit depth or by a since date (checked for the format and against future dates), clone a single branch, and pass extra flags; Sparse Checkout takes a list of paths (one per line, or only top-level files when empty) and an optional blobless clone.
+- Creating a repository always makes an "Initial commit" (empty if there is nothing to add) and sets up Git LFS afterwards, so an LFS problem no longer stops the repository from being created. The optional README box now starts unticked.
+
+- Initialize a Repository and Clone a Repository are now two-pane dialogs with a source list on the left (Local Only or Clone with URL, then GitHub, GitLab, Bitbucket and Azure DevOps). New repositories can be set up with Git LFS, and clones can use Sparse Checkout. The Profiles page shows a My Profiles card with a "keep .gitconfig updated" option, an Add a Profile button, and a table of profiles; the Add Profile dialog lets you pick a picture, name, author and whether to copy the current settings.
+
 - Preferences now start with an Exit Preferences button at the top of the section list, followed by the current profile and the Preferences and Repo-Specific Preferences headings. A staged file's edit button reads "Edit in Working Directory".
 
 - Update checks now repeat every 10 hours instead of every hour. The File menu shows the update lines that fit the situation: "Checking for updates...", "Restart and Install Update", "Check for Update (Last checked 5 minutes ago)", "Update Errored (2 minutes ago)" and "Downloading Update...". A failed check clears the "Last checked" time, and the wording of times follows the usual "a few seconds ago / an hour ago / 2 days ago" steps.
@@ -25,6 +36,8 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 - Source comments, documentation and test names describe GitCraft on its own terms and no longer refer to other software.
 
 ### Fixed
+
+- The graph's date lines ("1 hour ago", "yesterday") and the optional scrollbar markers now only appear when the list is long enough to scroll, instead of always. When you hover a label, the other rows' text fades to a dim colour after a short pause rather than turning translucent.
 
 - An outdated test of the AI commit-message request was corrected; the frontend (61) and Rust (63) test suites now run and pass.
 

@@ -353,6 +353,9 @@ pub struct InitOptions {
     pub license: String,
     #[serde(default)]
     pub readme: bool,
+    /// Set up Git LFS for the new repository (`git lfs install --local`).
+    #[serde(default)]
+    pub lfs: bool,
 }
 
 /// Write the starting files and make the first commit if there are any.
@@ -385,6 +388,8 @@ pub fn init_files(dir: &Path, name: &str, opts: &InitOptions, run: &dyn Fn(&[&st
         wrote = true;
     }
     if !wrote {
+        // The first commit is made even with nothing to add; when Git has no author name yet this is skipped quietly.
+        let _ = run(&["commit", "-q", "--allow-empty", "-m", "Initial commit"]);
         return ok();
     }
     let o = run(&["add", "-A"]);

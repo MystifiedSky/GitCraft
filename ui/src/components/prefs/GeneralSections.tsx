@@ -243,6 +243,9 @@ export function UiSection() {
       <Row label="Highlight associated rows when hovering over a branch">
         <Toggle value={set.highlightRowsOnHover} onChange={(v) => put({ highlightRowsOnHover: v })} />
       </Row>
+      <Row label="Show markers beside the graph scrollbar" help="Coloured ticks for branches, tags, the checked-out commit and the selection. Off by default.">
+        <Toggle value={set.scrollMarkers} onChange={(v) => put({ scrollMarkers: v })} />
+      </Row>
       <H sub>Panels</H>
       <Row label="Show toolbar icon labels">
         <Toggle value={set.toolbarLabels} onChange={(v) => put({ toolbarLabels: v })} />

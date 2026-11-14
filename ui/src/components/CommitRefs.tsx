@@ -101,11 +101,14 @@ export function CommitRefs({ repo, refs, color, hovered, selected, roomy, onSele
     };
   }, [showPopup, expanded.length, m.row_inner]);
 
+  /** The hover tooltip: the name and what kind of label it is, e.g. "v0.1.3 (Tag)". */
+  const describe = (r: GitRef) =>
+    `${r.name} (${r.kind === "Tag" ? "Tag" : r.kind === "Remote" ? "Remote Branch" : r.name === repo.head_branch ? "Current Branch" : "Local Branch"})`;
   const icons = (r: GitRef, compact = false) => (
     <>
       {r.kind === "Local" && r.name === repo.head_branch && <Check size={13} strokeWidth={3} className="shrink-0" />}
-      {r.kind === "Tag" && <Tag size={12} className="shrink-0" />}
       <span className={cn("min-w-0", compact ? "truncate font-semibold" : "break-all text-left")}>{r.name}</span>
+      {r.kind === "Tag" && <Tag size={12} className="shrink-0" />}
       {r.kind === "Local" && (!compact || roomy) && <Laptop size={13} className="shrink-0 opacity-90" />}
       {(r.kind === "Remote" || (compact && remoteSame)) && <Cloud size={13} className="shrink-0 opacity-90" />}
       {compact && roomy && more > 0 && <span className="shrink-0 text-[11px] opacity-80">+{more}</span>}
@@ -129,6 +132,7 @@ export function CommitRefs({ repo, refs, color, hovered, selected, roomy, onSele
           type="button"
           tabIndex={selected ? 0 : -1}
           aria-label={`${first.name}; ${refs.length} branch or tag labels`}
+          title={describe(first)}
           aria-expanded={refs.length > 1 ? showPopup : undefined}
           aria-controls={showPopup ? id : undefined}
           onFocus={reveal}
@@ -174,6 +178,7 @@ export function CommitRefs({ repo, refs, color, hovered, selected, roomy, onSele
             <CtxMenu key={r.full} items={() => branchMenu(repo, r)} onOpenChange={menuChanged}>
               <button
                 type="button"
+                title={describe(r)}
                 className={cn(labelClass, "commit-ref-label shrink-0 hover:brightness-125")}
                 style={{ background: mix(color, 0.45), minHeight: m.row_inner }}
                 onClick={(e) => { e.stopPropagation(); onSelect(e); }}

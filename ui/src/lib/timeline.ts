@@ -59,5 +59,6 @@ export function assignTimeline(rowTimes: number[], now: Date = new Date()): Map<
  * hasTimeline: labels show while the Date / Time column is hidden, or always when the commit list is filtered; never on the first row.
  */
 export function showsTimeline(rowIndex: number, dateColumnShown: boolean, filtered: boolean): boolean {
+  // (The caller also requires the list to be taller than its view, as the labels sit in the scrollbar column.)
   return rowIndex > 0 && (filtered || !dateColumnShown);
 }

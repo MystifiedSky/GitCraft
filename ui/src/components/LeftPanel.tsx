@@ -48,6 +48,9 @@ import { CtxMenu } from "./ui/menu";
 import { cn } from "@/lib/utils";
 import { AgentsView, ConflictCheckRows, PatchRows, useConflictCheck } from "./Stage6Panels";
 
+/** Join a submodule path onto the repo path with the platform separator (backslashes only on Windows). */
+const joinSub = (repo: string, sub: string) => (/Win/.test(navigator.platform) ? `${repo}\\${sub.replace(/\//g, "\\")}` : `${repo}/${sub}`);
+
 type SectionKey = "lfs" | "gitflow" | "local" | "remote" | "worktrees" | "stashes" | "tags" | "submodules" | "cloud" | "prs" | "issues" | "teams";
 
 /** Left panel: branches, remotes, worktrees, stashes, tags and the service sections. */
@@ -509,13 +512,13 @@ function Submodules({ repo }: { repo: RepoView }) {
         <CtxMenu
           key={m.path}
           items={[
-            { label: `Open submodule: ${m.path}`, disabled: m.state === "uninitialized", onSelect: () => openRepoPath(`${repo.path}\\${m.path.replace(/\//g, "\\")}`) },
+            { label: `Open submodule: ${m.path}`, disabled: m.state === "uninitialized", onSelect: () => openRepoPath(joinSub(repo.path, m.path)) },
             { label: m.state === "uninitialized" ? `Initialize ${m.path}` : `Update ${m.path}`, onSelect: () => act(repo.path, { type: "submoduleUpdate", paths: [m.path] }) },
             { separator: true },
             { label: "Delete this submodule", danger: true, onSelect: () => act(repo.path, { type: "submoduleRemove", path: m.path }) },
           ]}
         >
-          <Row indent={1} title={`${m.url}\n${SUB_STATE[m.state]?.[1] ?? ""}`} onDoubleClick={() => m.state !== "uninitialized" && openRepoPath(`${repo.path}\\${m.path.replace(/\//g, "\\")}`)}>
+          <Row indent={1} title={`${m.url}\n${SUB_STATE[m.state]?.[1] ?? ""}`} onDoubleClick={() => m.state !== "uninitialized" && openRepoPath(joinSub(repo.path, m.path))}>
             <Package size={13} style={{ color: SUB_STATE[m.state]?.[0] }} />
             <span className="truncate">{m.path}</span>
             {m.sha && <span className="mono text-[10.5px] text-fg3">{m.sha.slice(0, 7)}</span>}

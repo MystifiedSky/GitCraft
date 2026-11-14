@@ -69,16 +69,18 @@ export function Avatar({ name, email, size = 22 }: { name: string; email: string
 }
 
 /** Small square "profile" picture made from shapes (no artwork copied). */
-export function ProfileMark() {
+export const PROFILE_COLORS = ["#7bd938", "#2ec4b6", "#b57bff", "#ff9f43"];
+
+export function ProfileMark({ color = PROFILE_COLORS[0], size = 18 }: { color?: string; size?: number }) {
   return (
-    <svg width="18" height="18" viewBox="0 0 9 9" shapeRendering="crispEdges">
+    <svg width={size} height={size} viewBox="0 0 9 9" shapeRendering="crispEdges">
       <rect width="9" height="9" fill="transparent" />
-      <rect x="2" y="1" width="5" height="1" fill="#7bd938" />
-      <rect x="1" y="2" width="7" height="4" fill="#7bd938" />
+      <rect x="2" y="1" width="5" height="1" fill={color} />
+      <rect x="1" y="2" width="7" height="4" fill={color} />
       <rect x="2" y="3" width="1" height="1" fill="#1c1e23" />
       <rect x="6" y="3" width="1" height="1" fill="#1c1e23" />
-      <rect x="1" y="6" width="2" height="2" fill="#7bd938" />
-      <rect x="6" y="6" width="2" height="2" fill="#7bd938" />
+      <rect x="1" y="6" width="2" height="2" fill={color} />
+      <rect x="6" y="6" width="2" height="2" fill={color} />
     </svg>
   );
 }

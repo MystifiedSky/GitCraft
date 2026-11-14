@@ -600,7 +600,13 @@ pub fn repo_file(dir: &Path, file: &str) -> Result<std::path::PathBuf, String> {
     if file.is_empty() || rel.is_absolute() || rel.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
         return Err(format!("\"{file}\" is not a file in this repository"));
     }
-    Ok(dir.join(rel))
+    // Push component by component: `dir.join("src/main.rs")` keeps the forward slash, and the Windows shell
+    // APIs behind "Open in File Manager" (SHParseDisplayName) reject mixed separators.
+    let mut full = dir.to_path_buf();
+    for c in rel.components() {
+        full.push(c);
+    }
+    Ok(full)
 }
 
 /// Largest file "Copy file contents" puts on the clipboard.
@@ -667,5 +673,12 @@ mod file_action_tests {
         assert!(repo_file(dir, "").is_err());
         assert!(repo_file(dir, "C:/Windows/win.ini").is_err());
         assert!(repo_file(dir, "/etc/passwd").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn repo_file_uses_only_backslashes_on_windows() {
+        let p = repo_file(Path::new(r"C:\repo"), "src/ui/main.rs").unwrap();
+        assert_eq!(p.to_string_lossy(), r"C:\repo\src\ui\main.rs");
     }
 }

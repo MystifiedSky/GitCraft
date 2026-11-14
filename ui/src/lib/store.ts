@@ -120,6 +120,7 @@ export type DialogState =
   | { kind: "sparse" }
   | { kind: "accounts" }
   | { kind: "profiles" }
+  | { kind: "addProfile" }
   | { kind: "workspaces" }
   | { kind: "choice"; title: string; text: string; choices: { label: string; variant?: "primary" | "danger" | "default"; onSelect: () => void }[] }
   | { kind: "info"; title: string; text: string }
@@ -213,11 +214,15 @@ export interface Settings {
   dateVerboseFormat: string;
   authorInitials: boolean;
   highlightRowsOnHover: boolean;
+  /** Coloured ticks beside the graph scrollbar (off by default). */
+  scrollMarkers: boolean;
   smartBranches: boolean;
   autogroupWorktreeTabs: boolean;
   showAgentsView: boolean;
   /** Notifications > Enable Desktop Notifications (showDesktopNotifications: false). */
   desktopNotifications: boolean;
+  /** Profiles: switching a profile also writes its author name and email to the global Git config. */
+  keepGitconfigUpdated: boolean;
   /** Editor (editor: fontSize 12, tabSize 4, showLineNumbers, syntaxHighlighting, CRLF on Windows). */
   editorFontFamily: string;
   editorFontSize: number;
@@ -327,6 +332,8 @@ export interface Profile {
   name: string;
   gitName: string;
   gitEmail: string;
+  /** Which profile picture (index into PROFILE_COLORS). */
+  icon?: number;
   settings: Partial<Settings> | null;
 }
 
@@ -413,10 +420,12 @@ export const DEFAULT_SETTINGS: Settings = {
   dateVerboseFormat: "MMMM D, YYYY h:mm A",
   authorInitials: false,
   highlightRowsOnHover: true,
+  scrollMarkers: false,
   smartBranches: false,
   autogroupWorktreeTabs: true,
   showAgentsView: true,
   desktopNotifications: false,
+  keepGitconfigUpdated: true,
   editorFontFamily: "",
   editorFontSize: 12,
   editorLineNumbers: true,

@@ -23,13 +23,17 @@ import {
   Wrench,
   ArrowLeft,
   ArrowLeftRight,
+  EllipsisVertical,
   Folder,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
-import { ProfilesPanel } from "../Dialogs";
+import { DropMenu } from "../ui/menu";
+import { PROFILE_COLORS, ProfileMark } from "../Icons";
+import { removeProfile, switchProfile } from "@/lib/prefs";
+import { Button } from "../ui/button";
 import { AgentsSection, CommitSection, EditorSection, ExperimentalSection, GeneralSection, NotificationsSection, SshSection, TerminalSection, ToolsSection, UiSection } from "./GeneralSections";
 import { AiSection, IntegrationsSection, SigningSection } from "./IntegrationSections";
 import { ConflictSection, EncodingSection, GitflowSection, HooksSection, IssueTrackerSection, LfsSection, SparseSection, SubmodulesSection } from "./RepoSections";
@@ -112,25 +116,73 @@ export function PreferencesScreen({ onClose, section }: { onClose: () => void; s
 function ProfilesSection() {
   const q = useQuery({ queryKey: ["accounts", null], queryFn: () => api.accountInfo(null) });
   const toast = useStore((s) => s.toast);
+  const profiles = useStore((s) => s.profiles);
+  const active = useStore((s) => s.activeProfile);
+  const keep = useStore((s) => s.settings.keepGitconfigUpdated);
+  const setSettings = useStore((s) => s.setSettings);
+  const setDialog = useStore((s) => s.setDialog);
   const save = async (key: string, value: string) => {
     await api.setGitConfig(null, "global", key, value);
     toast(true, "Saved to your global Git config");
     q.refetch();
   };
+  const sorted = [...profiles].sort((a, b) => a.name.localeCompare(b.name));
   return (
     <>
       <H>Profiles</H>
-      <p className="text-[12.5px] text-fg2 leading-relaxed mb-3 max-w-[760px]">
+      <p className="text-[12.5px] text-fg2 leading-relaxed mb-3 max-w-[880px]">
         GitCraft uses profiles to store your application preferences as well as git config information. Switching profiles also sets your global Git author name and email.
       </p>
-      <Row label="Author Name">
-        <Text value={q.data?.name ?? ""} onSave={(v) => save("user.name", v.trim())} />
-      </Row>
-      <Row label="Author Email">
-        <Text value={q.data?.email ?? ""} onSave={(v) => save("user.email", v.trim())} />
-      </Row>
-      <div className="mt-5">
-        <ProfilesPanel />
+      <div className="max-w-[750px] rounded bg-white/[0.04] px-4 py-3 mb-4">
+        <div className="text-[15px] text-white mb-1">My Profiles</div>
+        <label className="flex items-center gap-2 text-[12.5px] text-fg">
+          <input type="checkbox" className="accent-[#80B1EA]" checked={keep} onChange={(e) => setSettings({ keepGitconfigUpdated: e.target.checked })} />
+          Keep my .gitconfig updated with my GitCraft Profile preferences
+        </label>
+        <div className="text-[11px] text-fg3 mt-0.5">When checked, switching profiles updates your global .gitconfig to match, including commit author name and email.</div>
+      </div>
+      <Button size="sm" className="mb-4" onClick={() => setDialog({ kind: "addProfile" })}>
+        + Add a Profile
+      </Button>
+      <div className="max-w-[890px]">
+        <div className="grid grid-cols-[2fr_1.5fr_1.5fr_40px] gap-3 px-3 pb-2 text-[12px] text-fg2 border-b border-white/10">
+          <span>Profile Name ▴</span>
+          <span>Author Name</span>
+          <span>Author Email</span>
+          <span />
+        </div>
+        {sorted.map((p) => (
+          <div key={p.id} className={cn("grid grid-cols-[2fr_1.5fr_1.5fr_40px] gap-3 items-center px-3 h-[40px] text-[13px] border", p.id === active ? "border-accent bg-selrow" : "border-transparent hover:bg-hoverrow")}>
+            <span className="flex items-center gap-2 min-w-0">
+              <ProfileMark color={PROFILE_COLORS[p.icon ?? 0] ?? PROFILE_COLORS[0]} />
+              <span className="truncate">{p.name}</span>
+              {p.id === active && <span className="text-[11px] text-good">current</span>}
+            </span>
+            <span className="truncate text-fg2">{p.id === active ? (q.data?.name ?? p.gitName) : p.gitName}</span>
+            <span className="truncate text-fg2">{p.id === active ? (q.data?.email ?? p.gitEmail) : p.gitEmail}</span>
+            <DropMenu
+              align="end"
+              items={[
+                { label: "Switch to this profile", disabled: p.id === active, onSelect: () => void switchProfile(p.id) },
+                { label: "Delete profile", danger: true, disabled: p.id === active || profiles.length <= 1, onSelect: () => removeProfile(p.id) },
+              ]}
+              trigger={
+                <button aria-label={`Options for ${p.name}`} className="w-[24px] h-[24px] flex items-center justify-center text-fg2 hover:text-white">
+                  <EllipsisVertical size={15} />
+                </button>
+              }
+            />
+          </div>
+        ))}
+      </div>
+      <div className="mt-6 max-w-[620px]">
+        <div className="text-[12px] text-fg2 mb-2">Current profile identity (global Git config)</div>
+        <Row label="Author Name">
+          <Text value={q.data?.name ?? ""} onSave={(v) => save("user.name", v.trim())} />
+        </Row>
+        <Row label="Author Email">
+          <Text value={q.data?.email ?? ""} onSave={(v) => save("user.email", v.trim())} />
+        </Row>
       </div>
     </>
   );

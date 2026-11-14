@@ -3,7 +3,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useStore, usePanelStore } from "@/lib/store";
 import { DropMenu, type MenuEntry } from "./ui/menu";
 import { CtxMenu } from "./ui/menu";
-import { ProfileMark } from "./Icons";
+import { PROFILE_COLORS, ProfileMark } from "./Icons";
 import { switchProfile } from "@/lib/prefs";
 import { cn, MOD } from "@/lib/utils";
 import { NotificationMenu } from "./NotificationMenu";
@@ -280,7 +280,7 @@ export function TabsBar() {
         ]}
         trigger={
           <button className="shrink-0 flex items-center gap-1.5 pl-2 pr-2 text-[13px] text-white/90 hover:bg-white/5 outline-none">
-            <ProfileMark />
+            <ProfileMark color={PROFILE_COLORS[s.profiles.find((p) => p.id === s.activeProfile)?.icon ?? 0] ?? PROFILE_COLORS[0]} />
             <span className="font-semibold">{s.profiles.find((p) => p.id === s.activeProfile)?.name ?? "Default Profile"}</span>
             <ChevronDown size={13} />
           </button>

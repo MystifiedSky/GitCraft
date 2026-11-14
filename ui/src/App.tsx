@@ -112,10 +112,28 @@ function RepoScreen({ tab, active }: { tab: Tab; active: boolean }) {
           {q.isError && (
             <div className="h-full flex flex-col items-center justify-center gap-3 text-fg2 px-6 text-center">
               <div className="text-white text-[15px]">This repository could not be opened</div>
-              <div className="text-[12.5px]">{String(q.error)}</div>
-              <button className="text-link hover:underline" onClick={() => s.closeTab(tab.id)}>
-                Close tab
-              </button>
+              <div className="text-[12.5px] max-w-[460px] break-words">{String(q.error)}</div>
+              <div className="text-[12px] text-fg3 max-w-[460px] break-all">{tab.path}</div>
+              <div className="flex items-center gap-4">
+                <button className="text-link hover:underline" onClick={() => void q.refetch()}>
+                  Try again
+                </button>
+                <button
+                  className="text-link hover:underline"
+                  onClick={async () => {
+                    const folder = await api.pickFolder("Locate the repository folder");
+                    if (folder) {
+                      s.closeTab(tab.id);
+                      await openRepoPath(folder);
+                    }
+                  }}
+                >
+                  Locate folder…
+                </button>
+                <button className="text-link hover:underline" onClick={() => s.closeTab(tab.id)}>
+                  Close tab
+                </button>
+              </div>
             </div>
           )}
           {!repo && q.isLoading && <div className="h-full flex items-center justify-center text-fg3">Loading repository…</div>}

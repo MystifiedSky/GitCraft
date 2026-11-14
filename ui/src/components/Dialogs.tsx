@@ -1,8 +1,9 @@
+import type { ReactNode } from "react";
 import { SERVICES, integrations } from "@/lib/integrations";
 import { PreferencesScreen } from "./prefs/Preferences";
 import { RepoManagementDialog } from "./RepoManagement";
 import { useQuery } from "@tanstack/react-query";
-import { LoaderCircle, Sparkles, X } from "lucide-react";
+import { Cloud, Github, Gitlab, Globe, Laptop, LoaderCircle, Sparkles, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
@@ -11,7 +12,7 @@ import type { FormField } from "@/lib/store";
 import { fullDate } from "@/lib/utils";
 import { Dialog, Field, inputClass } from "./ui/dialog";
 import { Button } from "./ui/button";
-import { AppMark } from "./Icons";
+import { AppMark, PROFILE_COLORS, ProfileMark } from "./Icons";
 import { cn, MOD } from "@/lib/utils";
 import { COMMANDS, comboOf, keysOf, type Group } from "@/lib/commands";
 import { hosting as hostingApi } from "@/lib/hosting";
@@ -121,6 +122,8 @@ export function Dialogs() {
       return <PreferencesScreen onClose={close} section="integrations" />;
     case "profiles":
       return <ProfilesDialog onClose={close} />;
+    case "addProfile":
+      return <AddProfileDialog onClose={close} />;
     case "workspaces":
       return <WorkspacesDialog onClose={close} />;
     case "fileFinder":
@@ -232,21 +235,99 @@ function OpenDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
+/** Where a repository can come from or go to: the left list of the Initialize / Clone dialogs. */
+const SERVICE_SOURCES: { id: string; label: string; icon: ReactNode }[] = [
+  { id: "github", label: "GitHub.com", icon: <Github size={14} /> },
+  { id: "github-enterprise", label: "GitHub Enterprise Server", icon: <Github size={14} /> },
+  { id: "gitlab", label: "GitLab.com", icon: <Gitlab size={14} /> },
+  { id: "gitlab-self", label: "GitLab (Self-Managed)", icon: <Gitlab size={14} /> },
+  { id: "bitbucket", label: "Bitbucket.org", icon: <Cloud size={14} /> },
+  { id: "bitbucket-server", label: "Bitbucket Data Center", icon: <Cloud size={14} /> },
+  { id: "azure", label: "Azure DevOps", icon: <Cloud size={14} /> },
+];
+
+function SourceList({ items, active, onPick }: { items: { id: string; label: string; icon: ReactNode; disabled?: boolean; title?: string }[]; active: string; onPick: (id: string) => void }) {
+  return (
+    <div role="listbox" aria-label="Source">
+      {items.map((i) => (
+        <button
+          key={i.id}
+          role="option"
+          aria-selected={active === i.id}
+          disabled={i.disabled}
+          title={i.title}
+          onClick={() => onPick(i.id)}
+          className={cn("w-full flex items-center gap-2 h-[31px] px-3 text-[13px] text-left disabled:opacity-40", active === i.id ? "bg-selrow text-white" : "text-fg hover:bg-hoverrow")}
+        >
+          <span className="w-[16px] flex justify-center text-white/80">{i.icon}</span>
+          <span className="truncate">{i.label}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** A form row with the label on the left, right-aligned, like the Initialize / Clone dialogs. */
+function FormRow({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="grid grid-cols-[130px_1fr] items-center gap-x-3 mb-3">
+      <span className="text-right text-[12.5px] text-fg leading-tight">{label}</span>
+      <div className="min-w-0">{children}</div>
+    </div>
+  );
+}
+
+function FolderRow({ label, value, onChange, title }: { label: string; value: string; onChange: (v: string) => void; title: string }) {
+  return (
+    <FormRow label={label}>
+      <div className="flex gap-2">
+        <input className={cn(inputClass, "flex-1 min-w-0")} value={value} onChange={(e) => onChange(e.target.value)} placeholder="C:\\Users\\you\\Projects" />
+        <Button
+          onClick={async (e) => {
+            e.preventDefault();
+            const p = await api.pickFolder(title);
+            if (p) onChange(p);
+          }}
+        >
+          Browse
+        </Button>
+      </div>
+    </FormRow>
+  );
+}
+
 function CloneDialog({ onClose }: { onClose: () => void }) {
   const s = useStore();
+  const [source, setSource] = useState("url");
   const [url, setUrl] = useState("");
   const [dir, setDir] = useState(s.settings.defaultCloneFolder);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [shallow, setShallow] = useState(false);
+  const [limitBy, setLimitBy] = useState<"depth" | "since">("depth");
   const [depth, setDepth] = useState("1");
+  const [since, setSince] = useState("");
+  const [branch, setBranch] = useState("");
+  const [flags, setFlags] = useState("");
+  const [sparse, setSparse] = useState(false);
+  const [sparsePaths, setSparsePaths] = useState("");
+  const [blobless, setBlobless] = useState(false);
+  const sinceError = !shallow || limitBy !== "since" ? "" : !/^\d{4}-\d{2}-\d{2}$/.test(since) || Number.isNaN(Date.parse(since)) ? "Enter a valid date in 'YYYY-MM-DD' format" : new Date(since).getTime() > Date.now() ? "Date cannot be in the future" : "";
   const go = async () => {
-    if (!url.trim() || !dir.trim()) return;
+    if (!url.trim() || !dir.trim() || sinceError) return;
     setBusy(true);
     setError("");
     s.setBusy("Cloning…");
     try {
-      const path = await api.cloneRepo(url, dir, shallow ? Math.max(1, Number(depth) || 1) : undefined);
+      const path = await api.cloneRepo(url, dir, {
+        depth: shallow && limitBy === "depth" ? Math.max(1, Number(depth) || 1) : undefined,
+        since: shallow && limitBy === "since" ? since : undefined,
+        branch: shallow ? branch.trim() || undefined : undefined,
+        custom_flags: shallow ? flags.trim() || undefined : undefined,
+        sparse,
+        sparse_paths: sparse ? sparsePaths.split("\n").map((p) => p.trim()).filter(Boolean) : undefined,
+        blobless: sparse && blobless,
+      });
       s.setSettings({ defaultCloneFolder: dir });
       onClose();
       await openRepoPath(path);
@@ -262,8 +343,9 @@ function CloneDialog({ onClose }: { onClose: () => void }) {
     <Dialog
       open
       onClose={onClose}
-      title="Clone a repository"
-      width={480}
+      title="Clone a Repository"
+      width={780}
+      sidebar={<SourceList active={source} onPick={setSource} items={[{ id: "url", label: "Clone with URL", icon: <Globe size={14} /> }, ...SERVICE_SOURCES]} />}
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
@@ -273,36 +355,84 @@ function CloneDialog({ onClose }: { onClose: () => void }) {
         </>
       }
     >
-      <HostedRepoPicker onPick={setUrl} />
-      <Field label="URL">
-        <input data-dialog-initial-focus className={inputClass} value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://github.com/owner/project.git" />
-      </Field>
-      <FolderField label="Where to clone to" value={dir} onChange={setDir} title="Choose where to clone to" />
-      {url && dir && <div className="text-[12px] text-fg3 -mt-1 mb-2">Full path: {dir.replace(/[\\/]$/, "")}\{url.replace(/\/$/, "").split(/[/\\:]/).pop()?.replace(/\.git$/, "")}</div>}
-      <label className="flex items-center gap-2 text-[12.5px] text-fg mb-2">
-        <input type="checkbox" className="accent-[#80B1EA]" checked={shallow} onChange={(e) => setShallow(e.target.checked)} />
-        Shallow clone: only the latest
-        <input value={depth} disabled={!shallow} onChange={(e) => setDepth(e.target.value.replace(/\D/g, ""))} className={cn(inputClass, "w-14 h-6")} />
-        commits
-      </label>
+      <div className="text-[15px] text-white mb-3">Clone a Repo</div>
+      <FolderRow label="Where to clone to" value={dir} onChange={setDir} title="Choose where to clone to" />
+      {source !== "url" && <HostedRepoPicker service={source} onPick={setUrl} />}
+      <FormRow label="URL">
+        <input data-dialog-initial-focus className={inputClass + " w-full"} value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://github.com/owner/project.git" />
+      </FormRow>
+      {url && dir && (
+        <FormRow label="Full path">
+          <span className="text-[12.5px] text-fg2 break-all">
+            {dir.replace(/[\\/]$/, "")}\{url.replace(/\/$/, "").split(/[/\\:]/).pop()?.replace(/\.git$/, "")}
+          </span>
+        </FormRow>
+      )}
+      <FormRow label="Shallow Clone">
+        <input type="checkbox" className="accent-[#80B1EA]" checked={shallow} onChange={(e) => setShallow(e.target.checked)} aria-label="Shallow clone" />
+      </FormRow>
+      {shallow && (
+        <div className="ml-[142px] mb-3 border-l border-white/10 pl-3">
+          <FormRow label="Limit history by">
+            <select aria-label="Limit history by" className={inputClass + " w-full"} value={limitBy} onChange={(e) => setLimitBy(e.target.value as "depth" | "since")}>
+              <option value="depth">Commit depth</option>
+              <option value="since">Since date</option>
+            </select>
+          </FormRow>
+          {limitBy === "depth" ? (
+            <FormRow label="Depth">
+              <input aria-label="Depth" value={depth} onChange={(e) => setDepth(e.target.value.replace(/\D/g, ""))} className={cn(inputClass, "w-24")} />
+              <div className="text-[11px] text-fg3 mt-0.5">How many commits to clone from the target branch.</div>
+            </FormRow>
+          ) : (
+            <FormRow label="Since date">
+              <input aria-label="Since date" value={since} onChange={(e) => setSince(e.target.value)} placeholder="YYYY-MM-DD" className={cn(inputClass, "w-40")} />
+              <div className={cn("text-[11px] mt-0.5", sinceError ? "text-[#ef7a76]" : "text-fg3")}>{sinceError || "Commits older than this date will not be cloned."}</div>
+            </FormRow>
+          )}
+          <FormRow label="Branch to clone">
+            <input aria-label="Branch to clone" value={branch} onChange={(e) => setBranch(e.target.value)} placeholder="default branch" className={inputClass + " w-full"} />
+            <div className="text-[11px] text-fg3 mt-0.5">The default branch is usually main or master, but you can specify a different one.</div>
+          </FormRow>
+          <FormRow label="Custom flags">
+            <input aria-label="Custom flags" value={flags} onChange={(e) => setFlags(e.target.value)} className={inputClass + " w-full mono"} />
+            <div className="text-[11px] text-fg3 mt-0.5">Any additional flags for git clone, entered exactly as on the command line.</div>
+          </FormRow>
+        </div>
+      )}
+      <FormRow label="Sparse Checkout">
+        <input type="checkbox" className="accent-[#80B1EA]" checked={sparse} onChange={(e) => setSparse(e.target.checked)} aria-label="Sparse checkout" />
+      </FormRow>
+      {sparse && (
+        <div className="ml-[142px] mb-3 border-l border-white/10 pl-3">
+          <FormRow label="Blobless clone">
+            <input type="checkbox" className="accent-[#80B1EA]" checked={blobless} onChange={(e) => setBlobless(e.target.checked)} aria-label="Blobless clone" />
+            <div className="text-[11px] text-fg3 mt-0.5">Fetches trees and commits without file contents at first, reducing clone size. Contents are fetched when needed.</div>
+          </FormRow>
+          <FormRow label="Paths to include">
+            <textarea aria-label="Paths to include" rows={5} value={sparsePaths} onChange={(e) => setSparsePaths(e.target.value)} placeholder={"e.g.\nsrc/\ndocs/\nREADME.md"} className={cn(inputClass, "w-full h-auto py-1 mono resize-y")} />
+            <div className="text-[11px] text-fg3 mt-0.5">One path per line. Only these paths are checked out; with none, only the files in the top folder.</div>
+          </FormRow>
+        </div>
+      )}
       {error && <div className="text-[12px] text-[#ef7a76] whitespace-pre-wrap">{error}</div>}
     </Dialog>
   );
 }
 
 /** "GitCraft will help you find stuff on {service} when cloning": your repositories on connected services. */
-function HostedRepoPicker({ onPick }: { onPick: (url: string) => void }) {
+function HostedRepoPicker({ onPick, service }: { onPick: (url: string) => void; service?: string }) {
   const s = useStore();
   const st = useQuery({ queryKey: ["integrationStatuses", s.settings.integrations], queryFn: () => integrations.statuses(SERVICES.filter((x) => x.kind === "hosting").map((x) => x.id)) });
   const connected = (st.data ?? []).filter((x) => x.connected && !x.error);
   const [svc, setSvc] = useState("");
   const [q, setQ] = useState("");
-  const id = svc || connected[0]?.id || "";
+  const id = service ?? (svc || connected[0]?.id || "");
   const repos = useQuery({ queryKey: ["hostedRepos", id], queryFn: () => integrations.repos(id), enabled: !!id });
-  if (!connected.length)
+  if (service ? !connected.some((c) => c.id === service) : !connected.length)
     return (
       <div className="text-[12px] text-fg3 mb-2">
-        Connect GitHub, GitLab, Bitbucket or Azure DevOps to pick from your repositories.{" "}
+        {service ? "This service is not connected yet. Connect it to pick from your repositories, or paste a URL below." : "Connect GitHub, GitLab, Bitbucket or Azure DevOps to pick from your repositories."}{" "}
         <button className="text-link hover:underline" onClick={() => s.setDialog({ kind: "prefs", section: "integrations" })}>
           Integrations
         </button>
@@ -312,7 +442,7 @@ function HostedRepoPicker({ onPick }: { onPick: (url: string) => void }) {
   return (
     <div className="mb-3">
       <div className="flex gap-2 mb-1.5">
-        <select className={cn(inputClass, "w-[180px]")} value={id} onChange={(e) => setSvc(e.target.value)}>
+        <select hidden={!!service} className={cn(inputClass, "w-[180px]")} value={id} onChange={(e) => setSvc(e.target.value)}>
           {connected.map((c) => (
             <option key={c.id} value={c.id}>
               {c.label}
@@ -341,14 +471,15 @@ function InitDialog({ onClose }: { onClose: () => void }) {
   const [dir, setDir] = useState(s.settings.defaultCloneFolder);
   const [error, setError] = useState("");
   const [branch, setBranch] = useState(s.settings.defaultBranch);
-  const [ignores, setIgnores] = useState<string[]>([]);
+  const [ignore, setIgnore] = useState("");
   const [license, setLicense] = useState("");
-  const [readme, setReadme] = useState(true);
+  const [readme, setReadme] = useState(false);
+  const [lfs, setLfs] = useState(false);
   const templates = useQuery({ queryKey: ["gitignoreTemplates"], queryFn: api.gitignoreTemplates, staleTime: Infinity });
   const go = async () => {
     if (!name.trim() || !dir.trim()) return;
     try {
-      const path = await api.initRepo(dir, name, { branch: branch || s.settings.defaultBranch, gitignore: ignores, license, readme });
+      const path = await api.initRepo(dir, name, { branch: branch || s.settings.defaultBranch, gitignore: ignore ? [ignore] : [], license, readme, lfs });
       onClose();
       await openRepoPath(path);
       s.toast(true, "Repository created");
@@ -356,11 +487,23 @@ function InitDialog({ onClose }: { onClose: () => void }) {
       setError(String(e));
     }
   };
+  const selectClass = cn(inputClass, "w-full");
   return (
     <Dialog
       open
       onClose={onClose}
-      title="Start a new repository"
+      title="Initialize a Repository"
+      width={780}
+      sidebar={
+        <SourceList
+          active="local"
+          onPick={() => undefined}
+          items={[
+            { id: "local", label: "Local Only", icon: <Laptop size={14} /> },
+            ...SERVICE_SOURCES.map((x) => ({ ...x, disabled: true, title: "Creating a repository on a service isn't available yet. Initialize it here, then add the remote." })),
+          ]}
+        />
+      }
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
@@ -370,36 +513,42 @@ function InitDialog({ onClose }: { onClose: () => void }) {
         </>
       }
     >
-      <Field label="Name">
-        <input data-dialog-initial-focus className={inputClass} value={name} onChange={(e) => setName(e.target.value)} placeholder="my-project" />
-      </Field>
-      <FolderField label="Initialize in" value={dir} onChange={setDir} title="Choose a parent folder" />
-      <Field label="Default branch name">
-        <input className={inputClass} value={branch} onChange={(e) => setBranch(e.target.value)} />
-      </Field>
-      <div className="text-[12px] text-fg2 mb-1">.gitignore template</div>
-      <div className="flex flex-wrap gap-x-4 gap-y-1 mb-3">
-        {(templates.data ?? []).map((t) => (
-          <label key={t} className="flex items-center gap-1.5 text-[12.5px] text-fg cursor-pointer">
-            <input type="checkbox" className="accent-[#80B1EA]" checked={ignores.includes(t)} onChange={() => setIgnores(ignores.includes(t) ? ignores.filter((x) => x !== t) : [...ignores, t])} />
-            {t}
-          </label>
-        ))}
-      </div>
-      <div className="flex gap-4 items-center mb-2">
-        <label className="flex items-center gap-1.5 text-[12.5px] text-fg">
-          License
-          <select value={license} onChange={(e) => setLicense(e.target.value)} className="h-7 px-1 rounded-[4px] bg-field border border-white/10 text-[12.5px] text-fg outline-none">
-            <option value="">None</option>
-            <option value="MIT">MIT</option>
-          </select>
-        </label>
-        <label className="flex items-center gap-1.5 text-[12.5px] text-fg cursor-pointer">
-          <input type="checkbox" className="accent-[#80B1EA]" checked={readme} onChange={(e) => setReadme(e.target.checked)} /> Add a README
-        </label>
-      </div>
-      <div className="text-[12px] text-fg3">Chosen files are added in a first commit.</div>
-      {error && <div className="text-[12px] text-[#ef7a76] mt-2">{error}</div>}
+      <div className="text-[15px] text-white mb-3">Initialize a Repo</div>
+      <FormRow label="Name">
+        <input data-dialog-initial-focus className={inputClass + " w-full"} value={name} onChange={(e) => setName(e.target.value)} placeholder="my-project" />
+      </FormRow>
+      <FolderRow label="Initialize in" value={dir} onChange={setDir} title="Choose a parent folder" />
+      <FormRow label="Full path">
+        <span className="text-[12.5px] text-fg2 break-all">
+          {dir.replace(/[\\/]$/, "")}\{name.trim()}
+        </span>
+      </FormRow>
+      <FormRow label="Default branch name">
+        <input className={inputClass + " w-full"} value={branch} onChange={(e) => setBranch(e.target.value)} placeholder="main" />
+      </FormRow>
+      <FormRow label=".gitignore Template (optional)">
+        <select aria-label=".gitignore template" className={selectClass} value={ignore} onChange={(e) => setIgnore(e.target.value)}>
+          <option value="">Select...</option>
+          {(templates.data ?? []).map((t) => (
+            <option key={t} value={t}>
+              {t}
+            </option>
+          ))}
+        </select>
+      </FormRow>
+      <FormRow label="License (optional)">
+        <select aria-label="License" className={selectClass} value={license} onChange={(e) => setLicense(e.target.value)}>
+          <option value="">Select...</option>
+          <option value="MIT">MIT</option>
+        </select>
+      </FormRow>
+      <FormRow label="Initialize with LFS">
+        <input type="checkbox" className="accent-[#80B1EA]" checked={lfs} onChange={(e) => setLfs(e.target.checked)} aria-label="Initialize with LFS" />
+      </FormRow>
+      <FormRow label="Add a README">
+        <input type="checkbox" className="accent-[#80B1EA]" checked={readme} onChange={(e) => setReadme(e.target.checked)} aria-label="Add a README" />
+      </FormRow>
+      {error && <div className="text-[12px] text-[#ef7a76] mt-2 whitespace-pre-wrap">{error}</div>}
     </Dialog>
   );
 }
@@ -989,7 +1138,7 @@ export function Toasts() {
       {toasts.map((t) => (
         <div
           key={t.id}
-          className={cn("pointer-events-auto rounded-md px-3 py-2 text-[12.5px] shadow-xl border bg-[var(--menu-bg)] whitespace-pre-wrap break-words max-h-[160px] overflow-auto", t.ok ? "border-good/60" : "border-bad/80")}
+          className={cn("toast-in pointer-events-auto rounded-md px-3 py-2 text-[12.5px] shadow-xl border bg-[var(--menu-bg)] whitespace-pre-wrap break-words max-h-[160px] overflow-auto", t.ok ? "border-good/60" : "border-bad/80")}
         >
           <div className="flex items-start gap-2">
             <div className="flex-1 min-w-0" role={t.ok ? "status" : "alert"}>
@@ -1225,6 +1374,77 @@ export function ProfilesPanel() {
       </Button>
       <div className="text-[12px] text-fg3 mt-3">A new profile starts with a copy of the current settings. Switching sets your global Git name and email to the profile's.</div>
     </>
+  );
+}
+
+/** "Add Profile": pick a picture, name it, set the Git author, and choose whether to start from the current settings. */
+function AddProfileDialog({ onClose }: { onClose: () => void }) {
+  const [icon, setIcon] = useState(0);
+  const [name, setName] = useState("");
+  const [gitName, setGitName] = useState("");
+  const [email, setEmail] = useState("");
+  const [copy, setCopy] = useState(true);
+  const step = (d: number) => setIcon((i) => (i + d + PROFILE_COLORS.length) % PROFILE_COLORS.length);
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title="Add Profile"
+      width={584}
+      footer={
+        <>
+          <label className="flex items-center gap-2 text-[12.5px] text-fg mr-auto">
+            <input type="checkbox" className="accent-[#80B1EA]" checked={copy} onChange={(e) => setCopy(e.target.checked)} />
+            Copy settings from current profile
+          </label>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button
+            variant="primary"
+            disabled={!name.trim()}
+            onClick={() => {
+              addProfile(name, gitName, email, { icon, copySettings: copy });
+              onClose();
+            }}
+          >
+            Add Profile
+          </Button>
+        </>
+      }
+    >
+      <div className="text-[12.5px] text-fg mb-2">Select a profile icon</div>
+      <div className="flex items-center justify-center gap-3 mb-4">
+        <button aria-label="Previous icon" className="text-fg2 hover:text-white px-1" onClick={() => step(-1)}>
+          ‹
+        </button>
+        {PROFILE_COLORS.map((c, i) => (
+          <button
+            key={c}
+            aria-label={`Icon ${i + 1}`}
+            aria-pressed={icon === i}
+            onClick={() => setIcon(i)}
+            className={cn("w-[56px] h-[56px] rounded flex items-center justify-center border", icon === i ? "border-accent bg-white/10" : "border-transparent hover:bg-white/5")}
+          >
+            <ProfileMark color={c} size={36} />
+          </button>
+        ))}
+        <button aria-label="Next icon" className="text-fg2 hover:text-white px-1" onClick={() => step(1)}>
+          ›
+        </button>
+      </div>
+      <div className="flex items-end gap-3 mb-3">
+        <ProfileMark color={PROFILE_COLORS[icon]} size={36} />
+        <label className="flex-1 flex flex-col gap-1 text-[12px] text-fg2">
+          Profile Name
+          <input data-dialog-initial-focus className={inputClass} value={name} onChange={(e) => setName(e.target.value)} placeholder="New Profile" />
+        </label>
+      </div>
+      <Field label="Author Name">
+        <input className={inputClass} value={gitName} onChange={(e) => setGitName(e.target.value)} />
+      </Field>
+      <Field label="Author Email">
+        <input className={inputClass} value={email} onChange={(e) => setEmail(e.target.value)} />
+      </Field>
+    </Dialog>
   );
 }
 

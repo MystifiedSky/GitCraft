@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { nextTopological, previousTopological } from "./graphnav";
+import { hoverSegment, nextTopological, previousTopological } from "./graphnav";
 
 // d (HEAD) -> c (merge of b and x) ; c -> b, x ; b -> a ; x -> a ; a root
 const commits = [
@@ -25,5 +25,23 @@ describe("topological selection", () => {
   it("chooses the default commit when nothing is selected", () => {
     expect(nextTopological(commits, "d", true, null)).toEqual({ type: "wip" });
     expect(nextTopological(commits, "d", false, null)).toEqual({ type: "commit", sha: "d" });
+  });
+});
+
+describe("hover marking", () => {
+  // newest first: t (tag) -> u -> v -> w (labelled) -> x
+  const chain = [
+    { sha: "t", parents: ["u"] },
+    { sha: "u", parents: ["v"] },
+    { sha: "v", parents: ["w"] },
+    { sha: "w", parents: ["x"] },
+    { sha: "x", parents: [] },
+  ];
+  it("marks only the commit of a tag", () => {
+    expect([...hoverSegment(chain, new Set(["t", "w"]), 0, true)]).toEqual([0]);
+  });
+  it("marks a branch down to the next labelled commit, not past it", () => {
+    expect([...hoverSegment(chain, new Set(["t", "w"]), 0, false)]).toEqual([0, 1, 2]);
+    expect([...hoverSegment(chain, new Set(["w"]), 3, false)]).toEqual([3, 4]);
   });
 });

@@ -157,11 +157,24 @@ export interface LfsInfo {
   locks: { id: string; path: string; owner: string }[];
 }
 
+/** Clone dialog options: see clone_repo in the Rust back end. */
+export interface CloneOptions {
+  depth?: number;
+  /** YYYY-MM-DD */
+  since?: string;
+  branch?: string;
+  custom_flags?: string;
+  sparse?: boolean;
+  sparse_paths?: string[];
+  blobless?: boolean;
+}
+
 export interface InitOptions {
   branch: string;
   gitignore: string[];
   license: string;
   readme: boolean;
+  lfs: boolean;
 }
 
 export interface GitflowConfig {
@@ -393,7 +406,7 @@ export const api = {
   lastCommitMessage: (path: string) => invoke<[string, string]>("last_commit_message", { path }),
   pickFolder: (title: string) => invoke<string | null>("pick_folder", { title }),
   initRepo: (parent: string, name: string, options?: InitOptions) => invoke<string>("init_repo", { parent, name, options: options ?? null }),
-  cloneRepo: (url: string, parent: string, depth?: number) => invoke<string>("clone_repo", { url, parent, depth: depth ?? null }),
+  cloneRepo: (url: string, parent: string, options?: CloneOptions) => invoke<string>("clone_repo", { url, parent, options: options ?? null }),
   /** Preferences > External Tools > Terminal; General > Use In-App Terminal Instead opens the built-in one. */
   openTerminal: (path: string) => {
     const t = useStore.getState().settings;

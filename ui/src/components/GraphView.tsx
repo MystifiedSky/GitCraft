@@ -1,4 +1,6 @@
 import { Eye, EyeOff, MessageSquare, Network, Settings2, X, ChevronUp, ChevronDown, Loader2 } from "lucide-react";
+import { hoverSegment } from "@/lib/graphnav";
+import { DEFAULT_MARKERS, markerRects, type MarkerType } from "@/lib/scrollmarkers";
 import { assignTimeline, showsTimeline, TIMELINE_REFRESH_MS } from "@/lib/timeline";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Commit, GitRef, RepoView, Stats } from "@/lib/api";
@@ -18,6 +20,9 @@ interface Props {
 }
 
 type Extra = "author" | "date" | "sha" | "changes";
+
+/** Width of the marker strip (estimated). */
+const MARKER_STRIP_WIDTH = 12;
 
 export function GraphView({ repo, tabId }: Props) {
   // Sizes from the graph constants (src/metrics.rs).
@@ -80,6 +85,37 @@ export function GraphView({ repo, tabId }: Props) {
   }, [repo, hidden]);
 
   const headIdx = commitIndex.get(repo.head_sha) ?? -1;
+  const selectedIdx = ui.selection.type === "commit" ? commitIndex.get(ui.selection.sha) ?? -1 : -1;
+  const markerRows = useMemo(() => {
+    const rows: Partial<Record<MarkerType, number[]>> = { head: [], localBranches: [], remoteBranches: [], tags: [] };
+    const upstream: number[] = [];
+    const upstreams = new Set(repo.refs.filter((r) => r.kind === "Local" && r.upstream).map((r) => r.upstream));
+    repo.commits.forEach((c, i) => {
+      const refs = refsBySha.get(c.sha) ?? [];
+      const row = i + off;
+      if (c.sha === repo.head_sha) rows.head!.push(row);
+      else if (refs.some((r) => r.kind === "Local")) rows.localBranches!.push(row);
+      if (refs.some((r) => r.kind === "Tag")) rows.tags!.push(row);
+      if (refs.some((r) => r.kind === "Remote")) rows.remoteBranches!.push(row);
+      if (refs.some((r) => r.kind === "Remote" && upstreams.has(r.name))) upstream.push(row);
+    });
+    rows.selection = selectedIdx >= 0 ? [selectedIdx + off] : [];
+    return { rows, upstream };
+  }, [repo, refsBySha, off, selectedIdx]);
+  const showMarkers = useStore((st) => st.settings.scrollMarkers) && total * ROW > viewH;
+  // The date lines and the markers belong to the scrollbar column: they exist only while the list is taller than the view.
+  const overflowing = total * ROW > viewH;
+  const [stripH, setStripH] = useState(0);
+  const stripRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = stripRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setStripH(el.clientHeight));
+    ro.observe(el);
+    setStripH(el.clientHeight);
+    return () => ro.disconnect();
+  }, [showMarkers]);
+  const rects = useMemo(() => markerRects(DEFAULT_MARKERS, markerRows.rows, markerRows.upstream, total, stripH, MARKER_STRIP_WIDTH), [markerRows, total, stripH]);
   const headLane = headIdx >= 0 ? repo.graph.rows[headIdx]?.col ?? 0 : 0;
 
   // Search (Ctrl+F)
@@ -101,23 +137,18 @@ export function GraphView({ repo, tabId }: Props) {
   }, [repo, q]);
   const matchSet = useMemo(() => new Set(matches), [matches]);
 
-  // Rows that belong to a hovered branch label: its first-parent chain while it stays in the label's lane.
+  // Rows that belong to a hovered label. A tag marks only its own commit; a branch marks its commit and the unlabelled
+  // commits below it (its first-parent chain) up to the next commit that carries a label of its own.
+  // The other rows are dimmed (see CommitRow), so nothing is tinted.
   const highlighted = useMemo(() => {
     const set = new Set<number>();
     // UI Customization > Highlight associated rows when hovering over a branch.
     if (hoverRef === null || useStore.getState().settings.highlightRowsOnHover === false) return set;
-    let i = hoverRef;
-    const lane = repo.graph.rows[i]?.col;
-    while (i >= 0 && i < repo.commits.length && repo.graph.rows[i]?.col === lane) {
-      set.add(i);
-      const p = repo.commits[i].parents[0];
-      if (!p) break;
-      const next = commitIndex.get(p);
-      if (next === undefined || next <= i) break;
-      i = next;
-    }
-    return set;
-  }, [hoverRef, repo]);
+    const labelled = new Set(refsBySha.keys());
+    const isTag = (refsBySha.get(repo.commits[hoverRef]?.sha ?? "") ?? [])[0]?.kind === "Tag";
+    return hoverSegment(repo.commits, labelled, hoverRef, isTag);
+  }, [hoverRef, repo, refsBySha]);
+  const hoverActive = hoverRef !== null && highlighted.size > 0;
 
   // Zone widths: default widths when the pane has room, otherwise the branch/tag zone gives way
   // first (down to REF_ZONE_MIN_WIDTH) and the message zone keeps COMMIT_MESSAGE_ZONE_MIN_WIDTH.
@@ -397,7 +428,7 @@ export function GraphView({ repo, tabId }: Props) {
         extraWidth={extraWidth}
         color={laneColor(gr.color)}
         selected={sel}
-        highlighted={highlighted.has(i)}
+        dimmed={hoverActive && !highlighted.has(i)}
         match={matchSet.has(i)}
         dim={q.length > 0 && !matchSet.has(i)}
         refs={refsBySha.get(c.sha)}
@@ -405,7 +436,7 @@ export function GraphView({ repo, tabId }: Props) {
         hovered={hoverRow === i}
         onHoverRow={setHoverRow}
         rowH={ROW}
-        timeline={showsTimeline(d, cols.date, q.length > 0) ? timelines.get(i) : undefined}
+        timeline={overflowing && showsTimeline(d, cols.date, q.length > 0) ? timelines.get(i) : undefined}
         showDesc={cols.description}
         stats={stats.get(c.sha)}
         onClick={clickCommit}
@@ -443,7 +474,7 @@ export function GraphView({ repo, tabId }: Props) {
 
   return (
     <div className="h-full flex flex-col bg-app min-w-0">
-      <div className="flex items-center shrink-0 bg-panel border-b border-black/30 text-[10.5px] tracking-wider text-fg2 font-semibold" style={{ height: HEADER }}>
+      <div className="flex items-center shrink-0 bg-panel border-b border-black/30 text-[10px] tracking-[0.08em] text-fg3 font-medium mono" style={{ height: HEADER }}>
         {cols.refs && (
           <div style={{ width: refW }} className="pl-[15px] truncate shrink-0">
             BRANCH / TAG
@@ -527,12 +558,21 @@ export function GraphView({ repo, tabId }: Props) {
         </div>
       )}
       {repo.state_note && <StateBanner repo={repo} />}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden relative" onScroll={(e) => setScrollTop((e.target as HTMLDivElement).scrollTop)}>
-        <div className="relative" style={{ height: total * ROW }}>
-          {rows}
-          <canvas ref={canvasRef} className="absolute left-0 pointer-events-none" style={{ top: scrollTop }} />
+      <div className="flex-1 min-h-0 flex">
+        <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden relative" onScroll={(e) => setScrollTop((e.target as HTMLDivElement).scrollTop)}>
+          <div className="relative" style={{ height: total * ROW }}>
+            {rows}
+            <canvas ref={canvasRef} className="absolute left-0 pointer-events-none" style={{ top: scrollTop }} />
+          </div>
+          {total === 0 && <div className="absolute inset-0 flex items-center justify-center text-fg3">No commits yet — make the first one on the right.</div>}
         </div>
-        {total === 0 && <div className="absolute inset-0 flex items-center justify-center text-fg3">No commits yet — make the first one on the right.</div>}
+        {showMarkers && (
+          <div ref={stripRef} className="relative shrink-0 bg-panel/60 border-l border-black/20" style={{ width: MARKER_STRIP_WIDTH }} aria-hidden data-testid="scroll-markers">
+            {rects.map((r, i) => (
+              <span key={i} className="absolute" style={{ top: r.top, height: r.height, left: r.left, width: r.width, background: r.color }} />
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -549,7 +589,7 @@ function CommitRow({
   extraWidth,
   color,
   selected,
-  highlighted,
+  dimmed,
   match,
   dim,
   refs,
@@ -573,7 +613,8 @@ function CommitRow({
   extraWidth: Record<Extra, number>;
   color: string;
   selected: boolean;
-  highlighted: boolean;
+  /** Another label is hovered and this row is not part of it: its text fades. */
+  dimmed: boolean;
   match: boolean;
   dim: boolean;
   refs: GitRef[] | undefined;
@@ -591,21 +632,16 @@ function CommitRow({
   const m = useStore((st) => st.metrics);
   const first = refs?.[0];
   const desc = showDesc && c.body ? c.body.replace(/\r?\n+/g, " | ") : "";
-  const bg = selected ? mix(color, 0.28) : highlighted ? mix(color, 0.14) : undefined;
+  const bg = selected ? "var(--color-selrow)" : undefined;
   return (
     <CtxMenu items={() => commitMenu(repo, c)}>
       <div
-        className="absolute left-0 right-0 flex items-center"
+        className="graph-row absolute left-0 right-0 flex items-center"
+        data-selected={selected ? "true" : undefined}
         style={{ top, height: rowH, background: bg, opacity: dim ? m.min_alpha / 100 : undefined }}
         onClick={(e) => onClick(c, index, e)}
-        onMouseEnter={(e) => {
-          onHoverRow(index);
-          if (!bg) e.currentTarget.style.background = "rgba(77,136,255,0.10)";
-        }}
-        onMouseLeave={(e) => {
-          onHoverRow(null);
-          if (!bg) e.currentTarget.style.background = "";
-        }}
+        onMouseEnter={() => onHoverRow(index)}
+        onMouseLeave={() => onHoverRow(null)}
       >
         {timeline && (
           <>
@@ -656,7 +692,7 @@ function CommitRow({
           style={{ height: m.row_inner, paddingLeft: m.summary_margin, boxShadow: `inset 3px 0 0 ${color}`, background: bg ? "transparent" : undefined }}
         >
           {match && <span className="w-1.5 h-1.5 rounded-full bg-[#f2ca33] mr-1.5 shrink-0" />}
-          <span className="truncate">
+          <span className="graph-row-text truncate" data-dimmed={dimmed ? "true" : undefined}>
             {c.summary}
             {desc && <span className="text-white/50 ml-2">{desc}</span>}
           </span>
