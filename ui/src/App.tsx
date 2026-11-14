@@ -74,7 +74,7 @@ function LazyRepoScreen({ tab, active }: { tab: Tab; active: boolean }) {
   return shown || active ? <RepoScreen tab={tab} active={active} /> : null;
 }
 
-function RepoScreen({ tab, active }: { tab: Tab; active: boolean }) {
+export function RepoScreen({ tab, active }: { tab: Tab; active: boolean }) {
   const s = useStore(useShallow((s) => ({ settings: s.settings, setUi: s.setUi, setSettings: s.setSettings, closeTab: s.closeTab })));
   const ui = useTabUi(tab.id);
   const q = useRepo(tab.path, active);
@@ -138,7 +138,7 @@ function RepoScreen({ tab, active }: { tab: Tab; active: boolean }) {
             </div>
           )}
           {!repo && q.isLoading && <div className="h-full flex items-center justify-center text-fg3">Loading repository…</div>}
-          {repo && active &&
+          {repo && (active || viewing) &&
             (ui?.pr ? (
               <PullRequestView repo={repo} tabId={tab.id} number={ui.pr} />
             ) : ui?.issue ? (
@@ -161,7 +161,7 @@ function RepoScreen({ tab, active }: { tab: Tab; active: boolean }) {
             </div>
           )}
         </div>
-        {active && set.showRight && repo && (
+        {set.showRight && repo && (
           <>
             <Resizer onDrag={(dx) => s.setSettings({ rightWidth: clamp((rightPanelRef.current?.offsetWidth ?? useStore.getState().settings.rightWidth) - dx, 300, 640) })} />
             <div ref={rightPanelRef} style={{ width: set.rightWidth, minWidth: 300 }} className="shrink min-w-0">

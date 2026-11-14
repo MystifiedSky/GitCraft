@@ -640,9 +640,6 @@ function CommitRow({
         className="graph-row absolute left-0 right-0 flex items-center"
         data-selected={selected ? "true" : undefined}
         style={{ top, height: rowH, background: bg, opacity: dim ? m.min_alpha / 100 : undefined }}
-        onClick={(e) => onClick(c, index, e)}
-        onMouseEnter={() => onHoverRow(index)}
-        onMouseLeave={() => onHoverRow(null)}
       >
         {timeline && (
           <>
@@ -658,6 +655,9 @@ function CommitRow({
         <button
           type="button"
           aria-label={c.summary}
+          onClick={(e) => onClick(c, index, e)}
+          onMouseEnter={() => onHoverRow(index)}
+          onMouseLeave={() => onHoverRow(null)}
           aria-pressed={selected}
           tabIndex={selected || index === 0 ? 0 : -1}
           className="absolute inset-0 focus-visible:outline focus-visible:-outline-offset-2 focus-visible:outline-accent"

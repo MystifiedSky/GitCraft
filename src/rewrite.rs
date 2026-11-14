@@ -105,7 +105,8 @@ fn write_todo(dir: &Path, items: &[TodoItem]) -> Result<PathBuf, String> {
             let msg = gd.join(format!("gitcraft-msg-{i}"));
             std::fs::write(&msg, it.message.clone().unwrap_or_default()).map_err(|e| e.to_string())?;
             let p = msg.to_string_lossy().replace('\\', "/");
-            text.push_str(&format!("exec git commit --amend --only --allow-empty --no-verify -F '{p}'\n"));
+            let quoted = format!("'{}'", p.replace('\'', "'\\''"));
+            text.push_str(&format!("exec git commit --amend --only --allow-empty --no-verify -F {quoted}\n"));
         }
     }
     std::fs::write(&todo, text).map_err(|e| e.to_string())?;
@@ -167,8 +168,15 @@ pub struct ConflictInfo {
     pub binary: bool,
 }
 
+fn decode_text(dir: &Path, bytes: &[u8]) -> String {
+    match crate::prefs::encoding_for(dir) {
+        Some(encoding) => crate::prefs::decode(bytes, encoding),
+        None => String::from_utf8_lossy(bytes).into_owned(),
+    }
+}
+
 fn stage(dir: &Path, n: u8, file: &str) -> Option<String> {
-    crate::files::contents(dir, &format!(":{n}"), file).map(|b| String::from_utf8_lossy(&b).into_owned())
+    crate::files::contents(dir, &format!(":{n}"), file).map(|b| decode_text(dir, &b))
 }
 
 /// The names shown for "current" and "incoming": during a merge HEAD's branch and MERGE_HEAD's
@@ -204,10 +212,12 @@ pub fn conflict_labels(dir: &Path) -> (String, String) {
 
 pub fn conflict_info(dir: &Path, file: &str) -> ConflictInfo {
     let working = std::fs::read(dir.join(file)).ok();
-    let binary = working.as_deref().map(crate::files::is_binary).unwrap_or(false);
+    let encoding = crate::prefs::encoding_for(dir);
+    let utf16 = encoding.is_some_and(|e| e == encoding_rs::UTF_16LE || e == encoding_rs::UTF_16BE);
+    let binary = !utf16 && working.as_deref().map(crate::files::is_binary).unwrap_or(false);
     let (ours_label, theirs_label) = conflict_labels(dir);
     ConflictInfo {
-        working: working.map(|b| String::from_utf8_lossy(&b).into_owned()),
+        working: working.map(|b| decode_text(dir, &b)),
         base: stage(dir, 1, file),
         ours: stage(dir, 2, file),
         theirs: stage(dir, 3, file),

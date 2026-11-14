@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, Bot, CheckCircle2, ChevronDown, FileDown, FileUp, Folder, GitBranch, House, MoreVertical, Plug, Search, Plus } from "lucide-react";
 import { api, type RepoView } from "@/lib/api";
@@ -127,6 +127,8 @@ export function AgentsView({ repo, tabId }: { repo: RepoView | undefined; tabId:
   const setSettings = useStore((s) => s.setSettings);
   const [filter, setFilter] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
+  const searchInput = useRef<HTMLInputElement>(null);
+  useEffect(() => { if (searchOpen) searchInput.current?.focus(); }, [searchOpen]);
   const worktrees = [...(repo?.worktrees ?? [])];
   if (repo && !worktrees.some((w) => sameFolder(w.path, repo.path))) worktrees.unshift({ path: repo.path, branch: repo.head_branch ?? "", locked: false });
   const roots = worktrees.map((w) => w.path);
@@ -155,7 +157,7 @@ export function AgentsView({ repo, tabId }: { repo: RepoView | undefined; tabId:
           trigger={<button className="p-1 rounded border border-accent/70 bg-accent/20 text-white" title="Choose coding agent"><Plug size={15} /></button>} />
         <button className="p-1 text-fg2 hover:text-white" title="Filter worktrees and sessions" aria-expanded={searchOpen} onClick={() => { setSearchOpen(!searchOpen); setFilter(""); }}><Search size={15} /></button>
       </div>
-      {searchOpen && <input autoFocus aria-label="Filter worktrees and sessions" placeholder="Filter worktrees and sessions" value={filter} onChange={(e) => setFilter(e.target.value)} className="w-full h-[26px] px-2 mb-2 bg-field border border-white/15 rounded text-[12px] outline-none focus:border-accent" />}
+      {searchOpen && <input ref={searchInput} aria-label="Filter worktrees and sessions" placeholder="Filter worktrees and sessions" value={filter} onChange={(e) => setFilter(e.target.value)} className="w-full h-[26px] px-2 mb-2 bg-field border border-white/15 rounded text-[12px] outline-none focus:border-accent" />}
       <div className="flex h-[36px] mb-2 rounded-[3px] border border-white/35 overflow-hidden">
         <button className="flex-1 min-w-0 flex items-center justify-center gap-2 text-[13px] hover:bg-white/10" onClick={() => startAgent(repo, false)} title="Start in this repository's terminal">
           <Plus size={14} /><span className="truncate">{agentName ? `Start ${agentName} Session` : "Choose a coding agent"}</span>

@@ -47,9 +47,21 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
+- Undo and redo refuse to move a different branch or overwrite commits made after the recorded action. Undoing branch creation also preserves branches that have since changed.
+- Applying a single stashed file refuses to overwrite current staged, unstaged, untracked, or ignored contents. Clearing a remote's custom push URL now restores the pull URL as its push destination.
+- Switching repository tabs preserves file-editor drafts, conflict-resolution selections, and commit-panel input. Full refreshes preserve loaded history and older commit selections, and delayed status reads cannot replace a newer repository snapshot.
+- AI commit-message generation preserves drafts edited while it runs and offers the generated result for explicit review instead of replacing newer text.
+- Conflict readers respect the configured repository encoding. Interactive rewording works when a repository path contains apostrophes.
+- Automatic update checks run at startup and hourly while GitCraft remains open.
+- Commit-row selection uses its native button, the agent-session filter focuses only when opened, and changelog/remote-link parsing handles long whitespace or slash runs without excessive backtracking.
+
 - The graph's date lines ("1 hour ago", "yesterday") and the optional scrollbar markers now only appear when the list is long enough to scroll, instead of always. When you hover a label, the other rows' text fades to a dim colour after a short pause rather than turning translucent.
 
 - An outdated test of the AI commit-message request was corrected; the frontend (61) and Rust (63) test suites now run and pass.
+
+### Security
+
+- Windows external-editor launches pass file paths directly to resolved executables or safely escaped launcher scripts, preventing filenames from being interpreted as additional shell commands.
 
 ## [0.1.8] - 2026-11-12
 

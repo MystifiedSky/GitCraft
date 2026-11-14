@@ -24,8 +24,8 @@ interface UpdateState {
 
 export const useUpdates = create<UpdateState>(() => ({ phase: "idle", version: null, notes: "", percent: null, lastChecked: null, errorAt: null, error: null }));
 
-/** Check at launch and every 10 hours (36,000,000 ms) while the app stays open. */
-export const CHECK_EVERY_MS = 36_000_000;
+/** Check at launch and every hour (3,600,000 ms) while the app stays open. */
+export const CHECK_EVERY_MS = 3_600_000;
 const CHECK_TIMEOUT_MS = 30_000;
 const DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;
 export const RELEASES_URL = "https://github.com/MystifiedSky/GitCraft/releases";

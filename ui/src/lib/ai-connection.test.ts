@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
-import { ai } from "./ai";
+import { ai, generateCommitMessage } from "./ai";
 import { aiApi } from "./integrations";
 import { DEFAULT_AI, useStore } from "./store";
 
@@ -65,4 +65,18 @@ it("discovers the program and models without changing the active connection or r
     ["ai_find_program", { provider: "claude_code" }],
     ["ai_list_models", { config }],
   ]);
+});
+
+it("preserves a commit message edited while AI generation was running", async () => {
+  const path = "/repo/ai-race";
+  let finish!: (message: [string, string]) => void;
+  const request = vi.spyOn(ai, "commitMessage").mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+  try {
+    const generating = generateCommitMessage(path);
+    useStore.getState().setDraft(path, { summary: "Keep my newer draft", description: "Typed while waiting" });
+    finish(["Generated suggestion", "Generated body"]);
+    await generating;
+    expect(useStore.getState().drafts[path].summary).toBe("Keep my newer draft");
+    expect(useStore.getState().dialog).toMatchObject({ kind: "choice", text: expect.stringContaining("Generated suggestion") });
+  } finally { request.mockRestore(); useStore.setState({ dialog: null }); }
 });

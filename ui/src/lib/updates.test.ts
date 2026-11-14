@@ -30,7 +30,8 @@ describe("automatic GitCraft updates", () => {
     vi.useRealTimers();
   });
 
-  it("checks at launch by default, then every 10 hours, and cancels the schedule on cleanup", async () => {
+  it("checks at launch by default, then every hour, and cancels the schedule on cleanup", async () => {
+    expect(updates.CHECK_EVERY_MS).toBe(3_600_000);
     expect(useStore.getState().settings.autoUpdate).toBe(true);
     stop = updates.startUpdateChecks();
     await vi.advanceTimersByTimeAsync(0);
@@ -101,8 +102,8 @@ describe("automatic GitCraft updates", () => {
     expect(mocks.check).toHaveBeenCalledTimes(1);
   });
 
-  it("checks every 10 hours", () => {
-    expect(updates.CHECK_EVERY_MS).toBe(36_000_000);
+  it("checks every hour", () => {
+    expect(updates.CHECK_EVERY_MS).toBe(3_600_000);
   });
 
   it("shows the update menu lines for each state, with 'Last checked' cleared by a failure", () => {

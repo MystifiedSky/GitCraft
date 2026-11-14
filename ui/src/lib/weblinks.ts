@@ -32,7 +32,11 @@ export function webBase(remoteUrl: string): string | null {
       host += port;
     }
   }
-  path = path.replace(/\.git\/?$/, "").replace(/\/+$/, "");
+  if (path.endsWith(".git/")) path = path.slice(0, -5);
+  else if (path.endsWith(".git")) path = path.slice(0, -4);
+  let end = path.length;
+  while (end > 0 && path[end - 1] === "/") end--;
+  path = path.slice(0, end);
   // Azure DevOps: ssh.dev.azure.com:v3/org/project/repo -> dev.azure.com/org/project/_git/repo
   if (/(^|\.)dev\.azure\.com$/i.test(host) || /visualstudio\.com$/i.test(host)) {
     const parts = path.replace(/^v3\//, "").split("/");

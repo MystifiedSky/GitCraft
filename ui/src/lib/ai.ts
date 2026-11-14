@@ -55,8 +55,16 @@ async function withAi<T>(label: string, f: () => Promise<T>): Promise<T | null> 
 }
 
 export async function generateCommitMessage(path: string) {
+  const before = useStore.getState().drafts[path];
   const r = await withAi("Writing a commit message…", () => ai.commitMessage(path));
-  if (r) useStore.getState().setDraft(path, { summary: r[0], description: r[1] });
+  if (!r) return;
+  const state = useStore.getState();
+  if (state.drafts[path] !== before) {
+    state.setDialog({ kind: "choice", title: "Generated commit message", text: `${r[0]}\n\n${r[1]}\n\nYour draft changed while this was generated.`,
+      choices: [{ label: "Use generated message", onSelect: () => state.setDraft(path, { summary: r[0], description: r[1] }) }] });
+    return;
+  }
+  state.setDraft(path, { summary: r[0], description: r[1] });
 }
 
 export async function generateStashTitle(path: string): Promise<string | null> {

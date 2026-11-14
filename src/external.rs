@@ -56,6 +56,26 @@ pub fn editor_command(tool: &str) -> Option<&'static str> {
     })
 }
 
+/// Resolve native programs and launcher scripts without asking a command shell to parse a file path.
+fn program_path(name: &str) -> std::path::PathBuf {
+    let extensions: &[&str] = if cfg!(windows) { &["exe", "com", "cmd", "bat"] } else { &[""] };
+    if let Some(paths) = std::env::var_os("PATH") {
+        for folder in std::env::split_paths(&paths) {
+            for ext in extensions {
+                let candidate = folder.join(if ext.is_empty() { name.to_owned() } else { format!("{name}.{ext}") });
+                if candidate.is_file() { return candidate; }
+            }
+        }
+    }
+    name.into()
+}
+
+fn editor_process(program: &std::path::Path, target: &str, repo: &str) -> Command {
+    let mut command = Command::new(program);
+    command.arg(target).current_dir(repo);
+    command
+}
+
 /// Open a repository (or one file in it) in the external editor.
 pub fn open_editor(repo: &str, file: Option<&str>, tool: &str, exe: &str, file_args: &str, repo_args: &str) -> Result<(), String> {
     let full_file = file.map(|f| std::path::Path::new(repo).join(f).to_string_lossy().into_owned());
@@ -70,18 +90,8 @@ pub fn open_editor(repo: &str, file: Option<&str>, tool: &str, exe: &str, file_a
     }
     let cmd = editor_command(tool).unwrap_or("code");
     let target = full_file.unwrap_or_else(|| ".".into());
-    // Through cmd on Windows so launcher scripts (code.cmd, cursor.cmd) are found.
-    let mut c = if cfg!(windows) {
-        let mut c = Command::new("cmd");
-        c.args(["/C", cmd, &target]);
-        c
-    } else {
-        let mut c = Command::new(cmd);
-        c.arg(&target);
-        c
-    };
-    c.current_dir(repo);
-    spawn(c)
+    // Rust handles .cmd/.bat launchers with its own argument escaping.
+    spawn(editor_process(&program_path(cmd), &target, repo))
 }
 
 /// Open a terminal app in the repository folder.
@@ -129,6 +139,20 @@ pub fn open_terminal(repo: &str, tool: &str, exe: &str, args: &str) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn batch_editor_receives_shell_characters_as_one_literal_file_argument() {
+        let folder = tempfile::tempdir().unwrap();
+        let launcher = folder.path().join("editor.cmd");
+        std::fs::write(&launcher, "@echo off\r\necho %1\r\n").unwrap();
+        let target = r"C:\repo\file&ver&.txt";
+        let output = editor_process(&launcher, target, &folder.path().to_string_lossy()).output().unwrap();
+        assert!(output.status.success());
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(text.contains(target), "{text}");
+        assert!(!text.contains("Microsoft Windows"), "Filename executed as a shell command: {text}");
+    }
 
     #[test]
     fn custom_tool_arguments() {

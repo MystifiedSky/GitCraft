@@ -23,6 +23,8 @@ mod shell;
 mod shot;
 mod terminal;
 mod watch;
+#[cfg(test)]
+mod regressions;
 
 use actions::{Action, ActionResult, Engine, UndoInfo};
 use serde::{Deserialize, Serialize};

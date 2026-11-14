@@ -1,6 +1,7 @@
+import { QueryObserver } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, type RepoView, type HistoryPage } from "./api";
-import { act, loadMoreRepo, onWatcherChange, openRepoPath, queryClient, refresh, releaseRepo, repoData } from "./repo";
+import { act, loadMoreRepo, onWatcherChange, openRepoPath, queryClient, refresh, refreshStatus, readRepoSnapshot, releaseRepo, repoData } from "./repo";
 import { useStore } from "./store";
 
 const commit = (sha: string) => ({ sha, parents: [], author: "A", email: "a@b.c", time: 1, summary: sha, body: "" });
@@ -86,5 +87,48 @@ describe("repository loading and refresh", () => {
     useStore.getState().newTab();
     onWatcherChange(repo.path, true);
     expect(invalidate).not.toHaveBeenCalled();
+  });
+});
+
+describe("repository refresh safety", () => {
+  it("rejects a delayed status response from before a full refresh", async () => {
+    await open();
+    let finish!: (status: RepoView["status"]) => void;
+    vi.spyOn(api, "repoStatus").mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const reading = refreshStatus(repo.path);
+    const fresh = { ...repo, head_sha: "new-head", status: { staged: [], unstaged: [{ path: "new-branch.txt", status: "M" }], conflicted: false } };
+    const observer = new QueryObserver(queryClient, { queryKey: cache().queryKey, queryFn: async () => fresh, staleTime: Infinity });
+    const stop = observer.subscribe(() => {});
+    try {
+      await refresh(repo.path);
+      finish({ staged: [], unstaged: [{ path: "old-branch.txt", status: "M" }], conflicted: false });
+      await reading;
+      expect((cache().state.data as RepoView).status).toEqual(fresh.status);
+    } finally { stop(); }
+  });
+  it("keeps loaded history and selection when only metadata changed", async () => {
+    await open();
+    const pages = vi.spyOn(api, "historyPage").mockResolvedValue(page);
+    await loadMoreRepo(repo.path);
+    const tab = useStore.getState().activeId;
+    useStore.getState().setUi(tab, { selection: { type: "commit", sha: "second" } });
+    const observer = new QueryObserver(queryClient, { queryKey: cache().queryKey, staleTime: Infinity,
+      queryFn: () => readRepoSnapshot(repo.path, 500, { hidden: [], solo: [] }, cache().state.data as RepoView) });
+    const stop = observer.subscribe(() => {});
+    try {
+      await refresh(repo.path);
+      expect((cache().state.data as RepoView).commits.map((c) => c.sha)).toEqual(["first", "second"]);
+      expect(pages).toHaveBeenCalledTimes(1);
+      expect(useStore.getState().ui[tab].selection).toEqual({ type: "commit", sha: "second" });
+    } finally { stop(); }
+  });
+  it("restores the selected older commit when new commits shift it onto later pages", async () => {
+    await open();
+    const previous = { ...repo, commits: [commit("first"), commit("selected")] };
+    useStore.getState().setUi(useStore.getState().activeId, { selection: { type: "commit", sha: "selected" } });
+    vi.mocked(api.openRepo).mockResolvedValue({ ...repo, head_sha: "new", commits: [commit("new")] });
+    vi.spyOn(api, "historyPage").mockResolvedValue({ ...page, commits: [commit("first"), commit("selected")] });
+    const result = await readRepoSnapshot(repo.path, 500, { hidden: [], solo: [] }, previous);
+    expect(result.commits.map((c) => c.sha)).toEqual(["new", "first", "selected"]);
   });
 });

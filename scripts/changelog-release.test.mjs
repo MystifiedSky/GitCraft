@@ -62,3 +62,10 @@ test('release notes list the Unreleased entries by category', () => {
   assert.match(notes, /### Fixed\n\n- A fix\./);
   assert.equal(releaseNotes('# C\n\n## [Unreleased]\n\n## [0.1.0] - 2026-01-01\n'), '');
 });
+
+test('category headings and trailing whitespace accept long inputs without backtracking', () => {
+  assert.deepEqual(parseEntries(`### Fixed${' '.repeat(100000)}\n\n- Kept.`), { Fixed: ['- Kept.'] });
+  const current = `# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- Kept.\n\n[old]: https://example.test/old\n${' '.repeat(100000)}`;
+  const released = recordRelease({ current, shipped: current, version: '1.0.0', repo: 'owner/project', date: '2026-11-14' });
+  assert.ok(released.includes('[Unreleased]: https://github.com/owner/project/compare/v1.0.0...HEAD'));
+});

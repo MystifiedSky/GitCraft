@@ -35,10 +35,10 @@ export function parseEntries(body) {
     entry = null;
   };
   for (const line of normalize(body).split('\n')) {
-    const heading = /^### (.+?)\s*$/.exec(line);
+    const heading = line.startsWith("### ") ? line.slice(4).trimEnd() : "";
     if (heading) {
       flush();
-      category = heading[1];
+      category = heading;
     } else if (/^- /.test(line)) {
       flush();
       entry = [line];
@@ -99,7 +99,7 @@ export function recordRelease({ current, shipped, version, repo, date }) {
   const previous = compare?.[2];
   const links = [`[Unreleased]: ${base}/compare/v${version}...HEAD`, previous ? `[${version}]: ${base}/compare/${previous}...v${version}` : `[${version}]: ${base}/releases/tag/v${version}`];
   if (compare) tailText = tailText.replace(compare[0], links.join('\n'));
-  else tailText = `${tailText.replace(/\s*$/, '\n')}\n${links.join('\n')}\n`;
+  else tailText = `${tailText.trimEnd()}\n\n${links.join('\n')}\n`;
 
   return `${head}${unreleased}\n## [${version}] - ${date}\n\n${renderEntries(section)}\n${tailText.replace(/^\n+/, '')}`.replace(/\n{3,}/g, '\n\n');
 }

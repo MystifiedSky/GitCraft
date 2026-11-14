@@ -42,15 +42,45 @@ function generationFor(path: string) {
 const actionChanges = new Map<string, { full: boolean }>();
 const fullRefreshes = new Map<string, { again: boolean; promise: Promise<void> }>();
 
+function historySignature(repo: RepoView) {
+  return JSON.stringify([repo.head_sha, repo.refs.map((r) => `${r.full}:${r.sha}`).sort()]);
+}
+
+/** Refresh metadata while preserving the loaded range and the user's selected older commit. */
+export async function readRepoSnapshot(path: string, initial: number, view: RefView, previous?: RepoView, signal?: AbortSignal): Promise<RepoView> {
+  const checkCancelled = () => { if (signal?.aborted) throw new Error("Repository read cancelled"); };
+  checkCancelled();
+  let next = await api.openRepo(path, initial, view);
+  checkCancelled();
+  if (previous && historySignature(previous) === historySignature(next) &&
+      next.commits.every((c, i) => previous.commits[i]?.sha === c.sha)) {
+    return { ...next, commits: previous.commits, graph: previous.graph, has_more: previous.has_more, history_cursor: previous.history_cursor };
+  }
+  const target = previous?.commits.length ?? 0;
+  const state = useStore.getState();
+  const tab = state.tabs.find((t) => t.id === state.activeId && t.path === path);
+  const selection = tab ? state.ui[tab.id]?.selection : undefined;
+  const selected = selection?.type === "commit" && previous?.commits.some((c) => c.sha === selection.sha) ? selection.sha : null;
+  while (next.history_cursor && (next.commits.length < target || (selected && !next.commits.some((c) => c.sha === selected)))) {
+    checkCancelled();
+    const page = await api.historyPage(path, next.history_cursor, initial);
+    checkCancelled();
+    next = { ...next, ...page, commits: [...next.commits, ...page.commits], graph: { rows: [...next.graph.rows, ...page.graph.rows], width: page.graph.width } };
+    if (!page.commits.length) break;
+  }
+  return next;
+}
+
 export function useRepo(path: string | undefined, active = true) {
   // Subscribe to request inputs without coupling repository reads to unrelated preferences.
   const settings = useStore((s) => s.settings);
   const request = repoRequest(path ?? "");
   const q = useQuery({
     queryKey: request.key,
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const generation = generationFor(path!);
-      const r = await api.openRepo(path!, request.initial, request.view);
+      const previous = queryClient.getQueryData<RepoView>(request.key);
+      const r = await readRepoSnapshot(path!, request.initial, request.view, previous, signal);
       if (generations.get(path!) === generation && JSON.stringify(repoRequest(path!).key) === JSON.stringify(request.key)) latest.set(path!, r);
       return r;
     },
@@ -163,7 +193,10 @@ export function refreshStatus(path: string): Promise<void> {
     try {
       do {
         task.again = false;
-        setStatus(path, await api.repoStatus(path));
+        const generation = generationFor(path);
+        const status = await api.repoStatus(path);
+        if (generations.get(path) !== generation || !isOpen(path)) continue;
+        setStatus(path, status);
         await Promise.all(["diff", "versions", "blame", "range", "conflict"].map((kind) =>
           queryClient.invalidateQueries({ queryKey: [kind, path] }),
         ));
@@ -274,6 +307,7 @@ async function runAct(path: string, action: Action, quiet: boolean): Promise<boo
     if (guess) setStatus(path, guess);
   }
   let ok = false;
+  generations.set(path, ++nextGeneration);
   actionChanges.set(path, { full: false });
   try {
     const r = await api.run(path, action);

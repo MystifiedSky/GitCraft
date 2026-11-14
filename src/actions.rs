@@ -149,7 +149,7 @@ pub struct ActionResult {
 
 #[derive(Debug, Clone)]
 enum UndoRec {
-    Commit { before: String, after: String, label: String },
+    Commit { before: String, after: String, label: String, branch: String },
     Checkout { from: String, to: String },
     CreateBranch { name: String, sha: String },
     DeleteBranch { name: String, sha: String },
@@ -159,7 +159,7 @@ enum UndoRec {
     Discard { stash: String },
     Patch { patch: String, cached: bool, reverse: bool, label: String },
     /// History rewritten (rebase, cherry pick, fast-forward): move the branch back with reset --keep.
-    Rewrite { before: String, after: String, label: String },
+    Rewrite { before: String, after: String, label: String, branch: String },
 }
 
 impl UndoRec {
@@ -288,6 +288,10 @@ impl Engine {
         git::run(dir, &["rev-parse", "--verify", "-q", r]).stdout.trim().to_string()
     }
 
+    fn branch_ref(&self, dir: &Path) -> String {
+        git::run(dir, &["symbolic-ref", "-q", "HEAD"]).stdout.trim().to_owned()
+    }
+
     fn head_name(&self, dir: &Path) -> String {
         let o = git::run(dir, &["symbolic-ref", "--short", "-q", "HEAD"]);
         if o.ok {
@@ -382,7 +386,7 @@ impl Engine {
                 if o.ok && !before.is_empty() {
                     let after = self.rev(dir, "HEAD");
                     let label = if amend { "amend commit".to_string() } else { "commit".to_string() };
-                    self.push_undo(repo, UndoRec::Commit { before, after, label });
+                    self.push_undo(repo, UndoRec::Commit { before, after, branch: self.branch_ref(dir), label });
                 }
                 done(o, if amend { "Amended previous commit" } else { "Committed" })
             }
@@ -588,7 +592,7 @@ impl Engine {
                 let o = self.git(dir, &["rebase", "--autostash", &onto]);
                 if o.ok {
                     let after = self.rev(dir, "HEAD");
-                    self.push_undo(repo, UndoRec::Rewrite { before, after, label: format!("rebase onto {onto}") });
+                    self.push_undo(repo, UndoRec::Rewrite { before, after, branch: self.branch_ref(dir), label: format!("rebase onto {onto}") });
                 }
                 done(o, &format!("Rebased onto {onto}"))
             }
@@ -618,6 +622,13 @@ impl Engine {
                 let o = self.git(dir, &["remote", "set-url", &name, url.trim()]);
                 if !o.ok {
                     return done(o, "");
+                }
+                if push_url.trim().is_empty() || push_url.trim() == url.trim() {
+                    let clear = self.git(dir, &["config", "--local", "--unset-all", &format!("remote.{name}.pushurl")]);
+                    // git config exits 5 when the optional key does not exist.
+                    if !clear.ok && git::run(dir, &["config", "--get-all", &format!("remote.{name}.pushurl")]).ok {
+                        return done(clear, "");
+                    }
                 }
                 if !push_url.trim().is_empty() && push_url.trim() != url.trim() {
                     return done(self.git(dir, &["remote", "set-url", "--push", &name, push_url.trim()]), "Remote updated");
@@ -726,7 +737,7 @@ impl Engine {
                 }
                 if !before.is_empty() {
                     let after = self.rev(dir, "HEAD");
-                    self.push_undo(repo, UndoRec::Commit { before, after, label: format!("{} composed commits", commits.len()) });
+                    self.push_undo(repo, UndoRec::Commit { before, after, branch: self.branch_ref(dir), label: format!("{} composed commits", commits.len()) });
                 }
                 ActionResult { ok: true, message: format!("Created {} commits", commits.len()) }
             }
@@ -749,6 +760,11 @@ impl Engine {
             }
             Action::StashTakeFile { index, path } => {
                 // Tracked files are in the stash commit; new files are in its third parent.
+                let status = git::run(dir, &["status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "--", &path]);
+                if !status.ok { return done(status, ""); }
+                if !status.stdout.is_empty() {
+                    return ActionResult { ok: false, message: format!("Stash or commit the current changes to {path} before applying its stashed version.") };
+                }
                 let stash = format!("stash@{{{index}}}");
                 let mut o = self.git(dir, &["checkout", &stash, "--", &path]);
                 if !o.ok {
@@ -828,7 +844,7 @@ impl Engine {
                 self.record(&format!("git rebase -i {base} ({} steps)", items.len()), &o);
                 if o.ok {
                     let after = self.rev(dir, "HEAD");
-                    self.push_undo(repo, UndoRec::Rewrite { before, after, label: "interactive rebase".into() });
+                    self.push_undo(repo, UndoRec::Rewrite { before, after, branch: self.branch_ref(dir), label: "interactive rebase".into() });
                     ActionResult { ok: true, message: "Rebase complete".into() }
                 } else if self.in_progress(dir, "rebase-merge") {
                     ActionResult { ok: false, message: "The rebase stopped on a conflict. Resolve it, then Continue Rebase (or Abort Rebase).".into() }
@@ -841,7 +857,7 @@ impl Engine {
                 let o = crate::rewrite::interactive_cherry_pick(dir, &items, &|a: &[&str]| self.git(dir, a));
                 let after = self.rev(dir, "HEAD");
                 if after != before {
-                    self.push_undo(repo, UndoRec::Rewrite { before, after, label: "interactive cherry pick".into() });
+                    self.push_undo(repo, UndoRec::Rewrite { before, after, branch: self.branch_ref(dir), label: "interactive cherry pick".into() });
                 }
                 done(o, "Cherry pick complete")
             }
@@ -887,7 +903,7 @@ impl Engine {
                 };
                 if o.ok && head == branch {
                     let after = self.rev(dir, "HEAD");
-                    self.push_undo(repo, UndoRec::Rewrite { before, after, label: format!("fast-forward {branch}") });
+                    self.push_undo(repo, UndoRec::Rewrite { before, after, branch: self.branch_ref(dir), label: format!("fast-forward {branch}") });
                 }
                 done(o, &format!("Fast-forwarded {branch} to {to}"))
             }
@@ -964,12 +980,21 @@ impl Engine {
     }
 
     fn apply(&self, dir: &Path, rec: &UndoRec, undo: bool) -> git::GitOut {
+        if let UndoRec::Commit { before, after, branch, .. } | UndoRec::Rewrite { before, after, branch, .. } = rec {
+            let expected = if undo { after } else { before };
+            if self.branch_ref(dir) != *branch || self.rev(dir, "HEAD") != *expected {
+                return git::GitOut::failed("Return to the original branch and commit before undoing or redoing this action; the repository has changed.");
+            }
+        }
         match (rec, undo) {
             (UndoRec::Commit { before, .. }, true) => self.git(dir, &["reset", "-q", "--soft", before]),
             (UndoRec::Commit { after, .. }, false) => self.git(dir, &["reset", "-q", "--soft", after]),
             (UndoRec::Checkout { from, .. }, true) => self.git(dir, &["checkout", "-q", from]),
             (UndoRec::Checkout { to, .. }, false) => self.git(dir, &["checkout", "-q", to]),
-            (UndoRec::CreateBranch { name, .. }, true) | (UndoRec::DeleteBranch { name, .. }, false) => {
+            (UndoRec::CreateBranch { name, sha }, true) | (UndoRec::DeleteBranch { name, sha }, false) => {
+                if self.rev(dir, &format!("refs/heads/{name}")) != *sha {
+                    return git::GitOut::failed("This branch has changed since the recorded action; refusing to delete its new commits.");
+                }
                 self.git(dir, &["branch", "-D", name])
             }
             (UndoRec::CreateBranch { name, sha }, false) | (UndoRec::DeleteBranch { name, sha }, true) => {
