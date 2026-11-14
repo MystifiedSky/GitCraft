@@ -84,7 +84,7 @@ export function HistoryView({ repo, tabId, file, mode, sha }: { repo: RepoView; 
           {entries.length >= 500 && <div className="p-3 text-[11px] text-fg3">Showing the latest 500 commits.</div>}
         </div>
         <div className="flex-1 min-w-0">
-          {mode === "history" ? current ? <HistoryDiff repo={repo} file={current.path} sha={current.sha} parent={current.parents[0] ?? null} onGraph={() => onGraph(current.sha)} /> : null : blameFile ? <Blame repo={repo} file={blameFile} rev={sha} onPick={(c) => onGraph(c)} /> : <div className="p-4 text-fg3">{hist.isLoading ? "Loading file history…" : "Select a revision from this file's loaded history to view its blame."}</div>}
+          {mode === "history" ? current ? <HistoryDiff repo={repo} file={current.path} sha={current.sha} parent={current.parents[0] ?? null} onGraph={() => onGraph(current.sha)} /> : null : blameFile ? <Blame repo={repo} file={blameFile} rev={sha} onPick={(c) => onGraph(c)} /> : <div className="p-4 text-fg3">{hist.isLoading ? "Loading file history..." : "Select a revision from this file's loaded history to view its blame."}</div>}
         </div>
       </div>
     </div>
