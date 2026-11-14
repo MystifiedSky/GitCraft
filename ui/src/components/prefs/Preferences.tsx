@@ -1,3 +1,4 @@
+import { saveProfileIdentity } from "@/lib/prefs";
 import { useQuery } from "@tanstack/react-query";
 import {
   Bell,
@@ -122,9 +123,11 @@ function ProfilesSection() {
   const setSettings = useStore((s) => s.setSettings);
   const setDialog = useStore((s) => s.setDialog);
   const save = async (key: string, value: string) => {
-    await api.setGitConfig(null, "global", key, value);
-    toast(true, "Saved to your global Git config");
-    q.refetch();
+    try {
+      await saveProfileIdentity(key as "user.name" | "user.email", value);
+      toast(true, "Saved to your global Git config");
+      q.refetch();
+    } catch (error) { toast(false, `Could not save identity: ${error}`); }
   };
   const sorted = [...profiles].sort((a, b) => a.name.localeCompare(b.name));
   return (

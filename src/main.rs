@@ -8,6 +8,9 @@ mod git;
 mod graph;
 mod ai;
 mod ai_context;
+mod operation;
+mod pagination;
+mod process_tree;
 mod agents;
 mod ai_cli;
 mod ai_models;
@@ -24,6 +27,7 @@ mod shell;
 mod shot;
 mod terminal;
 mod watch;
+mod watch_plan;
 #[cfg(test)]
 mod regressions;
 
@@ -116,7 +120,7 @@ async fn open_repo(path: String, max: Option<usize>, view: Option<git::RefView>,
         }
         let root = git::repo_root(&p).ok_or_else(|| format!("{path} is not a Git repository"))?;
         let view = view.unwrap_or_default();
-        let data = git::load_view(&root, max.unwrap_or(INITIAL_COMMITS).clamp(prefs::MIN_INITIAL_COMMITS, 5000), &view);
+        let data = git::load_view_checked(&root, max.unwrap_or(INITIAL_COMMITS).clamp(prefs::MIN_INITIAL_COMMITS, 5000), &view)?;
         let pinned_sha = view.pinned.as_ref().and_then(|p| data.refs.iter().find(|r| &r.full == p)).map(|r| r.sha.clone());
         let mut layout = graph::LayoutCursor::new(pinned_sha.as_deref());
         let graph = layout.append(&data.commits);
@@ -136,7 +140,16 @@ async fn open_repo(path: String, max: Option<usize>, view: Option<git::RefView>,
 }
 
 #[tauri::command]
-async fn commit_files(path: String, sha: String) -> Result<Vec<git::FileChange>, String> {
+async fn commit_details(path: String, sha: String) -> Result<git::Commit, String> {
+    blocking(move || {
+        let output = git::run(Path::new(&path), &["log", "--no-walk", "-1", "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%s%x00%b%x00", &sha, "--"]);
+        if !output.ok { return Err(output.message()); }
+        git::parse_commits(&output.stdout).into_iter().next().ok_or_else(|| "The selected commit is no longer available.".into())
+    }).await?
+}
+
+#[tauri::command]
+async fn commit_files(path: String, sha: String) -> Result<Vec<git::CommitFile>, String> {
     blocking(move || {
         let dir = PathBuf::from(&path);
         let o = git::run(&dir, &["rev-list", "--parents", "-n1", &sha]);
@@ -150,7 +163,7 @@ async fn commit_files(path: String, sha: String) -> Result<Vec<git::FileChange>,
             summary: String::new(),
             body: String::new(),
         };
-        git::commit_files(&dir, &c)
+        git::commit_file_entries(&dir, &c)
     })
     .await
 }
@@ -173,8 +186,12 @@ async fn file_versions(path: String, source: git::DiffSource, file: String, untr
 }
 
 #[tauri::command]
-async fn save_file(path: String, file: String, content: String) -> Result<(), String> {
-    blocking(move || files::save(Path::new(&path), &file, &content)).await?
+async fn save_file(path: String, file: String, content: String, expected: Option<String>, utf8: Option<bool>) -> Result<(), String> {
+    blocking(move || {
+        let operation = operation::lock_for(Path::new(&path));
+        let _guard = operation.lock().unwrap_or_else(|e| e.into_inner());
+        files::save_checked_mode(Path::new(&path), &file, &content, expected.as_deref(), utf8.unwrap_or(false))
+    }).await?
 }
 
 #[tauri::command]
@@ -200,6 +217,20 @@ async fn range_files(path: String, from: String, to: String) -> Result<Vec<git::
 #[tauri::command]
 async fn tracked_files(path: String) -> Result<Vec<String>, String> {
     blocking(move || files::tracked_files(Path::new(&path))).await
+}
+
+#[tauri::command]
+async fn read_ssh_public_key(path: String) -> Result<String, String> { blocking(move || accounts::read_public_key(&path)).await? }
+
+#[tauri::command]
+async fn rebase_plan(path: String, base: String) -> Result<serde_json::Value, String> {
+    blocking(move || {
+        let dir = Path::new(&path);
+        let lock = operation::lock_for(dir); let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let expected = rewrite::plan_state(dir, &base)?;
+        let commits = rewrite::rebase_commits(dir, &base)?;
+        Ok(serde_json::json!({ "expected": expected, "commits": commits }))
+    }).await?
 }
 
 #[tauri::command]
@@ -231,6 +262,9 @@ async fn remotes_list(path: String) -> Result<Vec<manage::Remote>, String> {
 async fn submodules_list(path: String) -> Result<Vec<manage::Submodule>, String> {
     blocking(move || manage::submodules(Path::new(&path))).await
 }
+
+#[tauri::command]
+async fn lfs_locks(path: String) -> Result<Vec<manage::LfsLock>, String> { blocking(move || manage::lfs_locks(Path::new(&path))).await? }
 
 #[tauri::command]
 async fn lfs_info(path: String) -> Result<manage::LfsInfo, String> {
@@ -292,6 +326,11 @@ fn term_write(id: u32, data: String, state: State<'_, AppState>) -> Result<(), S
 }
 
 #[tauri::command]
+fn term_ack(id: u32, bytes: usize, state: State<'_, AppState>) {
+    state.terminals.acknowledge(id, bytes);
+}
+
+#[tauri::command]
 fn term_resize(id: u32, cols: u16, rows: u16, state: State<'_, AppState>) -> Result<(), String> {
     state.terminals.resize(id, cols, rows)
 }
@@ -348,7 +387,9 @@ fn set_secret(name: String, value: String) -> Result<(), String> {
     if !allowed {
         return Err("unknown secret".into());
     }
-    hosting::secret_set(&name, value.trim())
+    hosting::secret_set(&name, value.trim())?;
+    if name.ends_with("-token") { hosting::sync_git_credentials(""); }
+    Ok(())
 }
 
 #[tauri::command]
@@ -359,6 +400,19 @@ async fn repo_remote(path: String, gitlab_host: String) -> Result<Option<hosting
 #[tauri::command]
 async fn list_prs(path: String, gitlab_host: String) -> Result<Vec<hosting::PullRequest>, String> {
     blocking(move || hosting::pull_requests(&remote_of(&path, &gitlab_host)?)).await?
+}
+
+#[tauri::command]
+async fn pr_details(path: String, gitlab_host: String, number: u64) -> Result<hosting::PullRequest, String> {
+    blocking(move || hosting::pull_request(&remote_of(&path, &gitlab_host)?, number)).await?
+}
+
+#[tauri::command]
+async fn pr_checkout_target(path: String, gitlab_host: String, number: u64) -> Result<hosting::PrCheckout, String> {
+    blocking(move || {
+        let remote = remote_of(&path, &gitlab_host)?;
+        hosting::pr_checkout(&remote, &hosting::pull_request(&remote, number)?)
+    }).await?
 }
 
 /// Issues for a repository: from its own issue tracker choice (Preferences > Issue Tracker), else its host.
@@ -435,7 +489,15 @@ async fn pr_comment(path: String, gitlab_host: String, number: u64, body: String
 
 #[tauri::command]
 async fn create_pr(path: String, gitlab_host: String, source: String, target: String, title: String, body: String, draft: bool) -> Result<hosting::PullRequest, String> {
-    blocking(move || hosting::create_pr(&remote_of(&path, &gitlab_host)?, &source, &target, &title, &body, draft)).await?
+    blocking(move || {
+        let (remote, source) = hosting::pull_request_destination(Path::new(&path), &source, &gitlab_host)?;
+        hosting::create_pr(&remote, &source, &target, &title, &body, draft)
+    }).await?
+}
+
+#[tauri::command]
+async fn cancel_pr_merge(path: String, gitlab_host: String, number: u64) -> Result<bool, String> {
+    blocking(move || Ok(hosting_api::cancel_merge(&remote_of(&path, &gitlab_host)?, number))).await?
 }
 
 #[tauri::command]
@@ -463,26 +525,26 @@ fn open_url(url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn ai_commit_message(path: String, sha: Option<String>) -> Result<(String, String), String> {
-    blocking(move || ai::commit_message(Path::new(&path), sha.as_deref())).await?
+async fn ai_commit_message(path: String, sha: Option<String>, config: ai::AiConfig) -> Result<(String, String), String> {
+    blocking(move || ai::with_config(config, || ai::commit_message(Path::new(&path), sha.as_deref()))).await?
 }
 
 #[tauri::command]
-async fn ai_stash_message(path: String) -> Result<String, String> {
-    blocking(move || ai::stash_message(Path::new(&path))).await?
+async fn ai_stash_message(path: String, config: ai::AiConfig) -> Result<String, String> {
+    blocking(move || ai::with_config(config, || ai::stash_message(Path::new(&path)))).await?
 }
 
 #[tauri::command]
-async fn ai_explain_commit(path: String, sha: String) -> Result<String, String> {
-    blocking(move || ai::explain_commit(Path::new(&path), &sha)).await?
+async fn ai_explain_commit(path: String, sha: String, config: ai::AiConfig) -> Result<String, String> {
+    blocking(move || ai::with_config(config, || ai::explain_commit(Path::new(&path), &sha))).await?
 }
 
 #[tauri::command]
-async fn ai_explain_branch(path: String, branch: String, base: Option<String>) -> Result<String, String> {
-    blocking(move || {
+async fn ai_explain_branch(path: String, branch: String, base: Option<String>, config: ai::AiConfig) -> Result<String, String> {
+    blocking(move || ai::with_config(config, || {
         let base = base.or_else(|| extras::default_target(Path::new(&path))).ok_or("No branch to compare with")?;
         ai::explain_branch(Path::new(&path), &branch, &base)
-    })
+    }))
     .await?
 }
 
@@ -492,8 +554,8 @@ fn set_ai_config(config: ai::AiConfig) {
 }
 
 #[tauri::command]
-async fn ai_test_connection() -> Result<String, String> {
-    blocking(ai::test_connection).await?
+async fn ai_test_connection(config: ai::AiConfig) -> Result<String, String> {
+    blocking(move || ai::with_config(config, ai::test_connection)).await?
 }
 
 #[tauri::command]
@@ -508,18 +570,18 @@ async fn ai_find_program(provider: String) -> Result<ai_cli::DetectedProgram, St
 }
 
 #[tauri::command]
-async fn ai_pull_request(path: String, source: String, target: String) -> Result<(String, String), String> {
-    blocking(move || ai::pull_request_text(Path::new(&path), &source, &target)).await?
+async fn ai_pull_request(path: String, source: String, target: String, config: ai::AiConfig) -> Result<(String, String), String> {
+    blocking(move || ai::with_config(config, || ai::pull_request_text(Path::new(&path), &source, &target))).await?
 }
 
 #[tauri::command]
-async fn ai_resolve_conflict(base: String, ours: String, theirs: String, file: String) -> Result<String, String> {
-    blocking(move || ai::resolve_conflict(&base, &ours, &theirs, &file)).await?
+async fn ai_resolve_conflict(base: String, ours: String, theirs: String, file: String, config: ai::AiConfig) -> Result<String, String> {
+    blocking(move || ai::with_config(config, || ai::resolve_conflict(&base, &ours, &theirs, &file))).await?
 }
 
 #[tauri::command]
-async fn ai_compose(path: String) -> Result<Vec<ai::ComposedCommit>, String> {
-    blocking(move || ai::compose(Path::new(&path))).await?
+async fn ai_compose(path: String, config: ai::AiConfig) -> Result<Vec<ai::ComposedCommit>, String> {
+    blocking(move || ai::with_config(config, || ai::compose(Path::new(&path)))).await?
 }
 
 /// Save a patch (uncommitted changes when `shas` is empty, else those commits) to a file the person picks.
@@ -551,7 +613,7 @@ async fn conflict_check(path: String, target: Option<String>) -> Result<extras::
 /// Just the file lists (one `git status`), for staging and working-folder edits.
 #[tauri::command]
 async fn repo_status(path: String) -> Result<git::WorkStatus, String> {
-    blocking(move || git::status(Path::new(&path))).await
+    blocking(move || git::try_status(Path::new(&path))).await?
 }
 
 /// Hand the tokens of connected services to Git (HTTPS push / pull / fetch / clone).
@@ -597,8 +659,14 @@ async fn forget_credentials(hosts: Vec<String>) -> Result<usize, String> {
 }
 
 #[tauri::command]
-async fn delete_orig_files(path: String) -> Result<Vec<String>, String> {
-    blocking(move || prefs::delete_orig_files(Path::new(&path))).await
+async fn orig_cleanup_candidates(path: String) -> Result<Vec<prefs::OrigCandidate>, String> { blocking(move || prefs::orig_cleanup_candidates(Path::new(&path))).await }
+
+#[tauri::command]
+async fn delete_orig_files(path: String, candidates: Vec<prefs::OrigCandidate>) -> Result<Vec<String>, String> {
+    blocking(move || {
+        let dir = Path::new(&path); let lock = operation::lock_for(dir); let _guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+        prefs::delete_orig_selected(dir, &candidates)
+    }).await?
 }
 
 #[tauri::command]
@@ -646,6 +714,9 @@ async fn run_action(path: String, action: Action, state: State<'_, AppState>) ->
 }
 
 #[tauri::command]
+fn activity_log_snapshot(version: Option<u64>, state: State<'_, AppState>) -> Option<(u64, Vec<git::LogEntry>)> { state.engine.log_snapshot(version) }
+
+#[tauri::command]
 fn activity_log(state: State<'_, AppState>) -> Vec<git::LogEntry> {
     state.engine.log_entries()
 }
@@ -671,9 +742,17 @@ async fn pick_folder(title: String) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-async fn init_repo(parent: String, name: String, options: Option<manage::InitOptions>, state: State<'_, AppState>) -> Result<String, String> {
+async fn init_repo(parent: String, name: String, options: Option<manage::InitOptions>, state: State<'_, AppState>) -> Result<manage::InitOutcome, String> {
     let engine = state.engine.clone();
-    let dir = PathBuf::from(parent).join(name.trim());
+    let name = name.trim();
+    if name.is_empty() || Path::new(name).components().count() != 1 || !matches!(Path::new(name).components().next(), Some(std::path::Component::Normal(_))) {
+        return Err("Enter a folder name, without parent directories.".into());
+    }
+    let dir = PathBuf::from(parent).join(name);
+    if dir.exists() && std::fs::read_dir(&dir).map_err(err)?.next().is_some() {
+        return Err("Choose an empty folder for a new repository. Existing files were not changed.".into());
+    }
+    let name = name.to_owned();
     tokio::fs::create_dir_all(&dir).await.map_err(err)?;
     blocking(move || {
         let opts = options.unwrap_or_default();
@@ -684,11 +763,7 @@ async fn init_repo(parent: String, name: String, options: Option<manage::InitOpt
             if !f.ok {
                 return Err(f.message());
             }
-            // Git LFS is set up last, after the first commit; a problem there does not undo the new repository.
-            if opts.lfs {
-                let _ = engine.git(&dir, &["lfs", "install", "--local"]);
-            }
-            Ok(dir.to_string_lossy().into_owned())
+            Ok(manage::initialize_lfs(&dir, opts.lfs, &|args| engine.git(&dir, args)))
         } else {
             Err(o.message())
         }
@@ -705,7 +780,7 @@ struct CloneOptions {
     since: Option<String>,
     /// Clone just this branch (--single-branch --branch).
     branch: Option<String>,
-    /// Extra flags, split on spaces, passed as typed.
+    /// Extra flags parsed as quoted argument fields without shell expansion.
     custom_flags: Option<String>,
     /// Start with a sparse checkout (--sparse) and check out only `sparse_paths`.
     sparse: Option<bool>,
@@ -715,7 +790,7 @@ struct CloneOptions {
 }
 
 /// The `git clone` arguments in a fixed order: branch, depth, progress, since, custom flags, sparse, filter.
-fn clone_args(o: &CloneOptions) -> Vec<String> {
+fn clone_args(o: &CloneOptions) -> Result<Vec<String>, String> {
     let mut a: Vec<String> = Vec::new();
     if let Some(b) = o.branch.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
         a.extend(["--single-branch".to_string(), "--branch".to_string(), b.to_string()]);
@@ -728,7 +803,7 @@ fn clone_args(o: &CloneOptions) -> Vec<String> {
         a.extend(["--shallow-since".to_string(), since.to_string()]);
     }
     if let Some(flags) = o.custom_flags.as_deref() {
-        a.extend(flags.split_whitespace().map(str::to_string));
+        a.extend(external::argument_fields(flags)?);
     }
     if o.sparse == Some(true) {
         a.push("--sparse".into());
@@ -736,7 +811,7 @@ fn clone_args(o: &CloneOptions) -> Vec<String> {
     if o.blobless == Some(true) {
         a.extend(["--filter".to_string(), "blob:none".to_string()]);
     }
-    a
+    Ok(a)
 }
 
 #[tauri::command]
@@ -750,7 +825,7 @@ async fn clone_repo(url: String, parent: String, options: Option<CloneOptions>, 
         let dest = parent.join(&name);
         let dest_s = dest.to_string_lossy().into_owned();
         let mut args: Vec<String> = vec!["clone".into()];
-        args.extend(clone_args(&opts));
+        args.extend(clone_args(&opts)?);
         args.push(url.trim().to_string());
         args.push(dest_s);
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -760,12 +835,12 @@ async fn clone_repo(url: String, parent: String, options: Option<CloneOptions>, 
         }
         if opts.sparse == Some(true) {
             // Only the chosen paths are checked out; with none, only the files in the top folder.
-            let mut set: Vec<String> = vec!["sparse-checkout".into(), "set".into()];
+            let mut set: Vec<String> = vec!["sparse-checkout".into(), "set".into(), "--no-cone".into()];
             let paths: Vec<String> = opts.sparse_paths.unwrap_or_default().into_iter().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect();
             if !paths.is_empty() {
                 set.push("--".into());
                 set.extend(paths);
-            }
+            } else { set.extend(["/*".into(), "!/*/".into()]); }
             let refs: Vec<&str> = set.iter().map(String::as_str).collect();
             let s = engine.git(&dest, &refs);
             if !s.ok {
@@ -947,6 +1022,7 @@ fn main() {
             open_repo,
             history_page,
             commit_files,
+            commit_details,
             file_diff,
             file_versions,
             save_file,
@@ -957,6 +1033,8 @@ fn main() {
             tracked_files,
             open_in_editor,
             rebase_commits,
+            rebase_plan,
+            read_ssh_public_key,
             gitflow_config,
             update_config,
             ai_commit_message,
@@ -983,6 +1061,7 @@ fn main() {
             gpg_export_key,
             forget_credentials,
             delete_orig_files,
+            orig_cleanup_candidates,
             pick_file,
             sync_git_credentials,
             remote_auth,
@@ -991,11 +1070,14 @@ fn main() {
             set_secret,
             repo_remote,
             list_prs,
+            pr_details,
+            pr_checkout_target,
             list_issues,
             pr_comments,
             pr_comment,
             create_pr,
             merge_pr,
+            cancel_pr_merge,
             launchpad,
             create_issue,
             set_integration_config,
@@ -1008,6 +1090,7 @@ fn main() {
             open_url,
             term_open,
             term_write,
+            term_ack,
             term_resize,
             term_close,
             account_info,
@@ -1015,6 +1098,7 @@ fn main() {
             generate_ssh_key,
             cancel_job,
             lfs_info,
+            lfs_locks,
             sparse_info,
             gitignore_templates,
             cleanup_list,
@@ -1024,6 +1108,7 @@ fn main() {
             conflict_info,
             run_action,
             activity_log,
+            activity_log_snapshot,
             sample_repo,
             last_commit_message,
             pick_folder,
@@ -1060,11 +1145,11 @@ mod clone_tests {
             blobless: Some(true),
         };
         assert_eq!(
-            clone_args(&all),
+            clone_args(&all).unwrap(),
             ["--single-branch", "--branch", "dev", "--depth", "5", "--progress", "--shallow-since", "2025-01-31", "--no-tags", "--quiet", "--sparse", "--filter", "blob:none"]
         );
-        assert_eq!(clone_args(&CloneOptions::default()), ["--progress"]);
+        assert_eq!(clone_args(&CloneOptions::default()).unwrap(), ["--progress"]);
         let blank = CloneOptions { branch: Some("  ".into()), depth: Some(0), ..Default::default() };
-        assert_eq!(clone_args(&blank), ["--progress"]);
+        assert_eq!(clone_args(&blank).unwrap(), ["--progress"]);
     }
 }

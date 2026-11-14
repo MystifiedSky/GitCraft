@@ -1,3 +1,4 @@
+import { flushPersistence } from "./persistence";
 // Automatic updates from GitHub Releases (Tauri updater). Installed copies read latest.json from the newest
 // release, check its signature against the public key built into the app, download in the background and
 // offer "Update Ready (Restart GitCraft)".
@@ -120,6 +121,7 @@ export async function installAndRestart() {
   if (!u || busy || useUpdates.getState().phase !== "ready") return;
   busy = true;
   try {
+    await flushPersistence();
     await u.install();
     await relaunch();
   } catch (e) {

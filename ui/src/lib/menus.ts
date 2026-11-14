@@ -1,3 +1,4 @@
+import { literalIgnorePath } from "./ignore-pattern";
 import type { MenuEntry } from "@/components/ui/menu";
 import type { Commit, GitRef, RepoView, Stash } from "./api";
 import { api } from "./api";
@@ -57,7 +58,7 @@ export function promptUpstream(repo: RepoView, ref: GitRef) {
   const remotes = repo.refs.filter((r) => r.kind === "Remote").map((r) => r.name);
   const guess = ref.upstream || remotes.find((r) => r.endsWith("/" + ref.name)) || `${repo.remotes[0] ?? "origin"}/${ref.name}`;
   useStore.getState().setDialog({
-    kind: "prompt",
+    kind: "prompt", allowEmpty: true,
     title: "Set Upstream",
     label: `What remote/branch should "${ref.name}" push to and pull from? (empty = stop tracking)`,
     value: guess,
@@ -273,8 +274,8 @@ function historyItems(repo: RepoView, c: Commit): MenuEntry[] {
 export function stashMenu(repo: RepoView, st: Stash): MenuEntry[] {
   const path = repo.path;
   return [
-    { label: "Apply Stash", onSelect: () => act(path, { type: "stashApply", index: st.index }) },
-    { label: "Pop Stash", onSelect: () => act(path, { type: "stashPop", index: st.index }) },
+    { label: "Apply Stash", onSelect: () => act(path, { type: "stashApply", index: st.index, expected: st.sha }) },
+    { label: "Pop Stash", onSelect: () => act(path, { type: "stashPop", index: st.index, expected: st.sha }) },
     {
       label: "Edit stash message",
       onSelect: () =>
@@ -284,25 +285,25 @@ export function stashMenu(repo: RepoView, st: Stash): MenuEntry[] {
           label: "Stash message",
           value: st.message,
           confirm: "Save",
-          onSubmit: (v) => act(path, { type: "stashRename", index: st.index, message: v }),
+          onSubmit: (v) => act(path, { type: "stashRename", index: st.index, expected: st.sha, message: v }),
         }),
     },
     {
       label: "Delete Stash",
       danger: true,
-      onSelect: () => confirmThen("Delete this stash?", st.message, "Delete", () => act(path, { type: "stashDrop", index: st.index })),
+      onSelect: () => confirmThen("Delete this stash?", st.message, "Delete", () => act(path, { type: "stashDrop", index: st.index, expected: st.sha })),
     },
     { separator: true },
     { label: "Copy stash sha", onSelect: () => copy(st.sha) },
   ];
 }
 
-export function fileMenu(repo: RepoView, file: string, staged: boolean, inCommit: boolean, commitSha?: string): MenuEntry[] {
+export function fileMenu(repo: RepoView, file: string, staged: boolean, inCommit: boolean, commitSha?: string, storage?: string): MenuEntry[] {
   const path = repo.path;
   const items: MenuEntry[] = [];
   const stash = commitSha ? repo.stashes.find((st) => st.sha === commitSha) : undefined;
   if (stash) {
-    items.push({ label: "Apply stashed file", onSelect: () => act(path, { type: "stashTakeFile", index: stash.index, path: file }) });
+    items.push({ label: "Apply stashed file", onSelect: () => act(path, { type: "stashTakeFile", index: stash.index, expected: stash.sha, path: file }) });
     items.push({ separator: true });
   }
   if (!inCommit) {
@@ -325,8 +326,8 @@ export function fileMenu(repo: RepoView, file: string, staged: boolean, inCommit
   items.push({
     label: tracked ? "Ignore and stop tracking" : "Ignore",
     children: [
-      { label: "Ignore this file", onSelect: () => ign("/" + file, [file]) },
-      ...(dir ? [{ label: `Ignore all files in "${dir}"`, onSelect: () => ign("/" + dir, [dir]) }] : []),
+      { label: "Ignore this file", onSelect: () => ign(literalIgnorePath(file), [file]) },
+      ...(dir ? [{ label: `Ignore all files in "${dir}"`, onSelect: () => ign(literalIgnorePath(dir), [dir]) }] : []),
       ...(ext ? [{ label: `Ignore all files with extension ${ext}`, onSelect: () => ign("*" + ext, [file]) }] : []),
     ],
   });
@@ -345,7 +346,7 @@ export function fileMenu(repo: RepoView, file: string, staged: boolean, inCommit
   items.push({
     label: "Copy file contents to clipboard",
     onSelect: () =>
-      api.fileText(path, file, inCommit && commitSha ? commitSha : staged ? ":" : undefined).then(copy, (e) => useStore.getState().toast(false, String(e))),
+      api.fileText(path, file, inCommit && commitSha ? storage ?? commitSha : staged ? ":" : undefined).then(copy, (e) => useStore.getState().toast(false, String(e))),
   });
   const fail = (e: unknown) => useStore.getState().toast(false, String(e));
   items.push({ label: `Open in ${editorName(useStore.getState().settings.externalEditor)}`, onSelect: () => api.openInEditor(path, file).catch(fail) });

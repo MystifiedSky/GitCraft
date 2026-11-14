@@ -79,7 +79,7 @@ export function HooksSection({ path }: { path: string }) {
 }
 
 export function LfsSection({ path }: { path: string }) {
-  const q = useQuery({ queryKey: ["lfsInfo", path], queryFn: () => api.lfsInfo(path) });
+  const q = useQuery({ queryKey: ["lfsInfo", path], queryFn: () => api.lfsInfo(path), staleTime: 30_000 });
   const i = q.data;
   const after = () => setTimeout(() => q.refetch(), 300);
   return (

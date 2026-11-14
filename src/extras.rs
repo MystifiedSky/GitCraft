@@ -15,14 +15,15 @@ pub fn make_patch(dir: &Path, shas: &[String]) -> Result<String, String> {
     let context = format!("-U{DIFF_CONTEXT_LINES}");
     let interhunk = format!("--inter-hunk-context={DIFF_INTERHUNK_LINES}");
     if shas.is_empty() {
-        let o = git::run(dir, &["diff", "HEAD", "--binary", "--no-color", "--no-ext-diff", &context, &interhunk]);
-        if !o.ok {
-            return Err(o.message());
-        }
-        if o.stdout.trim().is_empty() {
+        let baseline = if git::run(dir, &["rev-parse", "--verify", "HEAD"]).ok { "HEAD".into() } else {
+            let empty = git::run(dir, &["hash-object", "-w", "-t", "tree", "--stdin"]);
+            if !empty.ok { return Err(empty.message()); } empty.stdout.trim().to_owned()
+        };
+        let text = git::run_utf8(dir, &["diff", &baseline, "--binary", "--no-color", "--no-ext-diff", &context, &interhunk])?;
+        if text.trim().is_empty() {
             return Err("There are no uncommitted changes to put in a patch (new files must be staged first).".into());
         }
-        return Ok(o.stdout);
+        return Ok(text);
     }
     let mut out = String::new();
     let total = shas.len();
@@ -31,12 +32,14 @@ pub fn make_patch(dir: &Path, shas: &[String]) -> Result<String, String> {
     let prefix = format!("--subject-prefix={PATCH_SUBJECT_PREFIX}");
     let start = format!("--start-number={PATCH_START_NUMBER}");
     for (i, sha) in shas.iter().enumerate() {
-        let o = git::run(dir, &["format-patch", "-1", "--stdout", "--binary", &context, &interhunk, &prefix, "--no-numbered", "--no-cover-letter", &start, sha]);
-        if !o.ok {
-            return Err(o.message());
+        let parents = git::run(dir, &["rev-list", "--parents", "-n", "1", sha]);
+        if !parents.ok { return Err(parents.message()); }
+        if parents.stdout.split_whitespace().count() > 2 {
+            return Err("Merge commits cannot be exported as mailbox patches. Choose the individual commits instead.".into());
         }
+        let text = git::run_utf8(dir, &["format-patch", "-1", "--stdout", "--binary", &context, &interhunk, &prefix, "--no-numbered", "--no-cover-letter", &start, sha])?;
         // Native indices are one-based: number = i_native - 1 + S, total = N - 1 + S.
-        out.push_str(&number_subject(&o.stdout, i + PATCH_START_NUMBER, total - 1 + PATCH_START_NUMBER));
+        out.push_str(&number_subject(&text, i + PATCH_START_NUMBER, total - 1 + PATCH_START_NUMBER));
     }
     Ok(out)
 }
@@ -89,11 +92,15 @@ pub fn apply_patch_file(dir: &Path, file: &Path, run: &dyn Fn(&[&str]) -> git::G
     let text = std::fs::read_to_string(file).unwrap_or_default();
     let f = file.to_string_lossy().into_owned();
     if text.starts_with("From ") {
-        let o = run(&["am", "--3way", &f]);
-        if !o.ok {
-            let _ = git::run(dir, &["am", "--abort"]);
+        for state in ["rebase-apply", "rebase-merge", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"] {
+            let path = git::run(dir, &["rev-parse", "--git-path", state]);
+            let path = dir.join(path.stdout.trim());
+            if path.exists() {
+                return git::GitOut::failed("Finish or abort the current Git operation before importing a mailbox patch.");
+            }
         }
-        o
+        // Keep a newly conflicted session so the user can resolve or explicitly abort it.
+        run(&["am", "--3way", &f])
     } else {
         run(&["apply", "--3way", &f])
     }

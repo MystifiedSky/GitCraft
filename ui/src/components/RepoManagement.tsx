@@ -1,9 +1,11 @@
+import { readRepositorySummary } from "@/lib/read-pool";
+import { sameFolder } from "@/lib/agents";
 import { useQueries } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { ChevronDown, ChevronRight, CloudDownload, Download, FolderOpen, Search, Star, Trash2, X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
-import { openRepoPath, refresh } from "@/lib/repo";
+import { act, openRepoPath, refresh, setBulkProgress, queryClient } from "@/lib/repo";
 import { useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { Dialog } from "./ui/dialog";
@@ -17,7 +19,7 @@ interface Summary {
 }
 
 const name = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() ?? p;
-const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+const same = sameFolder;
 
 export function toggleFavorite(path: string) {
   const s = useStore.getState();
@@ -45,27 +47,39 @@ export function RepoManagementDialog({ onClose }: { onClose: () => void }) {
     ["Recent", s.settings.recents],
   ];
   const all = [...new Set(groups.flatMap(([, ps]) => ps))];
+  const match = (p: string) => !q || p.toLowerCase().includes(q.toLowerCase());
+  const visible = new Set(groups.filter(([label]) => !collapsed[label]).flatMap(([, paths]) => paths.filter(match)));
+  const visibleKey = [...visible].join("\0");
+  const allKey = all.join("\0");
+  useEffect(() => {
+    for (const path of all) if (!visible.has(path)) void queryClient.cancelQueries({queryKey:["repoSummary",path], exact:true});
+  }, [visibleKey, allKey]);
   const summaries = useQueries({
-    queries: all.map((p) => ({ queryKey: ["repoSummary", p], queryFn: () => invoke<Summary>("repo_summary", { path: p }), staleTime: 15000 })),
+    queries: all.map((p) => ({ queryKey: ["repoSummary", p], queryFn: ({ signal }: {signal: AbortSignal}) => readRepositorySummary(() => invoke<Summary>("repo_summary", { path: p }), signal), enabled: visible.has(p), staleTime: 15000 })),
   });
   const sum = (p: string) => summaries[all.indexOf(p)]?.data;
-  const match = (p: string) => !q || p.toLowerCase().includes(q.toLowerCase());
+
 
   const runAll = async (paths: string[], what: "fetch" | "pull") => {
     const ok = paths.filter((p) => sum(p)?.exists);
     if (!ok.length) return s.toast(false, what === "fetch" ? "No repositories to fetch" : "No repositories to pull");
     let failed = 0;
-    for (const [i, p] of ok.entries()) {
-      s.setBusy(`${what === "fetch" ? "Fetching" : "Pulling"} ${name(p)} (${i + 1} of ${ok.length})…`);
-      const mode = s.settings.pullMode === "fetch" ? "ff" : s.settings.pullMode;
-      const r = await api.run(p, what === "fetch" ? { type: "fetch" } : { type: "pull", mode }).catch((e) => ({ ok: false, message: String(e) }));
-      if (!r.ok) {
-        failed++;
-        s.toast(false, `${name(p)}: ${r.message}`);
-      } else await refresh(p);
-    }
-    s.setBusy(null);
-    summaries.forEach((x) => x.refetch());
+    let next = 0;
+    let completed = 0;
+    const worker = async () => {
+      while (next < ok.length) {
+        const p = ok[next++];
+        setBulkProgress(`${what === "fetch" ? "Fetching" : "Pulling"} repositories (${completed} of ${ok.length} complete)…`);
+        try {
+          if (!(await act(p, what === "fetch" ? { type: "fetch" } : { type: "pull", mode: s.settings.pullMode === "fetch" ? "ff" : s.settings.pullMode }, true))) failed++;
+        } catch (error) { failed++; s.toast(false, `${name(p)}: ${error}`); }
+        completed++;
+        setBulkProgress(`${what === "fetch" ? "Fetching" : "Pulling"} repositories (${completed} of ${ok.length} complete)…`);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(3, ok.length) }, worker));
+    setBulkProgress(null);
+    summaries.forEach((summary, index) => { if (visible.has(all[index])) void summary.refetch(); });
     if (!failed) s.toast(true, `${what === "fetch" ? "Fetched" : "Pulled"} ${ok.length} repositor${ok.length === 1 ? "y" : "ies"}`);
   };
 

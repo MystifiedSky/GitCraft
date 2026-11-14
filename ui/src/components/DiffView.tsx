@@ -46,6 +46,7 @@ export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: strin
   const allowLarge = largeTarget === targetKey;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<string | null>(null);
+  const editToken = useRef<string | undefined>(undefined);
   const handle = useRef<DiffHandle | null>(null);
   const hunkScroll = useRef<HTMLDivElement>(null);
   const close = () => s.setUi(tabId, { diff: null });
@@ -57,7 +58,7 @@ export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: strin
   });
   const lines = useQuery({
     queryKey: ["diff", repo.path, JSON.stringify(target), statusKey, set.ignoreWhitespace],
-    queryFn: () => api.fileDiff(repo.path, target.source, target.file, target.untracked, target.parent, set.ignoreWhitespace),
+    queryFn: () => api.fileDiff(repo.path, target.source, target.file, target.untracked, target.parent, false),
     enabled: versions.isSuccess && !versions.data?.too_large && !versions.data?.binary && view === "diff" && set.diffMode === "hunk",
   });
 
@@ -79,16 +80,18 @@ export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: strin
     (target.source.kind === "Unstaged" ? repo.status.unstaged : target.source.kind === "Staged" ? repo.status.staged : []).find((f) => f.path === target.file)?.status ??
     (target.untracked ? "?" : "M");
 
-  const save = async () => {
+  const save = async (utf8 = false) => {
     if (draft === null) return;
     try {
-      await api.saveFile(repo.path, target.file, draft);
+      await api.saveFile(repo.path, target.file, draft, editToken.current, utf8);
       s.toast(true, `Saved ${name}`);
       setDraft(null);
       setEditing(false);
       await refresh(repo.path);
     } catch (e) {
-      s.toast(false, String(e));
+      if (String(e).includes("ENCODING_UNREPRESENTABLE")) {
+        s.setDialog({ kind: "choice", title: "Save this file as UTF-8?", text: "The current encoding cannot represent every character. The original file is unchanged. Convert this file to UTF-8 with a byte-order mark to preserve your text?", choices: [{ label: "Save as UTF-8", onSelect: () => { void save(true); } }] });
+      } else s.toast(false, String(e));
     }
   };
 
@@ -122,7 +125,7 @@ export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: strin
         readOnly={!editing}
         wordWrap={set.wordWrap}
         onChange={(t) => editing && setDraft(t)}
-        onSave={save}
+        onSave={() => save()}
       />
     );
   else if (v && set.diffMode !== "hunk")
@@ -136,7 +139,7 @@ export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: strin
         ignoreWhitespace={set.ignoreWhitespace}
         editable={editing}
         onChange={(t) => editing && setDraft(t)}
-        onSave={save}
+        onSave={() => save()}
         handle={handle}
       />
     );
@@ -185,13 +188,13 @@ export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: strin
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 min-h-[32px] py-1 px-2 bg-app border-b border-white/5 shrink-0">
         <div className="flex-1 flex items-center gap-1.5 min-w-0">
           {editable && !editing && (
-            <Button size="sm" variant="primary" className="h-[22px]" onClick={() => (setEditing(true), setView("file"))} title="Edit the working-folder copy of this file">
+            <Button size="sm" variant="primary" className="h-[22px]" onClick={() => { editToken.current = v?.new_token ?? undefined; setEditing(true); setView("file"); }} title="Edit the working-folder copy of this file">
               <Pencil size={12} /> {target.source.kind === "Staged" ? "Edit in Working Directory" : "Edit This File"}
             </Button>
           )}
           {editing && (
             <>
-              <Button size="sm" variant="success" className="h-[22px]" disabled={draft === null} onClick={save} title="Save (Ctrl+S)">
+              <Button size="sm" variant="success" className="h-[22px]" disabled={draft === null} onClick={() => save()} title="Save (Ctrl+S)">
                 <Save size={12} /> Save Changes
               </Button>
               <Button size="sm" className="h-[22px]" onClick={() => (setEditing(false), setDraft(null))}>
@@ -302,11 +305,12 @@ function HunkView({
   const { pre, hunks } = useMemo(() => splitHunks(lines), [lines]);
   const [sel, setSel] = useState<{ hunk: number; lines: number[]; anchor: number } | null>(null);
   useEffect(() => setSel(null), [lines]);
+  useEffect(() => setSel(null), [lines]);
   const staged = target.source.kind === "Staged";
 
   const run = (op: PatchOp, hunk: number, picked: number[] | null) => {
     const go = () => {
-      void act(repo.path, { type: "patch", file: target.file, untracked: target.untracked, op, hunk, lines: picked }).then(() => setSel(null));
+      void act(repo.path, { type: "patch", file: target.file, untracked: target.untracked, op, hunk, lines: picked, expected: lines }).then(() => setSel(null));
     };
     if (op === "discard")
       confirmThen(

@@ -8,13 +8,11 @@ export function agentConnection(settings: Settings, agent: string) {
   return provider ? (settings.ai.provider === provider ? settings.ai : settings.ai.connections?.[provider]) : undefined;
 }
 
-export function sameFolder(a: string, b: string) {
-  const normalize = (s: string) => {
-    const p = s.replaceAll("\\", "/").replace(/^\/\/\?\/UNC\//, "//").replace(/^\/\/\?\//, "").replace(/\/$/, "");
-    return /^[a-z]:\//i.test(p) || p.startsWith("//") ? p.toLowerCase() : p;
-  };
-  return normalize(a) === normalize(b);
+export function folderKey(s: string) {
+  const p = s.replaceAll("\\", "/").replace(/^\/\/\?\/UNC\//, "//").replace(/^\/\/\?\//, "").replace(/\/$/, "");
+  return /^[a-z]:\//i.test(p) || p.startsWith("//") ? p.toLowerCase() : p;
 }
+export function sameFolder(a: string, b: string) { return folderKey(a) === folderKey(b); }
 
 /** Paths are shell-quoted; repository folders are passed directly to the PTY, never typed as cd. */
 export function agentLaunch(settings: Settings, agent: string, resume?: string) {
@@ -23,7 +21,8 @@ export function agentLaunch(settings: Settings, agent: string, resume?: string) 
   if (resume && !/^[a-z0-9_-]+$/i.test(resume)) throw new Error("This session has an invalid resume id.");
   const connection = agentConnection(settings, agent);
   const path = connection?.cliPath?.trim();
-  const ps = ["powershell", "pwsh"].includes(settings.termShell) || (!settings.termShell && /Win/.test(navigator.platform));
+  const windows = /Win/.test(navigator.platform);
+  const ps = settings.termShell === "pwsh" || (windows && (!settings.termShell || settings.termShell === "powershell"));
   const quote = (s: string) => {
     if (settings.termShell === "cmd") {
       if (/["%!^&|<>\r\n]/.test(s)) throw new Error("Choose PowerShell in Terminal Preferences to use this executable path.");

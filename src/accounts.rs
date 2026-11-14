@@ -19,6 +19,7 @@ pub struct SshKey {
 #[derive(Serialize, Default)]
 pub struct GpgKey {
     pub id: String,
+    pub fingerprint: String,
     pub uid: String,
 }
 
@@ -53,14 +54,7 @@ fn home() -> PathBuf {
     std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from).unwrap_or_default()
 }
 
-fn cfg(dir: &Path, scope: &str, key: &str) -> String {
-    let mut a = vec!["config"];
-    if !scope.is_empty() {
-        a.push(scope);
-    }
-    a.extend(["--get", key]);
-    git::run(dir, &a).stdout.trim().to_string()
-}
+
 
 pub fn info(dir: &Path) -> AccountInfo {
     let ssh_dir = home().join(".ssh");
@@ -75,38 +69,34 @@ pub fn info(dir: &Path) -> AccountInfo {
             }
         }
     }
-    let gpg_out = cmd("gpg").args(["--list-secret-keys", "--keyid-format", "LONG", "--with-colons"]).output();
-    let mut gpg_keys = Vec::new();
-    let gpg = gpg_out.is_ok();
-    if let Ok(o) = gpg_out {
-        let text = String::from_utf8_lossy(&o.stdout);
-        let mut id = String::new();
-        for l in text.lines() {
-            let f: Vec<&str> = l.split(':').collect();
-            if f.first() == Some(&"sec") && f.len() > 4 {
-                id = f[4].to_string();
-            } else if f.first() == Some(&"uid") && f.len() > 9 && !id.is_empty() {
-                gpg_keys.push(GpgKey { id: id.clone(), uid: f[9].to_string() });
-                id.clear();
-            }
-        }
-    }
+    let keys: Vec<String> = ["user.name", "user.email", "credential.helper", "user.signingkey", "commit.gpgsign", "gpg.format", "gpg.program"].map(str::to_owned).to_vec();
+    let global = crate::prefs::config_get(Some(dir), "global", &keys);
+    let local = crate::prefs::config_get(Some(dir), "local", &keys);
+    let effective = crate::prefs::config_get(Some(dir), "", &keys);
+    let config = |scope: &str, key: &str| {
+        let values = match scope { "--global" => &global, "--local" => &local, _ => &effective };
+        values.get(key).cloned().unwrap_or_default()
+    };
+    let gpg_program = config("", "gpg.program");
+    let gpg_out = cmd(if gpg_program.is_empty() { "gpg" } else { &gpg_program }).args(["--list-secret-keys", "--keyid-format", "LONG", "--with-colons"]).output();
+    let gpg = gpg_out.as_ref().is_ok_and(|out| out.status.success());
+    let gpg_keys = gpg_out.map(|out| parse_gpg_keys(&String::from_utf8_lossy(&out.stdout))).unwrap_or_default();
     AccountInfo {
-        name: cfg(dir, "--global", "user.name"),
-        email: cfg(dir, "--global", "user.email"),
-        repo_name: cfg(dir, "--local", "user.name"),
-        repo_email: cfg(dir, "--local", "user.email"),
-        credential_helper: cfg(dir, "", "credential.helper"),
+        name: config("--global", "user.name"),
+        email: config("--global", "user.email"),
+        repo_name: config("--local", "user.name"),
+        repo_email: config("--local", "user.email"),
+        credential_helper: config("", "credential.helper"),
         gcm: git::run(dir, &["credential-manager", "--version"]).ok,
         ssh_dir: ssh_dir.to_string_lossy().into_owned(),
         ssh_keys,
         ssh_keygen: cmd("ssh-keygen").arg("-?").output().is_ok(),
         gpg,
         gpg_keys,
-        signing_key: cfg(dir, "", "user.signingkey"),
-        sign_commits: cfg(dir, "", "commit.gpgsign") == "true",
+        signing_key: config("", "user.signingkey"),
+        sign_commits: config("", "commit.gpgsign") == "true",
         signing_format: {
-            let f = cfg(dir, "", "gpg.format");
+            let f = config("", "gpg.format");
             if f.is_empty() { "openpgp".into() } else { f }
         },
     }
@@ -145,4 +135,28 @@ pub fn generate_ssh_key(email: &str, name: &str) -> Result<String, String> {
         return Err(String::from_utf8_lossy(&o.stderr).trim().to_string());
     }
     std::fs::read_to_string(file.with_extension("pub")).map(|s| s.trim().to_string()).map_err(|e| e.to_string())
+}
+
+pub fn read_public_key(path: &str) -> Result<String, String> {
+    let path = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")).map(|rest| home().join(rest)).unwrap_or_else(|| path.into());
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let fields: Vec<_> = text.split_whitespace().collect();
+    if fields.len() < 2 || !(fields[0].starts_with("ssh-") || fields[0].starts_with("ecdsa-") || fields[0].starts_with("sk-")) {
+        return Err("Choose an SSH public key file (.pub).".into());
+    }
+    Ok(text.trim().into())
+}
+
+pub fn parse_gpg_keys(text: &str) -> Vec<GpgKey> {
+    let mut keys = Vec::new(); let mut id = String::new(); let mut fingerprint = String::new();
+    for line in text.lines() {
+        let fields: Vec<_> = line.split(':').collect();
+        match fields.first().copied() {
+            Some("sec") if fields.len() > 4 => { id = fields[4].into(); fingerprint.clear(); },
+            Some("fpr") if fields.len() > 9 && !id.is_empty() => fingerprint = fields[9].into(),
+            Some("uid") if fields.len() > 9 && !id.is_empty() => { keys.push(GpgKey { id: std::mem::take(&mut id), fingerprint: std::mem::take(&mut fingerprint), uid: fields[9].into() }); },
+            _ => {},
+        }
+    }
+    keys
 }

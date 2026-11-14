@@ -36,7 +36,16 @@ pub fn split_args(args: &str, repo: &str, file: &str) -> Vec<String> {
     if any || !cur.is_empty() {
         out.push(cur);
     }
-    out.into_iter().map(|a| a.replace("$REPO_PATH", repo).replace("$FILE", file)).collect()
+    out.into_iter().map(|argument| {
+        let mut rest = argument.as_str(); let mut expanded = String::new();
+        while let Some(position) = rest.find('$') {
+            expanded.push_str(&rest[..position]); rest = &rest[position..];
+            if let Some(tail) = rest.strip_prefix("$REPO_PATH") { expanded.push_str(repo); rest = tail; }
+            else if let Some(tail) = rest.strip_prefix("$FILE") { expanded.push_str(file); rest = tail; }
+            else { expanded.push('$'); rest = &rest[1..]; }
+        }
+        expanded.push_str(rest); expanded
+    }).collect()
 }
 
 /// The command-line launcher of each known editor.
@@ -160,5 +169,48 @@ mod tests {
         assert_eq!(split_args("\"$FILE\"", "r", r"C:\a b\x.txt"), vec![r"C:\a b\x.txt"]);
         assert_eq!(split_args("", "r", ""), Vec::<String>::new());
         assert_eq!(editor_command("cursor"), Some("cursor"));
+    }
+}
+
+
+/// Parse quoted argument fields without running a shell or expanding variables.
+pub fn argument_fields(text: &str) -> Result<Vec<String>, String> {
+    let mut output=Vec::new();let mut current=String::new();let mut quote=None;let mut started=false;let mut chars=text.chars().peekable();
+    while let Some(ch)=chars.next() {
+        match ch {
+            '\\' if quote != Some('\'') && chars.peek().is_some_and(|next| *next=='"' || *next=='\\' || (quote.is_none() && (next.is_whitespace() || *next=='\''))) => {
+                current.push(chars.next().unwrap());started=true;
+            },
+            '\''|'"' if quote.is_none() => {quote=Some(ch);started=true;},
+            '\''|'"' if quote==Some(ch) => {quote=None;},
+            ch if ch.is_whitespace() && quote.is_none() => {if started {output.push(std::mem::take(&mut current));started=false;}},
+            _ => {current.push(ch);started=true;},
+        }
+    }
+    if quote.is_some() {return Err("Custom flags contain an unclosed quote.".into());}
+    if started {output.push(current);}Ok(output)
+}
+
+
+#[cfg(test)]
+mod argument_field_tests {
+    use super::*;
+    #[test]
+    fn quotes_windows_paths_and_values_without_a_shell() {
+        assert_eq!(argument_fields(r#"--reference "C:\repos\reference repo.git" -c "user.name=Full Name" --no-tags"#).unwrap(),vec!["--reference",r"C:\repos\reference repo.git","-c","user.name=Full Name","--no-tags"]);
+        assert_eq!(argument_fields(r#"--config='key=spaced value' --config "key=escaped \"quotes\"""#).unwrap(),vec!["--config=key=spaced value","--config","key=escaped \"quotes\""]);
+        assert!(argument_fields("--reference \"unclosed").is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod placeholder_tests {
+    use super::*;
+    #[test]
+    fn inserted_paths_are_never_expanded_a_second_time() {
+        let repo=r"C:\projects\$FILE workspace";let file=r"C:\files\$REPO_PATH document";
+        assert_eq!(split_args("\"$REPO_PATH\" --file \"$FILE\"",repo,file),vec![repo,"--file",file]);
+        assert_eq!(split_args("\"$REPO_PATH\"",repo,""),vec![repo]);
     }
 }

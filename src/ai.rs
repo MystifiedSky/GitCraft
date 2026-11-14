@@ -48,7 +48,18 @@ pub fn set_config(c: AiConfig) {
 }
 
 fn config() -> AiConfig {
-    CONFIG.read().ok().and_then(|c| c.clone()).unwrap_or_default()
+    REQUEST_CONFIG.with(|slot| slot.borrow().clone()).unwrap_or_else(|| CONFIG.read().ok().and_then(|c| c.clone()).unwrap_or_default())
+}
+
+thread_local! { static REQUEST_CONFIG: std::cell::RefCell<Option<AiConfig>> = const { std::cell::RefCell::new(None) }; }
+
+/// Scope an immutable snapshot to the blocking worker executing this request.
+pub fn with_config<T>(value: AiConfig, run: impl FnOnce() -> T) -> T {
+    struct Restore(Option<AiConfig>);
+    impl Drop for Restore { fn drop(&mut self) { REQUEST_CONFIG.with(|slot| slot.replace(self.0.take())); } }
+    let previous = REQUEST_CONFIG.with(|slot| slot.replace(Some(value)));
+    let _restore = Restore(previous);
+    run()
 }
 
 pub fn key_name(provider: &str) -> &'static str {
@@ -301,18 +312,13 @@ pub fn test_connection() -> Result<String, String> {
     Ok(format!("Connected to {} — the selected model answered successfully", provider_label(&config().provider)))
 }
 
-fn staged_or_all(dir: &Path) -> String {
-    let staged = git::run(dir, &["diff", "--cached", "--no-color", "--no-ext-diff"]).stdout;
-    if !staged.trim().is_empty() {
-        return crate::ai_context::summarize(&staged);
-    }
-    let mut d = crate::ai_context::summarize(&git::run(dir, &["diff", "HEAD", "--no-color", "--no-ext-diff"]).stdout);
-    let untracked = git::run(dir, &["ls-files", "--others", "--exclude-standard"]).stdout;
-    if !untracked.trim().is_empty() {
-        d.push_str("\nNew (untracked) files:\n");
-        d.push_str(&untracked);
-    }
-    d
+fn staged_or_all(dir: &Path) -> Result<String, String> {
+    let staged = crate::ai_context::diff(dir, &["diff", "--cached"])?;
+    if !staged.trim().is_empty() { return Ok(staged); }
+    let has_head = git::run(dir, &["rev-parse", "--verify", "HEAD"]).ok;
+    let mut diff = if has_head { crate::ai_context::diff(dir, &["diff", "HEAD"])? } else { String::new() };
+    diff.push_str(&crate::ai_context::untracked(dir)?);
+    Ok(diff)
 }
 
 const COMMIT_SYSTEM: &str = "You write git commit messages. Read the diff and describe what changed and why it matters, \
@@ -328,16 +334,12 @@ fn commit_prompt(dir: &Path, sha: Option<&str>) -> Result<String, String> {
         }
         let oid = resolved.stdout.trim();
         // --root includes the initial commit; merges are compared with their first parent.
-        let shown = git::run(dir, &["show", "--root", "--format=", "--patch", "--diff-merges=first-parent",
-            "--no-color", "--no-ext-diff", "--no-textconv", oid, "--"]);
-        if !shown.ok {
-            return Err(shown.message());
-        }
+        let shown = crate::ai_context::diff(dir, &["show", "--root", "--format=", "--diff-merges=first-parent", oid])?;
         let original = git::run(dir, &["log", "-1", "--format=%B", oid, "--"]).stdout;
         let recent = git::run(dir, &["log", "-15", "--format=%s", oid, "--"]).stdout;
-        (crate::ai_context::summarize(&shown.stdout), recent, format!("Existing message (context only; describe the diff accurately):\n{original}\n\n"))
+        (shown, recent, format!("Existing message (context only; describe the diff accurately):\n{original}\n\n"))
     } else {
-        (staged_or_all(dir), git::run(dir, &["log", "-15", "--format=%s"]).stdout, String::new())
+        (staged_or_all(dir)?, git::run(dir, &["log", "-15", "--format=%s"]).stdout, String::new())
     };
     if diff.trim().is_empty() {
         return Err("There are no changes to describe.".into());
@@ -359,7 +361,7 @@ pub fn commit_message(dir: &Path, sha: Option<&str>) -> Result<(String, String),
 }
 
 pub fn stash_message(dir: &Path) -> Result<String, String> {
-    let diff = staged_or_all(dir);
+    let diff = staged_or_all(dir)?;
     if diff.trim().is_empty() {
         return Err("There are no changes to stash.".into());
     }
@@ -388,18 +390,16 @@ fn explain(prompt: String) -> Result<String, String> {
 }
 
 pub fn explain_commit(dir: &Path, sha: &str) -> Result<String, String> {
-    let o = git::run(dir, &["show", "--stat", "--patch", "--no-color", "--no-ext-diff", "--format=fuller", sha]);
-    if !o.ok {
-        return Err(o.message());
-    }
-    explain(format!("Explain this commit:\n{}", crate::ai_context::summarize(&o.stdout)))
+    let metadata = git::run(dir, &["log", "-1", "--format=fuller", sha, "--"]);
+    if !metadata.ok { return Err(metadata.message()); }
+    let diff = crate::ai_context::diff(dir, &["show", "--root", "--format=", "--diff-merges=first-parent", sha])?;
+    explain(format!("Explain this commit:\n{}\n{diff}", metadata.stdout))
 }
 
 /// Explain what a branch adds compared with another (usually the main branch).
 pub fn explain_branch(dir: &Path, branch: &str, base: &str) -> Result<String, String> {
     let log = git::run(dir, &["log", "--format=- %s", &format!("{base}..{branch}")]).stdout;
-    let diff = git::run(dir, &["diff", "--no-color", "--no-ext-diff", &format!("{base}...{branch}")]).stdout;
-    let diff = crate::ai_context::summarize(&diff);
+    let diff = crate::ai_context::diff(dir, &["diff", &format!("{base}...{branch}")])?;
     if log.trim().is_empty() && diff.trim().is_empty() {
         return Err(format!("{branch} has no changes compared with {base}."));
     }
@@ -415,15 +415,16 @@ pub struct ComposedCommit {
 
 /// "Compose commits with AI": split the uncommitted changes into a few focused commits (whole files).
 pub fn compose(dir: &Path) -> Result<Vec<ComposedCommit>, String> {
-    let st = git::status(dir);
+    let st = git::try_status(dir)?;
     let mut files: Vec<String> = st.unstaged.iter().chain(st.staged.iter()).map(|f| f.path.clone()).collect();
     files.sort();
     files.dedup();
     if files.is_empty() {
         return Err("There are no changes to compose into commits.".into());
     }
-    let diff = git::run(dir, &["diff", "HEAD", "--no-color", "--no-ext-diff"]).stdout;
-    let diff = crate::ai_context::summarize(&diff);
+    let has_head = git::run(dir, &["rev-parse", "--verify", "HEAD"]).ok;
+    let mut diff = crate::ai_context::diff(dir, if has_head { &["diff", "HEAD"] } else { &["diff", "--cached"] })?;
+    diff.push_str(&crate::ai_context::untracked(dir)?);
     let prompt = format!("Changed files (every one must appear in exactly one commit):\n{}\n\nDiff:\n{diff}", files.join("\n"));
     let schema = json!({
         "type": "object",
@@ -472,8 +473,7 @@ pub fn compose(dir: &Path) -> Result<Vec<ComposedCommit>, String> {
 pub fn pull_request_text(dir: &Path, source: &str, target: &str) -> Result<(String, String), String> {
     let base = format!("{target}...{source}");
     let log = git::run(dir, &["log", "--format=- %s%n%b", &format!("{target}..{source}")]).stdout;
-    let diff = git::run(dir, &["diff", "--no-color", "--no-ext-diff", &base]).stdout;
-    let diff = crate::ai_context::summarize(&diff);
+    let diff = crate::ai_context::diff(dir, &["diff", &base])?;
     if log.trim().is_empty() && diff.trim().is_empty() {
         return Err(format!("{source} has no changes compared with {target}."));
     }
@@ -734,5 +734,26 @@ mod connection_tests {
         let format_error = json!({"error":{"message":"response_format unsupported"}});
         for status in [401, 403, 404, 429, 500] { assert!(!unsupported_format(status, &format_error)); }
         assert!(!unsupported_format(400, &json!({"error":{"message":"model not found"}})));
+    }
+}
+
+
+#[cfg(test)]
+mod isolation_tests {
+    use super::*;
+    #[test]
+    fn concurrent_workers_retain_their_request_snapshot_and_restore_it_afterwards() {
+        let barrier=std::sync::Arc::new(std::sync::Barrier::new(2));
+        std::thread::scope(|scope| {
+            for model in ["first-connection","second-connection"] {
+                let barrier=barrier.clone();
+                scope.spawn(move || with_config(AiConfig {default_model:model.into(),..Default::default()},|| {
+                    barrier.wait();assert_eq!(config().default_model,model);
+                    with_config(AiConfig {default_model:"nested".into(),..Default::default()},||assert_eq!(config().default_model,"nested"));
+                    assert_eq!(config().default_model,model);
+                }));
+            }
+        });
+        assert!(REQUEST_CONFIG.with(|slot|slot.borrow().is_none()));
     }
 }

@@ -1,6 +1,7 @@
 import { updateEditorTheme } from "./editor-theme";
 // Themes, profiles and local workspaces.
 import { api } from "./api";
+import { queryClient } from "./repo";
 import { openRepoPath } from "./repo";
 import { DEFAULT_SETTINGS, newId, useStore, type Profile, type Workspace } from "./store";
 
@@ -20,18 +21,40 @@ export function applyTheme(id: string) {
 const st = () => useStore.getState();
 
 /** Switch profile: keep the current profile's settings, load the other's, and apply its Git identity. */
+let switchingProfile = false;
 export async function switchProfile(id: string) {
+  if (switchingProfile) return;
   const s = st();
-  if (id === s.activeProfile) return;
   const target = s.profiles.find((p) => p.id === id);
-  if (!target) return;
-  const profiles = s.profiles.map((p) => (p.id === s.activeProfile ? { ...p, settings: s.settings } : p));
-  useStore.setState({ profiles, activeProfile: id, settings: { ...DEFAULT_SETTINGS, ...(target.settings ?? {}), recents: s.settings.recents } });
-  if (useStore.getState().settings.keepGitconfigUpdated) {
-    if (target.gitName) await api.setGitConfig(null, "global", "user.name", target.gitName).catch(() => {});
-    if (target.gitEmail) await api.setGitConfig(null, "global", "user.email", target.gitEmail).catch(() => {});
-  }
-  s.toast(true, `Switched to profile ${target.name}`);
+  if (id === s.activeProfile || !target) return;
+  switchingProfile = true;
+  try {
+    const values = await api.gitConfig(null, "global", ["user.name", "user.email"]);
+    const identity = { name: values["user.name"] ?? "", email: values["user.email"] ?? "" };
+    const profiles = s.profiles.map((p) => p.id === s.activeProfile ? { ...p, settings: s.settings, gitName: identity.name, gitEmail: identity.email } : p);
+    const settings = { ...DEFAULT_SETTINGS, ...(target.settings ?? {}), recents: s.settings.recents };
+    if (settings.keepGitconfigUpdated) {
+      try {
+        await api.setGitConfig(null, "global", "user.name", target.gitName);
+        await api.setGitConfig(null, "global", "user.email", target.gitEmail);
+      } catch (error) {
+        const rollback = await Promise.allSettled([api.setGitConfig(null, "global", "user.name", identity.name), api.setGitConfig(null, "global", "user.email", identity.email)]);
+        if (rollback.some((result) => result.status === "rejected")) throw new Error(`${error}. Check your global Git identity; restoring it also failed.`);
+        throw error;
+      }
+    }
+    useStore.setState({ profiles, activeProfile: id, settings });
+    await queryClient.invalidateQueries({ queryKey: ["accounts"] });
+    s.toast(true, `Switched to profile ${target.name}`);
+  } catch (error) { s.toast(false, `Could not switch profile: ${error}`); }
+  finally { switchingProfile = false; }
+}
+
+export async function saveProfileIdentity(key: "user.name" | "user.email", value: string) {
+  await api.setGitConfig(null, "global", key, value);
+  const s = st();
+  useStore.setState({ profiles: s.profiles.map((p) => p.id === s.activeProfile ? { ...p, [key === "user.name" ? "gitName" : "gitEmail"]: value } : p) });
+  await queryClient.invalidateQueries({ queryKey: ["accounts"] });
 }
 
 export function addProfile(name: string, gitName: string, gitEmail: string, options: { icon?: number; copySettings?: boolean } = {}) {

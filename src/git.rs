@@ -267,10 +267,10 @@ pub fn walkable_refs(dir: &Path) -> Vec<String> {
         return Vec::new();
     };
     let input: String = names.iter().map(|n| format!("{n}^{{commit}}\n")).collect();
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(input.as_bytes());
-    }
-    let Ok(out) = child.wait_with_output() else { return Vec::new() };
+    let writer = child.stdin.take().map(|mut stdin| std::thread::spawn(move || stdin.write_all(input.as_bytes())));
+    let result = child.wait_with_output();
+    if let Some(writer) = writer { let _ = writer.join(); }
+    let Ok(out) = result else { return Vec::new() };
     let answers = String::from_utf8_lossy(&out.stdout).into_owned();
     names.into_iter().zip(answers.lines()).filter(|(_, a)| !a.ends_with(" missing") && !a.trim().is_empty()).map(|(n, _)| n).collect()
 }
@@ -309,6 +309,10 @@ pub fn load(dir: &Path, max_commits: usize) -> RepoData {
 }
 
 pub fn load_view(dir: &Path, max_commits: usize, view: &RefView) -> RepoData {
+    load_view_checked(dir, max_commits, view).unwrap_or_default()
+}
+
+pub fn load_view_checked(dir: &Path, max_commits: usize, view: &RefView) -> Result<RepoData, String> {
     let smart_view;
     let view = if view.smart && view.solo.is_empty() {
         smart_view = RefView { solo: smart_refs(dir), ..view.clone() };
@@ -331,7 +335,7 @@ pub fn load_view(dir: &Path, max_commits: usize, view: &RefView) -> RepoData {
     d.history_revs = revs.clone();
     let mut log_args: Vec<&str> = vec!["log"];
     log_args.extend(revs.iter().map(|s| s.as_str()));
-    log_args.extend(["--date-order", n.as_str(), "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%s%x1f%b%x1e", "--"]);
+    log_args.extend(["--date-order", n.as_str(), "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%s%x00%b%x00", "--"]);
 
     // The ten reads don't depend on each other, and on Windows each Git process costs 20-50 ms just to start,
     // so they run at the same time instead of one after another.
@@ -356,10 +360,10 @@ pub fn load_view(dir: &Path, max_commits: usize, view: &RefView) -> RepoData {
         let wt = s.spawn(|| run(dir, &["worktree", "list", "--porcelain"]));
         let sm = s.spawn(|| run(dir, &["config", "--file", ".gitmodules", "--get-regexp", "path"]));
         let remotes = s.spawn(|| run(dir, &["remote"]));
-        let work = s.spawn(|| status(dir));
+        let work = s.spawn(|| try_status(dir));
         let gitdir = s.spawn(|| run(dir, &["rev-parse", "--git-dir"]));
         let j = |h: std::thread::ScopedJoinHandle<'_, GitOut>| h.join().unwrap_or_else(|_| GitOut::failed("a Git read stopped unexpectedly"));
-        (j(refs), j(head), j(head_sha), j(log), j(st), j(wt), j(sm), j(remotes), work.join().unwrap_or_default(), j(gitdir))
+        (j(refs), j(head), j(head_sha), j(log), j(st), j(wt), j(sm), j(remotes), work.join().unwrap_or_else(|_| Err("Git status read stopped unexpectedly".into())), j(gitdir))
     });
     for line in refs.stdout.lines() {
         let f: Vec<&str> = line.split('\x1f').collect();
@@ -411,7 +415,7 @@ pub fn load_view(dir: &Path, max_commits: usize, view: &RefView) -> RepoData {
         } else {
             let mut args: Vec<&str> = vec!["log"];
             args.extend(start.iter().map(|s| s.as_str()));
-            args.extend(["--date-order", n.as_str(), "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%s%x1f%b%x1e", "--"]);
+            args.extend(["--date-order", n.as_str(), "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%s%x00%b%x00", "--"]);
             let result = run(dir, &args);
             let mut resolve = vec!["rev-parse", "--revs-only"];
             resolve.extend(start.iter().map(String::as_str));
@@ -468,22 +472,26 @@ pub fn load_view(dir: &Path, max_commits: usize, view: &RefView) -> RepoData {
     }
 
     d.remotes = remotes.stdout.lines().map(|s| s.to_string()).collect();
-    d.status = work;
+    d.status = work?;
 
     let gitdir = gitdir.stdout.trim().to_string();
     let gd = dir.join(gitdir);
     if gd.join("MERGE_HEAD").exists() {
         d.state_note = Some("merging".into());
         d.merge_msg = crate::rewrite::merge_message(dir);
+    } else if gd.join("rebase-apply/applying").exists() {
+        d.state_note = Some("applying-mailbox".into());
     } else if gd.join("rebase-merge").exists() || gd.join("rebase-apply").exists() {
         d.state_note = Some("rebasing".into());
     } else if gd.join("CHERRY_PICK_HEAD").exists() {
         d.state_note = Some("cherry-picking".into());
+    } else if gd.join("REVERT_HEAD").exists() {
+        d.state_note = Some("reverting".into());
     }
     if d.state_note.is_some() {
         d.conflict_labels = Some(crate::rewrite::conflict_labels(dir));
     }
-    d
+    Ok(d)
 }
 
 fn parse_track(s: &str) -> (usize, usize) {
@@ -506,7 +514,10 @@ pub fn status_options() -> [String; 2] {
     ["-uall".into(), format!("--find-renames={}%", crate::metrics::STATUS_RENAME_THRESHOLD)]
 }
 
-pub fn status(dir: &Path) -> WorkStatus {
+#[cfg(test)]
+pub fn status(dir: &Path) -> WorkStatus { try_status(dir).expect("Git status should succeed in this fixture") }
+
+pub fn try_status(dir: &Path) -> Result<WorkStatus, String> {
     let mut w = WorkStatus::default();
     // --no-optional-locks: don't rewrite the index while reading it, so a status check never
     // wakes the .git watcher and starts another refresh.
@@ -517,6 +528,7 @@ pub fn status(dir: &Path) -> WorkStatus {
     // hence --no-optional-locks.
     let options = status_options();
     let o = run(dir, &["--no-optional-locks", "status", "--porcelain=v1", "-z", &options[0], &options[1]]);
+    if !o.ok { return Err(o.message()); }
     let mut parts = o.stdout.split('\0').peekable();
     while let Some(entry) = parts.next() {
         if entry.len() < 4 {
@@ -545,7 +557,7 @@ pub fn status(dir: &Path) -> WorkStatus {
             w.unstaged.push(FileChange { path, status: y });
         }
     }
-    w
+    Ok(w)
 }
 
 pub fn commit_files(dir: &Path, c: &Commit) -> Vec<FileChange> {
@@ -570,7 +582,7 @@ pub fn commit_files(dir: &Path, c: &Commit) -> Vec<FileChange> {
     out
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub enum DiffLineKind {
     Context,
     Added,
@@ -579,7 +591,7 @@ pub enum DiffLineKind {
     Meta,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct DiffLine {
     pub kind: DiffLineKind,
     pub old_no: Option<usize>,
@@ -648,12 +660,49 @@ pub fn file_diff(dir: &Path, src: &DiffSource, path: &str, untracked: bool, pare
     file_diff_opts(dir, src, path, untracked, parent, false)
 }
 
+/// Resolve the source path before a rename without losing it at the UI boundary.
+pub fn rename_source(dir: &Path, src: &DiffSource, path: &str, parent: Option<&str>) -> String {
+    let mut args = vec!["diff", "--name-status", "-z", "-M", "--no-ext-diff", "--no-textconv"];
+    match src {
+        DiffSource::Unstaged => {},
+        DiffSource::Staged => args.push("--cached"),
+        DiffSource::Commit(sha) => {
+            if let Some(parent) = parent { args.extend([parent, sha]); }
+            else { return path.into(); }
+        },
+        DiffSource::Range(from, to) => { args.push(from); if to != WORKDIR { args.push(to); } },
+    }
+    args.push("--");
+    let output = run(dir, &args);
+    let mut records = output.stdout.split('\0');
+    while let Some(status) = records.next() {
+        let Some(old) = records.next() else { break };
+        if status.starts_with('R') || status.starts_with('C') {
+            if records.next() == Some(path) { return old.into(); }
+        }
+    }
+    path.into()
+}
+
 /// Raw unified diff text for a file (used for the hunk view and for building partial patches).
+pub fn run_utf8(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let output = git_cmd(dir).args(args).output().map_err(|e| e.to_string())?;
+    if !output.status.success() { return Err(String::from_utf8_lossy(&output.stderr).into_owned()); }
+    String::from_utf8(output.stdout).map_err(|_| "Partial changes and text patch export require UTF-8 patch contents. Stage the whole file to preserve its original bytes, or explicitly convert it to UTF-8 first.".into())
+}
+
 pub fn diff_text(dir: &Path, src: &DiffSource, path: &str, parent: Option<&str>, ignore_ws: bool) -> String {
+    diff_text_impl(dir, src, path, parent, ignore_ws, false).unwrap_or_default()
+}
+pub fn diff_text_checked(dir: &Path, src: &DiffSource, path: &str, parent: Option<&str>, ignore_ws: bool) -> Result<String, String> {
+    diff_text_impl(dir, src, path, parent, ignore_ws, true)
+}
+
+fn diff_text_impl(dir: &Path, src: &DiffSource, path: &str, parent: Option<&str>, ignore_ws: bool, strict: bool) -> Result<String, String> {
     // Diff options: 3 context lines, hunks never merged.
     let ctx = format!("-U{}", crate::metrics::DIFF_CONTEXT_LINES);
     let inter = format!("--inter-hunk-context={}", crate::metrics::DIFF_INTERHUNK_LINES);
-    let mut args: Vec<&str> = vec!["diff", "--no-color", "--no-ext-diff", ctx.as_str(), inter.as_str()];
+    let mut args: Vec<&str> = vec!["-c", "diff.noprefix=false", "diff", "-M", "--src-prefix=a/", "--dst-prefix=b/", "--no-relative", "--no-color", "--no-ext-diff", ctx.as_str(), inter.as_str()];
     if ignore_ws {
         // Ignore all whitespace (git -w).
         args.push("--ignore-all-space");
@@ -669,12 +718,12 @@ pub fn diff_text(dir: &Path, src: &DiffSource, path: &str, parent: Option<&str>,
                 args.push(sha);
             }
             None => {
-                let mut a: Vec<&str> = vec!["show", "--no-color", "--format=", ctx.as_str(), inter.as_str()];
+                let mut a: Vec<&str> = vec!["-c", "diff.noprefix=false", "show", "--src-prefix=a/", "--dst-prefix=b/", "--no-relative", "--no-ext-diff", "--no-textconv", "--no-color", "--format=", ctx.as_str(), inter.as_str()];
                 if ignore_ws {
                     a.push("--ignore-all-space");
                 }
                 a.extend([sha.as_str(), "--", path]);
-                return run(dir, &a).stdout;
+                return if strict { run_utf8(dir, &a) } else { Ok(run(dir, &a).stdout) };
             }
         },
         DiffSource::Range(from, to) => {
@@ -687,7 +736,9 @@ pub fn diff_text(dir: &Path, src: &DiffSource, path: &str, parent: Option<&str>,
     }
     args.push("--");
     args.push(path);
-    run(dir, &args).stdout
+    let original = rename_source(dir, src, path, parent);
+    if original != path { args.push(&original); }
+    if strict { run_utf8(dir, &args) } else { Ok(run(dir, &args).stdout) }
 }
 
 pub fn file_diff_opts(dir: &Path, src: &DiffSource, path: &str, untracked: bool, parent: Option<&str>, ignore_ws: bool) -> Vec<DiffLine> {
@@ -713,8 +764,8 @@ pub fn file_diff_opts(dir: &Path, src: &DiffSource, path: &str, untracked: bool,
 }
 
 pub fn last_commit_message(dir: &Path) -> (String, String) {
-    let o = run(dir, &["log", "-1", "--format=%s%x1f%b"]);
-    let mut it = o.stdout.splitn(2, '\x1f');
+    let o = run(dir, &["log", "-1", "--format=%s%x00%b"]);
+    let mut it = o.stdout.splitn(2, '\0');
     let s = it.next().unwrap_or("").trim().to_string();
     let b = it.next().unwrap_or("").trim().to_string();
     (s, b)
@@ -725,35 +776,23 @@ pub fn repo_name(path: &Path) -> String {
 }
 
 /// Parse both initial history and subsequent pages identically.
+pub fn parse_commit_fields(fields: &[&str]) -> Option<Commit> {
+    fn valid_sha(value: &str) -> bool { matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit()) }
+    if fields.len() != 7 { return None; }
+    let sha = fields[0].trim_start_matches(['\r', '\n']);
+    if !valid_sha(sha) || fields[1].split_whitespace().any(|parent| !valid_sha(parent)) { return None; }
+    Some(Commit { sha: sha.into(), parents: fields[1].split_whitespace().map(str::to_owned).collect(), author: fields[2].into(), email: fields[3].into(), time: fields[4].parse().ok()?, summary: fields[5].into(), body: fields[6].trim().into() })
+}
 pub fn parse_commits(text: &str) -> Vec<Commit> {
-    let mut commits = Vec::new();
-    for rec in text.split('\x1e') {
-        let rec = rec.trim_start_matches(['\n', '\r']);
-        if rec.is_empty() {
-            continue;
-        }
-        let f: Vec<&str> = rec.splitn(7, '\x1f').collect();
-        if f.len() < 7 {
-            continue;
-        }
-        commits.push(Commit {
-            sha: f[0].to_string(),
-            parents: f[1].split_whitespace().map(|s| s.to_string()).collect(),
-            author: f[2].to_string(),
-            email: f[3].to_string(),
-            time: f[4].parse().unwrap_or(0),
-            summary: f[5].to_string(),
-            body: f[6].trim().to_string(),
-        });
-    }
-    commits
+    let fields: Vec<_> = text.split('\0').collect();
+    fields.chunks_exact(7).filter_map(parse_commit_fields).collect()
 }
 
 fn history_log(dir: &Path, revs: &[String], offset: usize, max: usize) -> GitOut {
     use std::io::Write;
     // Stdin avoids the Windows command-line limit for repositories with many branch/tag tips.
     let child = git_cmd(dir).args(["log", "--stdin", "--date-order", &format!("--skip={offset}"), &format!("-n{}", max + 1),
-        "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%s%x1f%b%x1e", "--"])
+        "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%s%x00%b%x00", "--"])
         .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn();
     let mut child = match child { Ok(child) => child, Err(e) => return GitOut::failed(&e.to_string()) };
     let input = revs.join("\n") + "\n";
@@ -804,4 +843,29 @@ mod paging_tests {
         assert_eq!(actual, all.commits.iter().map(|c| &c.sha).collect::<Vec<_>>());
         assert!(history_page(dir, &["--all".into()], 0, 2).is_err());
     }
+}
+
+#[derive(Serialize)]
+pub struct CommitFile {
+    #[serde(flatten)] pub change: FileChange,
+    pub storage: Option<String>,
+}
+
+pub fn commit_file_entries(dir: &Path, commit: &Commit) -> Vec<CommitFile> {
+    let mut files: Vec<_> = commit_files(dir, commit).into_iter().map(|change| CommitFile { change, storage: None }).collect();
+    // A stash's index commit has precisely the stash base as its parent. Its optional
+    // third parent is a root commit containing the saved untracked files.
+    if commit.parents.len() == 3 {
+        let index_parent = run(dir, &["show", "-s", "--format=%P", &commit.parents[1]]);
+        let untracked_parent = run(dir, &["show", "-s", "--format=%P", &commit.parents[2]]);
+        if index_parent.ok && index_parent.stdout.trim() == commit.parents[0] && untracked_parent.ok && untracked_parent.stdout.trim().is_empty() {
+            let names = run(dir, &["ls-tree", "-r", "--name-only", "-z", &commit.parents[2]]);
+            for path in names.stdout.split('\0').filter(|s| !s.is_empty()) {
+                if !files.iter().any(|f| f.change.path == path) {
+                    files.push(CommitFile { change: FileChange { path: path.into(), status: 'A' }, storage: Some(commit.parents[2].clone()) });
+                }
+            }
+        }
+    }
+    files
 }

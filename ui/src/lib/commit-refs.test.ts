@@ -29,3 +29,13 @@ describe("commit reference grouping", () => {
     expect(groupCommitRefs([ref("main", "Local"), ref("origin/team/main", "Remote")])).toHaveLength(2);
   });
 });
+
+
+it("indexes large shared tips without scanning every remote for each local", () => {
+  let kinds=0;
+  const refs=Array.from({length:1000},(_,i)=>[
+    {name:`branch-${i}`,sha:"same",upstream:`origin/branch-${i}`,get kind(){kinds++;return "Local";}},
+    {name:`origin/branch-${i}`,sha:"same",upstream:"",get kind(){kinds++;return "Remote";}},
+  ]).flat() as GitRef[];
+  expect(groupCommitRefs(refs)).toHaveLength(1000);expect(kinds).toBeLessThan(10000);
+});

@@ -154,7 +154,11 @@ export const SERVICES: ServiceInfo[] = [
 
 export const integrations = {
   statuses: (ids: string[]) => invoke<ServiceStatus[]>("integration_statuses", { ids }),
-  setToken: (id: string, token: string) => invoke<void>("set_secret", { name: `${id}-token`, value: token }),
+  setToken: async (id: string, token: string) => {
+    await invoke<void>("set_secret", { name: `${id}-token`, value: token });
+    try { await invoke("sync_git_credentials", { gitlabHost: useStore.getState().settings.gitlabHost ?? "" }); }
+    finally { await Promise.all([queryClient.invalidateQueries({ queryKey: ["signedInServices"] }), queryClient.invalidateQueries({ queryKey: ["integrationStatuses"] })]); }
+  },
   signIn: (id: string, method: "browser" | "gh") => invoke<string>("integration_sign_in", { id, method }),
   repos: (id: string) => invoke<HostedRepo[]>("integration_repos", { id }),
   addSshKey: (id: string, title: string, key: string) => invoke<void>("integration_add_ssh_key", { id, title, key }),
@@ -169,7 +173,10 @@ export const tools = {
   gpgGenerate: (program: string, name: string, email: string, passphrase: string) => invoke<string>("gpg_generate_key", { program, name, email, passphrase }),
   gpgExport: (program: string, key: string) => invoke<string>("gpg_export_key", { program, key }),
   forgetCredentials: (hosts: string[]) => invoke<number>("forget_credentials", { hosts }),
-  deleteOrig: (path: string) => invoke<string[]>("delete_orig_files", { path }),
+  deleteOrig: async (path: string) => {
+    const candidates = await invoke<{path: string; expected: string}[]>("orig_cleanup_candidates", {path});
+    return invoke<string[]>("delete_orig_files", {path, candidates});
+  },
   pickFile: (title: string) => invoke<string | null>("pick_file", { title }),
 };
 
@@ -257,9 +264,10 @@ export function useSignedInServices() {
 
 /** Removes every saved service token (File > Sign Out). Returns how many were removed. */
 export async function signOutAll(): Promise<number> {
-  const connected = await queryClient.fetchQuery({ queryKey: SIGNED_IN_KEY, queryFn: fetchSignedIn, staleTime: 0 });
-  await Promise.all(connected.map((x) => integrations.setToken(x.id, "")));
-  queryClient.invalidateQueries({ queryKey: SIGNED_IN_KEY });
-  queryClient.invalidateQueries({ queryKey: ["integrationStatuses"] });
-  return connected.length;
+  const results = await Promise.allSettled(SERVICES.map((service) => invoke<void>("set_secret", { name: `${service.id}-token`, value: "" })));
+  try { await invoke("sync_git_credentials", { gitlabHost: useStore.getState().settings.gitlabHost ?? "" }); }
+  finally { await Promise.all([queryClient.invalidateQueries({ queryKey: SIGNED_IN_KEY }), queryClient.invalidateQueries({ queryKey: ["integrationStatuses"] })]); }
+  const failed = results.filter((r) => r.status === "rejected");
+  if (failed.length) throw new Error(`Could not remove credentials for ${failed.length} integration(s). Try again.`);
+  return results.length;
 }

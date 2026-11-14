@@ -33,32 +33,15 @@ fn git_dir(dir: &Path) -> PathBuf {
     PathBuf::from(o.stdout.trim())
 }
 
-fn parse_commits(text: &str) -> Vec<Commit> {
-    text.split('\x1e')
-        .filter_map(|rec| {
-            let rec = rec.trim_start_matches(['\n', '\r']);
-            let f: Vec<&str> = rec.splitn(7, '\x1f').collect();
-            (f.len() == 7).then(|| Commit {
-                sha: f[0].to_string(),
-                parents: f[1].split_whitespace().map(|s| s.to_string()).collect(),
-                author: f[2].to_string(),
-                email: f[3].to_string(),
-                time: f[4].parse().unwrap_or(0),
-                summary: f[5].to_string(),
-                body: f[6].trim().to_string(),
-            })
-        })
-        .collect()
-}
 
 /// Commits an interactive rebase onto `base` would replay (oldest first). `base` "--root" = all.
 pub fn rebase_commits(dir: &Path, base: &str) -> Result<Vec<Commit>, String> {
     let range = if base == "--root" { "HEAD".to_string() } else { format!("{base}..HEAD") };
-    let o = git::run(dir, &["log", "--reverse", "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%s%x1f%b%x1e", &range]);
+    let o = git::run(dir, &["log", "--reverse", "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%s%x00%b%x00", &range]);
     if !o.ok {
         return Err(o.message());
     }
-    let commits = parse_commits(&o.stdout);
+    let commits = git::parse_commits(&o.stdout);
     if commits.iter().any(|c| c.parents.len() > 1) {
         return Err("These commits include a merge. Interactive rebase over merge commits isn't supported.".into());
     }
@@ -114,49 +97,26 @@ fn write_todo(dir: &Path, items: &[TodoItem]) -> Result<PathBuf, String> {
 }
 
 /// Interactive cherry pick: replay the listed commits onto HEAD in order.
-pub fn interactive_cherry_pick(dir: &Path, items: &[TodoItem], log: &dyn Fn(&[&str]) -> git::GitOut) -> git::GitOut {
-    let mut done_any = false;
-    for it in items {
-        let o = match it.action {
-            Step::Drop => continue,
-            Step::Squash if done_any => {
-                let o = log(&["cherry-pick", "--no-commit", &it.sha]);
-                if !o.ok {
-                    return o;
-                }
-                // Keep both messages, like git's squash.
-                let prev = git::run(dir, &["log", "-1", "--format=%B", "HEAD"]).stdout;
-                let this = git::run(dir, &["log", "-1", "--format=%B", &it.sha]).stdout;
-                let msg = format!("{}\n\n{}", prev.trim_end(), this.trim_end());
-                let f = git_dir(dir).join("gitcraft-squash-msg");
-                if let Err(e) = std::fs::write(&f, msg) {
-                    return git::GitOut { ok: false, stdout: String::new(), stderr: e.to_string() };
-                }
-                log(&["commit", "--amend", "--no-verify", "-F", &f.to_string_lossy()])
-            }
-            _ => {
-                let o = log(&["cherry-pick", &it.sha]);
-                if o.ok && it.action == Step::Reword {
-                    let f = git_dir(dir).join("gitcraft-reword-msg");
-                    if let Err(e) = std::fs::write(&f, it.message.clone().unwrap_or_default()) {
-                        return git::GitOut { ok: false, stdout: String::new(), stderr: e.to_string() };
-                    }
-                    log(&["commit", "--amend", "--only", "--no-verify", "-F", &f.to_string_lossy()])
-                } else {
-                    o
-                }
-            }
-        };
-        if !o.ok {
-            return o;
-        }
-        done_any = true;
+pub fn interactive_cherry_pick(dir: &Path, items: &[TodoItem], _log: &dyn Fn(&[&str]) -> git::GitOut) -> git::GitOut {
+    if items.iter().all(|item| item.action == Step::Drop) { return git::GitOut { ok: true, stdout: String::new(), stderr: String::new() }; }
+    let gd = git_dir(dir);
+    if gd.join("rebase-merge").exists() || gd.join("rebase-apply").exists() || gd.join("CHERRY_PICK_HEAD").exists() {
+        return git::GitOut::failed("Finish or abort the current replay before starting another plan.");
     }
-    git::GitOut { ok: true, stdout: String::new(), stderr: String::new() }
+    let head = git::run(dir, &["rev-parse", "--verify", "HEAD"]);
+    if !head.ok { return head; }
+    let todo = match write_todo(dir, items) { Ok(todo) => todo, Err(error) => return git::GitOut::failed(&error) };
+    let todo = todo.to_string_lossy().replace('\\', "/");
+    // Git owns the complete plan, including the remaining steps after a conflict.
+    // Replaying the selected commits onto the current tip appends them to this branch.
+    git::run_env(dir, &["-c", "core.editor=true", "rebase", "-i", "--autostash", "--reapply-cherry-picks", "--onto", head.stdout.trim(), "--root"],
+        &[("GIT_SEQUENCE_EDITOR", SEQUENCE_EDITOR), ("GITCRAFT_REBASE_TODO_PATH", &todo)])
 }
+
 
 #[derive(Serialize, Default)]
 pub struct ConflictInfo {
+    pub working_token: String,
     /// The working-folder file with conflict markers.
     pub working: Option<String>,
     pub base: Option<String>,
@@ -217,6 +177,7 @@ pub fn conflict_info(dir: &Path, file: &str) -> ConflictInfo {
     let binary = !utf16 && working.as_deref().map(crate::files::is_binary).unwrap_or(false);
     let (ours_label, theirs_label) = conflict_labels(dir);
     ConflictInfo {
+        working_token: crate::files::content_token(working.as_deref()),
         working: working.map(|b| decode_text(dir, &b)),
         base: stage(dir, 1, file),
         ours: stage(dir, 2, file),
@@ -233,4 +194,17 @@ pub fn merge_message(dir: &Path) -> Option<String> {
     let s = std::fs::read_to_string(gd.join("MERGE_MSG")).ok()?;
     let msg: Vec<&str> = s.lines().filter(|l| !l.starts_with('#')).collect();
     Some(msg.join("\n").trim().to_string()).filter(|m| !m.is_empty())
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct PlanState { pub head: String, pub branch: String, pub base: String }
+pub fn plan_state(dir: &Path, base: &str) -> Result<PlanState, String> {
+    let head = git::run(dir, &["rev-parse", "--verify", "HEAD"]);
+    if !head.ok { return Err(head.message()); }
+    let branch = git::run(dir, &["symbolic-ref", "-q", "HEAD"]).stdout.trim().to_owned();
+    let base = if base == "--root" { base.into() } else {
+        let resolved = git::run(dir, &["rev-parse", "--verify", "--end-of-options", &format!("{base}^{{commit}}")]);
+        if !resolved.ok { return Err(resolved.message()); } resolved.stdout.trim().to_owned()
+    };
+    Ok(PlanState { head: head.stdout.trim().into(), branch, base })
 }

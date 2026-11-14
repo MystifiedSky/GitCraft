@@ -11,6 +11,8 @@ pub struct PullRequest {
     pub title: String,
     pub author: String,
     pub source: String,
+    pub source_url: String,
+    pub source_sha: String,
     pub target: String,
     pub draft: bool,
     pub state: String,
@@ -46,7 +48,7 @@ pub struct Comment {
 }
 
 fn get(id: &str, path: &str) -> Result<Value, String> {
-    http("GET", &format!("{}{path}", api_base(id)), &auth(id)?, None)
+    crate::pagination::collect(&format!("{}{path}", api_base(id)), |url| crate::hosting::http_page("GET", url, &auth(id)?, None))
 }
 
 fn send(id: &str, method: &str, path: &str, body: Value) -> Result<Value, String> {
@@ -84,6 +86,7 @@ pub(crate) fn github_pr(v: &Value) -> PullRequest {
         title: s(&v["title"]),
         author: s(&v["user"]["login"]),
         source: s(&v["head"]["ref"]),
+        source_url: s(&v["head"]["repo"]["clone_url"]), source_sha: s(&v["head"]["sha"]),
         target: s(&v["base"]["ref"]),
         draft: v["draft"].as_bool().unwrap_or(false),
         state: if v["merged_at"].is_string() { "merged".into() } else { s(&v["state"]) },
@@ -100,6 +103,7 @@ pub(crate) fn gitlab_mr(v: &Value) -> PullRequest {
         title: s(&v["title"]),
         author: s(&v["author"]["username"]),
         source: s(&v["source_branch"]),
+        source_url: String::new(), source_sha: v["sha"].as_str().or(v["diff_refs"]["head_sha"].as_str()).unwrap_or_default().into(),
         target: s(&v["target_branch"]),
         draft: v["draft"].as_bool().unwrap_or(false) || v["work_in_progress"].as_bool().unwrap_or(false),
         state: s(&v["state"]),
@@ -116,6 +120,7 @@ pub(crate) fn bitbucket_pr(v: &Value) -> PullRequest {
         title: s(&v["title"]),
         author: s(&v["author"]["display_name"]),
         source: s(&v["source"]["branch"]["name"]),
+        source_url: clone_link(&v["source"]["repository"]["links"]["clone"], "https"), source_sha: s(&v["source"]["commit"]["hash"]),
         target: s(&v["destination"]["branch"]["name"]),
         draft: v["draft"].as_bool().unwrap_or(false),
         state: s(&v["state"]).to_lowercase(),
@@ -132,6 +137,7 @@ fn bitbucket_server_pr(v: &Value) -> PullRequest {
         title: s(&v["title"]),
         author: s(&v["author"]["user"]["displayName"]),
         source: s(&v["fromRef"]["displayId"]),
+        source_url: clone_link(&v["fromRef"]["repository"]["links"]["clone"], "http"), source_sha: s(&v["fromRef"]["latestCommit"]),
         target: s(&v["toRef"]["displayId"]),
         draft: v["draft"].as_bool().unwrap_or(false),
         state: s(&v["state"]).to_lowercase(),
@@ -149,6 +155,7 @@ pub(crate) fn azure_pr(v: &Value, web: &str) -> PullRequest {
         title: s(&v["title"]),
         author: s(&v["createdBy"]["displayName"]),
         source: s(&v["sourceRefName"]).trim_start_matches("refs/heads/").to_string(),
+        source_url: v["forkSource"]["repository"]["remoteUrl"].as_str().or(v["repository"]["remoteUrl"].as_str()).unwrap_or_default().into(), source_sha: s(&v["lastMergeSourceCommit"]["commitId"]),
         target: s(&v["targetRefName"]).trim_start_matches("refs/heads/").to_string(),
         draft: v["isDraft"].as_bool().unwrap_or(false),
         state: s(&v["status"]),
@@ -260,7 +267,7 @@ fn bbs_path(r: &RemoteRepo) -> String {
 }
 
 fn rget(r: &RemoteRepo, url: &str) -> Result<Value, String> {
-    http("GET", url, &auth(&r.service)?, None)
+    crate::pagination::collect(url, |next| crate::hosting::http_page("GET", next, &auth(&r.service)?, None))
 }
 
 fn rsend(r: &RemoteRepo, method: &str, url: &str, body: Value) -> Result<Value, String> {
@@ -277,6 +284,35 @@ pub fn pull_requests(r: &RemoteRepo) -> Result<Vec<PullRequest>, String> {
         "azure" => list(&rget(r, &azure_url(r, "/pullrequests?searchCriteria.status=active&api-version=7.1"))?["value"]).iter().map(|v| azure_pr(v, &r.web)).collect(),
         _ => vec![],
     })
+}
+
+pub fn pull_request(r: &RemoteRepo, number: u64) -> Result<PullRequest, String> {
+    let base = api_base(&r.service);
+    Ok(match r.service.as_str() {
+        "github" | "github-enterprise" => github_pr(&rget(r, &format!("{base}/repos/{}/pulls/{number}", r.path))?),
+        "gitlab" | "gitlab-self" => gitlab_mr(&rget(r, &format!("{base}/projects/{}/merge_requests/{number}", enc(&r.path)))?),
+        "bitbucket" => bitbucket_pr(&rget(r, &format!("{base}/repositories/{}/pullrequests/{number}", r.path))?),
+        "bitbucket-server" => bitbucket_server_pr(&rget(r, &format!("{base}{}/pull-requests/{number}", bbs_path(r)))?),
+        "azure" => azure_pr(&rget(r, &azure_url(r, &format!("/pullrequests/{number}?api-version=7.1")))?, &r.web),
+        _ => return Err("This hosting service does not support pull-request checkout.".into()),
+    })
+}
+
+#[derive(Serialize)]
+pub struct PrCheckout { pub url: String, pub reference: String, pub expected: String }
+
+pub fn pr_checkout(r: &RemoteRepo, pr: &PullRequest) -> Result<PrCheckout, String> {
+    let reference = match r.service.as_str() {
+        "github" | "github-enterprise" => format!("refs/pull/{}/head", pr.number),
+        "gitlab" | "gitlab-self" => format!("refs/merge-requests/{}/head", pr.number),
+        "bitbucket-server" => format!("refs/pull-requests/{}/from", pr.number),
+        _ => pr.source_sha.clone(),
+    };
+    let url = if matches!(r.service.as_str(), "github" | "github-enterprise" | "gitlab" | "gitlab-self" | "bitbucket-server") { r.web.clone() } else { pr.source_url.clone() };
+    if !url.starts_with("https://") || reference.is_empty() || pr.source_sha.is_empty() {
+        return Err("The pull request has no available source repository or commit. Refresh it or open it in the browser.".into());
+    }
+    Ok(PrCheckout { url, reference, expected: pr.source_sha.clone() })
 }
 
 /// A repository's issue tracker (Preferences > Issue Tracker); kind "" uses the hosting service.
@@ -487,15 +523,61 @@ pub fn create_pr(r: &RemoteRepo, source: &str, target: &str, title: &str, body: 
 }
 
 /// method: "merge", "squash" or "rebase".
+static MERGE_WAITERS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::sync::Weak<std::sync::atomic::AtomicBool>>>> = std::sync::OnceLock::new();
+fn merge_key(r: &RemoteRepo, number: u64) -> String { format!("{}|{}|{}|{number}", r.service, r.host, r.path) }
+struct MergeWait { key: String, cancelled: std::sync::Arc<std::sync::atomic::AtomicBool> }
+impl MergeWait {
+    fn new(r: &RemoteRepo, number: u64) -> Result<Self, String> {
+        let key=merge_key(r,number);let mut waiters=MERGE_WAITERS.get_or_init(Default::default).lock().unwrap();
+        if waiters.get(&key).and_then(std::sync::Weak::upgrade).is_some() { return Err("This pull request already has a merge request running.".into()); }
+        let cancelled=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));waiters.insert(key.clone(),std::sync::Arc::downgrade(&cancelled));Ok(Self {key,cancelled})
+    }
+    fn is_cancelled(&self) -> bool { self.cancelled.load(std::sync::atomic::Ordering::Acquire) }
+}
+impl Drop for MergeWait { fn drop(&mut self) { MERGE_WAITERS.get_or_init(Default::default).lock().unwrap().remove(&self.key); } }
+pub fn cancel_merge(r: &RemoteRepo, number: u64) -> bool {
+    let flag=MERGE_WAITERS.get_or_init(Default::default).lock().unwrap().get(&merge_key(r,number)).and_then(std::sync::Weak::upgrade);
+    if let Some(flag)=flag { flag.store(true,std::sync::atomic::Ordering::Release); true } else { false }
+}
+
+fn await_gitlab_rebase(mut read: impl FnMut() -> Result<Value,String>, mut pause: impl FnMut(), cancelled: impl Fn() -> bool, expected: &Value, timeout: std::time::Duration) -> Result<Value,String> {
+    let start=std::time::Instant::now();
+    loop {
+        if cancelled() { return Err("Stopped waiting for the rebase. The server may still finish the queued rebase; no merge was sent by this operation.".into()); }
+        if start.elapsed() >= timeout { return Err("The server rebase is still running. Refresh the pull request before merging.".into()); }
+        pause();
+        if cancelled() { continue; }
+        let current=read()?;
+        for field in ["source_project_id","source_branch","target_branch"] {
+            if current[field] != expected[field] { return Err("The merge request source or target changed during rebase. Refresh it before merging.".into()); }
+        }
+        if let Some(error)=current["merge_error"].as_str().filter(|error|!error.is_empty()) { return Err(format!("The server could not rebase this merge request: {error}")); }
+        match current["rebase_in_progress"].as_bool() {
+            Some(true) => {},
+            Some(false) if current["sha"].as_str().is_some_and(|sha| !sha.is_empty()) => return Ok(current),
+            _ => return Err("The server did not report a completed rebase and source commit. Refresh before merging.".into()),
+        }
+    }
+}
+
 pub fn merge_pr(r: &RemoteRepo, number: u64, method: &str) -> Result<(), String> {
+    let waiting = MergeWait::new(r, number)?;
     let b = api_base(&r.service);
     match r.service.as_str() {
         "github" | "github-enterprise" => rsend(r, "PUT", &format!("{b}/repos/{}/pulls/{number}/merge", r.path), json!({ "merge_method": method })).map(|_| ()),
         "gitlab" | "gitlab-self" => {
+            let url = format!("{b}/projects/{}/merge_requests/{number}", enc(&r.path));
+            let mut body = json!({ "squash": method == "squash" });
             if method == "rebase" {
-                http("PUT", &format!("{b}/projects/{}/merge_requests/{number}/rebase", enc(&r.path)), &auth(&r.service)?, None)?;
+                let expected = rget(r, &url)?;
+                http("PUT", &format!("{url}/rebase"), &auth(&r.service)?, None)?;
+                let completed = await_gitlab_rebase(|| rget(r, &format!("{url}?include_rebase_in_progress=true")), || {
+                    for _ in 0..10 { if waiting.is_cancelled() { break; } std::thread::sleep(std::time::Duration::from_millis(100)); }
+                }, || waiting.is_cancelled(), &expected, std::time::Duration::from_secs(60))?;
+                body["sha"] = completed["sha"].clone();
             }
-            rsend(r, "PUT", &format!("{b}/projects/{}/merge_requests/{number}/merge", enc(&r.path)), json!({ "squash": method == "squash" })).map(|_| ())
+            if waiting.is_cancelled() { return Err("Merge cancelled before it was sent.".into()); }
+            rsend(r, "PUT", &format!("{url}/merge"), body).map(|_| ())
         }
         "bitbucket" => {
             let strategy = match method {
@@ -533,8 +615,31 @@ pub struct Launchpad {
 
 /// Open pull requests and issues that involve you, across every connected service.
 pub fn launchpad(_gitlab_host: &str) -> Launchpad {
+    parallel_launchpad(&crate::hosting::SERVICES, launchpad_service)
+}
+
+fn parallel_launchpad(ids: &[&str], work: impl Fn(&str) -> Launchpad + Sync) -> Launchpad {
     let mut out = Launchpad::default();
-    let connected = |id: &str| secret_get(&secret_name(id)).is_some() && !host_of(id).is_empty();
+    for group in ids.chunks(4) {
+        std::thread::scope(|scope| {
+            let tasks: Vec<_> = group.iter().map(|id| { let work = &work; scope.spawn(move || work(id)) }).collect();
+            for task in tasks {
+                match task.join() {
+                    Ok(result) => { out.pull_requests.extend(result.pull_requests); out.issues.extend(result.issues); out.errors.extend(result.errors); },
+                    Err(_) => out.errors.push("A connected service stopped unexpectedly; other results are available.".into()),
+                }
+            }
+        });
+    }
+    out.pull_requests.sort_by(|a, b| b.updated.cmp(&a.updated));
+    out.pull_requests.dedup_by(|a, b| a.url == b.url);
+    out.issues.sort_by(|a, b| b.updated.cmp(&a.updated));
+    out
+}
+
+fn launchpad_service(only: &str) -> Launchpad {
+    let mut out = Launchpad::default();
+    let connected = |id: &str| id == only && secret_get(&secret_name(id)).is_some() && !host_of(id).is_empty();
     for id in ["github", "github-enterprise"] {
         if !connected(id) {
             continue;
@@ -719,5 +824,38 @@ mod tests {
         let t = trello_issue(&json!({ "idShort": 4, "name": "Card", "url": "u", "closed": false, "labels": [{ "name": "ui" }, { "name": "" }] }));
         assert_eq!((t.key.as_str(), t.labels.clone()), ("#4", vec!["ui".to_string()]));
         assert_eq!(q("a b/c"), "a%20b%2Fc");
+    }
+}
+
+
+#[cfg(test)]
+mod concurrency_tests {
+    use super::*;
+    #[test]
+    fn launchpad_bounds_workers_and_preserves_partial_errors() {
+        use std::sync::atomic::{AtomicUsize,Ordering};
+        let active=AtomicUsize::new(0);let peak=AtomicUsize::new(0);
+        let result=parallel_launchpad(&["a","b","c","d","e","f"],|id| {
+            let count=active.fetch_add(1,Ordering::SeqCst)+1;peak.fetch_max(count,Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(25));active.fetch_sub(1,Ordering::SeqCst);
+            Launchpad {errors:vec![id.into()],..Default::default()}
+        });
+        assert_eq!(result.errors.len(),6);assert!(peak.load(Ordering::SeqCst)>1);assert!(peak.load(Ordering::SeqCst)<=4);
+    }
+}
+
+
+#[cfg(test)]
+mod rebase_wait_tests {
+    use super::*;
+    fn state(running:bool)->Value {json!({"source_project_id":1,"source_branch":"feature","target_branch":"main","rebase_in_progress":running,"sha":"rebased"})}
+    #[test]
+    fn waits_for_rebase_and_rejects_errors_cancellation_timeout_and_changed_source() {
+        let expected=state(true);let mut polls=0;
+        let completed=await_gitlab_rebase(||{polls+=1;Ok(state(polls<3))},||{},||false,&expected,std::time::Duration::from_secs(5)).unwrap();assert_eq!(polls,3);assert_eq!(completed["sha"],"rebased");
+        let mut failed=state(false);failed["merge_error"]=json!("conflict");assert!(await_gitlab_rebase(||Ok(failed.clone()),||{},||false,&expected,std::time::Duration::from_secs(5)).unwrap_err().contains("conflict"));
+        assert!(await_gitlab_rebase(||panic!("cancelled"),||{},||true,&expected,std::time::Duration::from_secs(5)).is_err());
+        assert!(await_gitlab_rebase(||panic!("expired"),||{},||false,&expected,std::time::Duration::ZERO).is_err());
+        let mut changed=state(false);changed["source_branch"]=json!("other");assert!(await_gitlab_rebase(||Ok(changed.clone()),||{},||false,&expected,std::time::Duration::from_secs(5)).is_err());
     }
 }

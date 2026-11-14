@@ -1,3 +1,5 @@
+import { buildTree, type TreeNode } from "@/lib/file-tree";
+import { VirtualFileRows } from "./VirtualFileRows";
 import { useQuery } from "@tanstack/react-query";
 import {
   ArrowDownAZ,
@@ -15,7 +17,7 @@ import {
   X,
   Folder,
 } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Commit, FileChange, RepoView } from "@/lib/api";
 import { api, WORKDIR } from "@/lib/api";
 import { useStore, useTabUi, type DiffTarget, usePanelStore } from "@/lib/store";
@@ -65,10 +67,16 @@ function SelectionPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
   if (ui.multi.length > 2) return <MultiPanel repo={repo} tabId={tabId} />;
   if (ui.selection.type === "commit") {
     const sha = ui.selection.sha;
-    const c = repo.commits.find((x) => x.sha === sha);
-    if (c) return <CommitDetails repo={repo} tabId={tabId} commit={c} />;
+    return <CommitSelection repo={repo} tabId={tabId} sha={sha} />;
   }
   return <WorkPanel repo={repo} tabId={tabId} />;
+}
+
+function CommitSelection({ repo, tabId, sha }: {repo: RepoView; tabId: string; sha: string}) {
+  const loaded = repo.commits.find(commit => commit.sha === sha);
+  const details = useQuery({ queryKey:["commitDetails",repo.path,sha], queryFn:()=>api.commitDetails(repo.path,sha), enabled:!loaded, staleTime:Infinity });
+  const commit = loaded ?? details.data;
+  return commit ? <CommitDetails repo={repo} tabId={tabId} commit={commit} /> : <div className="p-3 text-fg2">{details.isError ? String(details.error) : "Loading commit…"}</div>;
 }
 
 function PanelHeader({ children }: { children: ReactNode }) {
@@ -130,6 +138,7 @@ function FileList({
     () => [...files].sort((a, b) => (sortBy === "status" ? a.status.localeCompare(b.status) || a.path.localeCompare(b.path) : a.path.localeCompare(b.path))),
     [files, sortBy],
   );
+  const root = useMemo(() => buildTree(sorted), [sorted]);
   const row = (f: FileChange, indent: number, label: string) => (
     <CtxMenu key={f.path} items={() => menu(f)}>
       <div
@@ -145,10 +154,10 @@ function FileList({
       </div>
     </CtxMenu>
   );
-  if (view === "path") return <div>{sorted.map((f) => row(f, 0, f.path))}</div>;
+  if (view === "path") return sorted.length > 200 ? <VirtualFileRows files={sorted} activeFile={activeFile} render={(file) => row(file, 0, file.path)} /> : <div>{sorted.map((f) => row(f, 0, f.path))}</div>;
 
   // Tree view: nested folders; a closed folder shows how many files changed inside it.
-  const root = buildTree(sorted);
+
   const allDirs: string[] = [];
   const collect = (n: TreeNode) => n.dirs.forEach((d) => (allDirs.push(d.path), collect(d)));
   collect(root);
@@ -157,7 +166,7 @@ function FileList({
     const out: ReactNode[] = [];
     for (const d of [...n.dirs.values()].sort((a, b) => a.name.localeCompare(b.name))) {
       const closed = !!collapsed[d.path];
-      const counts = countFiles(d);
+      const counts = d.counts;
       out.push(
         <button
           type="button"
@@ -199,39 +208,6 @@ function FileList({
   );
 }
 
-interface TreeNode {
-  name: string;
-  path: string;
-  dirs: Map<string, TreeNode>;
-  files: FileChange[];
-}
-
-function buildTree(files: FileChange[]): TreeNode {
-  const root: TreeNode = { name: "", path: "", dirs: new Map(), files: [] };
-  for (const f of files) {
-    let node = root;
-    for (const part of f.path.split("/").slice(0, -1)) {
-      const p = node.path ? `${node.path}/${part}` : part;
-      if (!node.dirs.has(part)) node.dirs.set(part, { name: part, path: p, dirs: new Map(), files: [] });
-      node = node.dirs.get(part)!;
-    }
-    node.files.push(f);
-  }
-  return root;
-}
-
-function countFiles(n: TreeNode): Record<string, number> {
-  const out: Record<string, number> = {};
-  const walk = (x: TreeNode) => {
-    for (const f of x.files) {
-      const k = f.status === "?" ? "A" : f.status === "R" || f.status === "U" ? "M" : f.status;
-      out[k] = (out[k] ?? 0) + 1;
-    }
-    x.dirs.forEach(walk);
-  };
-  walk(n);
-  return out;
-}
 
 function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
   const s = usePanelStore();
@@ -243,7 +219,7 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
   const [stagedOpen, setStagedOpen] = useState(true);
   const [stashMsg, setStashMsg] = useState("");
   const conflicted = repo.status.unstaged.filter((f) => f.status === "U");
-  const unstaged = repo.status.unstaged.filter((f) => f.status !== "U");
+  const unstaged = useMemo(() => repo.status.unstaged.filter((f) => f.status !== "U"), [repo.status.unstaged]);
   const staged = repo.status.staged;
   const { total } = workingChanges(repo.status);
   const merging = repo.state_note === "merging";
@@ -266,6 +242,8 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
   const push = s.settings.pushAfterCommit;
   const [skipHooks, setSkipHooks] = useState(s.settings.skipHooks);
   const [coauthors, setCoauthors] = useState("");
+  const coauthorsRef = useRef(coauthors);
+  coauthorsRef.current = coauthors;
   const knownAuthors = useMemo(() => [...new Set(repo.commits.map((c) => `${c.author} <${c.email}>`))].slice(0, 200), [repo.commits]);
 
   const openDiff = (f: FileChange, isStaged: boolean) => {
@@ -274,11 +252,13 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
   };
 
   const doCommit = async (stageAll: boolean) => {
+    const submitted = useStore.getState().drafts[repo.path];
+    const submittedAuthors = coauthorsRef.current;
     const description = withCoauthors(draft.description, coauthors);
     const ok = await act(repo.path, { type: "commit", summary: draft.summary, description, amend: draft.amend, stageAll, skipHooks });
     if (ok) {
-      setCoauthors("");
-      s.setDraft(repo.path, { summary: "", description: "", amend: false });
+      if (coauthorsRef.current === submittedAuthors) setCoauthors("");
+      if (useStore.getState().drafts[repo.path] === submitted) s.setDraft(repo.path, { summary: "", description: "", amend: false });
       s.setUi(tabId, { diff: null });
       if (push) await act(repo.path, { type: "push", force: false });
     }
@@ -671,8 +651,8 @@ function CommitDetails({ repo, tabId, commit: c }: { repo: RepoView; tabId: stri
         <FileList
           files={files.data ?? []}
           activeFile={ui.diff?.source.kind === "Commit" ? ui.diff.file : undefined}
-          onOpen={(f) => s.setUi(tabId, { diff: { source: { kind: "Commit", sha: c.sha }, file: f.path, untracked: false, parent: c.parents[0] ?? null } })}
-          menu={(f) => fileMenu(repo, f.path, false, true, f.status === "D" ? c.parents[0] : c.sha)}
+          onOpen={(f) => s.setUi(tabId, { diff: { source: { kind: "Commit", sha: f.storage ?? c.sha }, file: f.path, untracked: false, parent: f.storage ? null : c.parents[0] ?? null } })}
+          menu={(f) => fileMenu(repo, f.path, false, true, f.status === "D" ? c.parents[0] : c.sha, f.storage ?? undefined)}
         />
       </div>
     </div>

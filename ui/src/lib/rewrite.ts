@@ -37,12 +37,12 @@ export function baseFor(repo: RepoView, sha: string): string {
 export async function openRebase(tabId: string, path: string, base: string, onto: string, preset?: (items: RebaseItem[]) => RebaseItem[]) {
   const st = useStore.getState();
   try {
-    const commits = await api.rebaseCommits(path, base);
+    const { commits, expected } = await api.rebasePlan(path, base);
     if (!commits.length) return st.toast(false, "There are no commits to rebase.");
     let items = commits.map(toItem).reverse();
     const original = items.map((i) => ({ ...i }));
     if (preset) items = preset(items);
-    const plan: RebasePlan = { mode: "rebase", base, onto, items, original };
+    const plan: RebasePlan = { mode: "rebase", base, onto, items, original, expected };
     st.setUi(tabId, { rebase: plan, diff: null, history: null, conflict: null });
   } catch (e) {
     st.toast(false, String(e));
@@ -73,7 +73,7 @@ export async function runPlan(tabId: string, path: string, plan: RebasePlan) {
   const items = todo(plan);
   const ok =
     plan.mode === "rebase"
-      ? await act(path, { type: "interactiveRebase", base: plan.base, items })
+      ? await act(path, { type: "interactiveRebase", base: plan.base, items, expected: plan.expected! })
       : await act(path, { type: "interactiveCherryPick", items: items.filter((i) => i.action !== "drop") });
   st.setUi(tabId, { rebase: null, multi: [] });
   return ok;
@@ -83,11 +83,11 @@ export async function runPlan(tabId: string, path: string, plan: RebasePlan) {
 async function quick(path: string, base: string, edit: (items: RebaseItem[]) => RebaseItem[] | null) {
   const st = useStore.getState();
   try {
-    const commits = await api.rebaseCommits(path, base);
+    const { commits, expected } = await api.rebasePlan(path, base);
     const items = edit(commits.map(toItem).reverse());
     if (!items) return;
-    const plan: RebasePlan = { mode: "rebase", base, onto: base, items, original: commits.map(toItem).reverse() };
-    await act(path, { type: "interactiveRebase", base, items: todo(plan) });
+    const plan: RebasePlan = { mode: "rebase", base, onto: base, items, original: commits.map(toItem).reverse(), expected };
+    await act(path, { type: "interactiveRebase", base, items: todo(plan), expected });
   } catch (e) {
     st.toast(false, String(e));
   }

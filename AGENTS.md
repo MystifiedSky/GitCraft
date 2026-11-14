@@ -2,6 +2,10 @@
 
 This directory is the root of the public GitCraft app repository. Use its Git history and tags when preparing app commits and release notes.
 
+## Track bugs and optimizations
+
+Use [BUGS_AND_OPTIMIZATIONS.md](BUGS_AND_OPTIMIZATIONS.md) as the active checklist. Check existing IDs before adding findings or starting a fix. Update each item's status as work progresses; mark it verified fixed only after checking the original failure and recording regression evidence and the fix commit (or uncommitted status). Preserve historical findings in AUDIT.md.
+
 ## Maintain the changelog
 
 - Review [CHANGELOG.md](CHANGELOG.md) before every app commit. Include an entry in the same commit for every notable change to the app or how it is built, installed, or updated. Describe what users or contributors will notice in plain language. Skip entries for changes with no notable effect, such as formatting or test-only edits.

@@ -18,6 +18,8 @@ export interface PullRequest {
   title: string;
   author: string;
   source: string;
+  source_url: string;
+  source_sha: string;
   target: string;
   draft: boolean;
   state: string;
@@ -40,6 +42,10 @@ export interface Issue {
   /** Jira "ABC-123", Trello "#12" (empty for GitHub / GitLab numbers). */
   key?: string;
   tracker?: string;
+}
+
+export function issueIdentity(issue: Issue): string {
+  return JSON.stringify([issue.tracker ?? "", issue.repo, issue.key || issue.number]);
 }
 
 export interface Comment {
@@ -66,6 +72,11 @@ export const hosting = {
     if (name.endsWith("-token")) await syncGitCredentials();
   },
   remote: (path: string) => invoke<RemoteRepo | null>("repo_remote", { path, gitlabHost: gh() }),
+  pr: (path: string, number: number) => invoke<PullRequest>("pr_details", { path, number, gitlabHost: gh() }),
+  checkoutPr: async (path: string, number: number) => {
+    const target = await invoke<{ url: string; reference: string; expected: string }>("pr_checkout_target", { path, number, gitlabHost: gh() });
+    return act(path, { type: "checkoutPullRequest", ...target });
+  },
   prs: (path: string) => invoke<PullRequest[]>("list_prs", { path, gitlabHost: gh() }),
   /** Issues from the repository's Issue Tracker preference (Jira, Trello, Azure Boards) or its hosting service. */
   issues: (path: string) => invoke<Issue[]>("list_issues", { path, gitlabHost: gh(), tracker: useStore.getState().settings.repoPrefs[path]?.tracker ?? null }),
@@ -73,6 +84,7 @@ export const hosting = {
   comment: (path: string, number: number, body: string) => invoke<void>("pr_comment", { path, gitlabHost: gh(), number, body }),
   create: (path: string, source: string, target: string, title: string, body: string, draft: boolean) =>
     invoke<PullRequest>("create_pr", { path, gitlabHost: gh(), source, target, title, body, draft }),
+  cancelMerge: (path: string, number: number) => invoke<boolean>("cancel_pr_merge", { path, gitlabHost: useStore.getState().settings.gitlabHost ?? "", number }),
   merge: (path: string, number: number, method: string) => invoke<void>("merge_pr", { path, gitlabHost: gh(), number, method }),
   launchpad: () => invoke<{ pull_requests: PullRequest[]; issues: Issue[]; errors: string[] }>("launchpad", { gitlabHost: gh() }),
   issueBranch: (number: number, title: string) => invoke<string>("issue_branch_name", { number, title }),
@@ -135,10 +147,10 @@ export async function startPullRequest(path: string, branch: string, target?: st
 
 /** "Create branch from issue": issue-<n>-<title>, checked out. */
 export async function branchFromIssue(path: string, issue: Issue) {
-  const name = await hosting.issueBranch(issue.number, issue.title);
+  const name = issue.key ? `${issue.key.toLowerCase()}-${issue.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 45)}` : await hosting.issueBranch(issue.number, issue.title);
   useStore.getState().setDialog({
     kind: "prompt",
-    title: `Create a branch for #${issue.number}`,
+    title: `Create a branch for ${issue.key || "#" + issue.number}`,
     label: "Branch name",
     value: name,
     confirm: "Create and Checkout",

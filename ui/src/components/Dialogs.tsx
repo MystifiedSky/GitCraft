@@ -138,6 +138,7 @@ function PromptDialog({
   confirm,
   onSubmit,
   extraLabel,
+  allowEmpty = false,
   onClose,
 }: {
   title: string;
@@ -146,12 +147,13 @@ function PromptDialog({
   confirm: string;
   onSubmit: (v: string, extra?: string) => void;
   extraLabel?: string;
+  allowEmpty?: boolean;
   onClose: () => void;
 }) {
   const [v, setV] = useState(value);
   const [x, setX] = useState("");
   const submit = () => {
-    if (!v.trim() && !label.includes("optional")) return;
+    if (!v.trim() && !allowEmpty && !label.includes("optional")) return;
     onClose();
     onSubmit(v.trim(), extraLabel ? x : undefined);
   };
@@ -479,10 +481,10 @@ function InitDialog({ onClose }: { onClose: () => void }) {
   const go = async () => {
     if (!name.trim() || !dir.trim()) return;
     try {
-      const path = await api.initRepo(dir, name, { branch: branch || s.settings.defaultBranch, gitignore: ignore ? [ignore] : [], license, readme, lfs });
+      const result = await api.initRepo(dir, name, { branch: branch || s.settings.defaultBranch, gitignore: ignore ? [ignore] : [], license, readme, lfs });
       onClose();
-      await openRepoPath(path);
-      s.toast(true, "Repository created");
+      await openRepoPath(result.path);
+      s.toast(!result.warning, result.warning ?? "Repository created");
     } catch (e) {
       setError(String(e));
     }
@@ -554,7 +556,12 @@ function InitDialog({ onClose }: { onClose: () => void }) {
 }
 
 function LogDialog({ onClose }: { onClose: () => void }) {
-  const q = useQuery({ queryKey: ["log"], queryFn: api.activityLog, refetchInterval: 1000 });
+  const snapshot = useRef<{ version?: number; entries: import("@/lib/api").LogEntry[] }>({ entries: [] });
+  const q = useQuery({ queryKey: ["log"], queryFn: async () => {
+    const update = await api.activityLogSnapshot(snapshot.current.version);
+    if (update) snapshot.current = { version: update[0], entries: update[1] };
+    return snapshot.current.entries;
+  }, refetchInterval: 1000 });
   const entries = (q.data ?? []).slice().reverse();
   return (
     <Dialog open onClose={onClose} title="Activity Log" width={640}>

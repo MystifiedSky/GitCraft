@@ -1,38 +1,6 @@
 //! Compact bulk dependency imports without hiding application or local patch changes.
 use std::collections::BTreeMap;
 
-// Git quotes paths containing control characters using C escapes and octal bytes.
-fn patch_path(line: &str) -> Option<String> {
-    let raw = line.strip_prefix("+++ ").or_else(|| line.strip_prefix("--- "))?;
-    let path = if let Some(quoted) = raw.strip_prefix('"') {
-        let mut bytes = Vec::new();
-        let mut chars = quoted.bytes().peekable();
-        while let Some(c) = chars.next() {
-            match c {
-                b'"' => break,
-                b'\\' => {
-                    let c = chars.next()?;
-                    if (b'0'..=b'7').contains(&c) {
-                        let mut n = (c - b'0') as u16;
-                        for _ in 0..2 {
-                            if let Some(d @ b'0'..=b'7') = chars.peek().copied() {
-                                chars.next();
-                                n = n * 8 + (d - b'0') as u16;
-                            } else { break; }
-                        }
-                        bytes.push(u8::try_from(n).ok()?);
-                    } else {
-                        bytes.push(match c { b't' => b'\t', b'n' => b'\n', b'r' => b'\r', b'a' => 7, b'b' => 8, b'f' => 12, b'v' => 11, c => c });
-                    }
-                }
-                c => bytes.push(c),
-            }
-        }
-        String::from_utf8(bytes).ok()?
-    } else { raw.trim_end_matches('\t').to_owned() };
-    path.strip_prefix("a/").or_else(|| path.strip_prefix("b/")).map(str::to_owned)
-}
-
 fn dependency(path: &str) -> Option<String> {
     let parts: Vec<_> = path.split('/').collect();
     let i = parts.iter().position(|p| matches!(*p, "vendor" | "vendored" | "third_party" | "third-party"))?;
@@ -48,73 +16,195 @@ fn retain_import(path: &str) -> bool {
         name.contains("patch") || name.contains("changelog")
 }
 
-/// Only whole-file imports/removals are compacted. Existing dependency edits stay exact.
-pub(crate) fn summarize(diff: &str) -> String {
+fn context_priority(path: &str) -> u8 {
+    let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    if ["cargo.toml", "package.json", "pyproject.toml", "go.mod"].contains(&name.as_str()) { 0 }
+    else if ["cargo.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "go.sum"].contains(&name.as_str()) { 3 }
+    else if dependency(path).is_none() { 1 } else { 2 }
+}
+
+pub(crate) const CONTEXT_BUDGET: usize = 256 * 1024;
+const DETAIL_PER_FILE: usize = 32 * 1024;
+const CONTENT_BUDGET: usize = CONTEXT_BUDGET - 1024;
+
+fn append_context(output: &mut String, text: &str) -> bool {
+    let available = CONTENT_BUDGET.saturating_sub(output.len());
+    let mut end = text.len().min(available);
+    while !text.is_char_boundary(end) { end -= 1; }
+    output.push_str(&text[..end]);
+    end < text.len()
+}
+
+fn bounded_patch(dir: &std::path::Path, args: &[&str], limit: usize) -> Result<(String, bool), String> {
+    use std::io::Read;
+    let mut child = crate::git::git_cmd(dir).args(args).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    let read = child.stdout.take().unwrap().take(limit as u64 + 1).read_to_end(&mut bytes);
+    let truncated = bytes.len() > limit;
+    if truncated || read.is_err() { let _ = child.kill(); }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    read.map_err(|e| e.to_string())?;
+    if !status.success() && !truncated { return Err("Could not read the selected changes for AI context.".into()); }
+    bytes.truncate(limit);
+    Ok((String::from_utf8_lossy(&bytes).into_owned(), truncated))
+}
+
+/// Classify changes before asking Git for any patch text. Bulk dependency files
+/// never enter the patch output buffer. Literal pathspecs preserve unusual names.
+pub(crate) fn diff(dir: &std::path::Path, args: &[&str]) -> Result<String, String> {
+    let mut names = args.to_vec();
+    names.extend(["--name-status", "-z", "--no-color", "--no-ext-diff", "--no-textconv"]);
+    let listed = crate::git::run(dir, &names);
+    if !listed.ok { return Err(listed.message()); }
+    let mut records = listed.stdout.split('\0').filter(|r| !r.is_empty());
+    let mut retained = Vec::new();
+    let mut omitted = BTreeMap::new();
+    while let Some(status) = records.next() {
+        let Some(path) = records.next() else { break };
+        let status = status.trim();
+        if status.starts_with('R') || status.starts_with('C') {
+            retained.push(path.to_owned());
+            if let Some(new) = records.next() { retained.push(new.to_owned()); }
+        } else if matches!(status, "A" | "D") && dependency(path).is_some() && !retain_import(path) {
+            omitted.insert(path.to_owned(), if status == "A" { "added" } else { "removed" });
+        } else { retained.push(path.to_owned()); }
+    }
     let mut output = String::new();
-    let mut summaries: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut boundaries: Vec<_> = diff.match_indices("diff --git ")
-        .filter(|(i, _)| *i == 0 || diff.as_bytes()[i - 1] == b'\n').map(|(i, _)| i).collect();
-    if boundaries.is_empty() { return diff.to_owned(); }
-    output.push_str(&diff[..boundaries[0]]);
-    boundaries.push(diff.len());
-    for pair in boundaries.windows(2) {
-        let section = &diff[pair[0]..pair[1]];
-        let headers: Vec<_> = section.lines().take_while(|l| !l.starts_with("@@")).collect();
-        let path = headers.iter().filter_map(|line| patch_path(line)).last();
-        let kind = if headers.iter().any(|l| l.starts_with("new file mode ")) { "added" }
-            else if headers.iter().any(|l| l.starts_with("deleted file mode ")) { "removed" }
-            else { "modified" };
-        if let Some((path, group)) = path.as_deref().and_then(|p| dependency(p).map(|g| (p, g))) {
-            if kind != "modified" && !retain_import(path) {
-                let added = section.lines().filter(|l| l.starts_with('+') && !l.starts_with("+++ ")).count();
-                let removed = section.lines().filter(|l| l.starts_with('-') && !l.starts_with("--- ")).count();
-                summaries.entry(group).or_default().push(format!("{}: {kind}, +{added}/-{removed} lines", serde_json::to_string(path).unwrap()));
-                continue;
+    // Keep each Windows command line bounded even in repositories with many files.
+    let mut batch = Vec::new();
+    let mut size = 0;
+    let flush = |batch: &mut Vec<String>, output: &mut String| -> Result<(), String> {
+        if batch.is_empty() { return Ok(()); }
+        let mut command = args.to_vec();
+        command.extend(["--patch", "--no-color", "--no-ext-diff", "--no-textconv", "--"]);
+        command.extend(batch.iter().map(String::as_str));
+        let available = CONTENT_BUDGET.saturating_sub(output.len());
+        if available > 0 {
+            let (text, truncated) = bounded_patch(dir, &command, available)?;
+            append_context(output, &text);
+            if truncated { append_context(output, "\n[Detailed patch excerpt ends here.]\n"); }
+        }
+        batch.clear();
+        Ok(())
+    };
+    retained.sort_by_key(|path| (context_priority(path), path.clone()));
+    let mut priority = None;
+    let retained_count = retained.len();
+    for path in retained {
+        let next_priority = context_priority(&path);
+        if priority.is_some_and(|previous| previous != next_priority) { flush(&mut batch, &mut output)?; size = 0; }
+        priority = Some(next_priority);
+        if size + path.len() > 12000 { flush(&mut batch, &mut output)?; size = 0; }
+        let spec = format!(":(literal){path}");
+        size += spec.len() + 3;
+        batch.push(spec);
+    }
+    flush(&mut batch, &mut output)?;
+    if !omitted.is_empty() {
+        let mut counts = args.to_vec();
+        counts.extend(["--numstat", "-z", "--no-color", "--no-ext-diff", "--no-textconv"]);
+        let stats = crate::git::run(dir, &counts);
+        if !stats.ok { return Err(stats.message()); }
+        append_context(&mut output, "\nVendored dependency summary (bulk source omitted; retained details may be excerpted). Do not infer omitted implementation details:\n");
+        for record in stats.stdout.split('\0') {
+            let mut fields = record.trim_start_matches('\n').splitn(3, '\t');
+            if let (Some(add), Some(remove), Some(path)) = (fields.next(), fields.next(), fields.next()) {
+                if let Some(status) = omitted.get(path) {
+                    append_context(&mut output, &format!("- {}: {status}, +{add}/-{remove} lines\n", serde_json::to_string(path).unwrap()));
+                }
             }
         }
-        output.push_str(section);
     }
-    if !summaries.is_empty() {
-        output.push_str("\nVendored dependency summary (bulk file contents omitted; manifests, notices, patch notes, and edits to existing files are retained above). Do not infer implementation details from omitted source:\n");
-        for (group, files) in summaries {
-            output.push_str(&format!("\n{}: {} bulk files\n", serde_json::to_string(&group).unwrap(), files.len()));
-            for file in files { output.push_str(&format!("- {file}\n")); }
-        }
+    if output.len() >= CONTENT_BUDGET {
+        output.push_str(&format!("\n[AI context budget reached across {retained_count} detailed paths and {} bulk dependency paths. Patch details above are incomplete excerpts; do not infer omitted code.]\n", omitted.len()));
     }
-    output
+    Ok(output)
+}
+
+/// Include new local files without staging them or changing the index.
+pub(crate) fn untracked(dir: &std::path::Path) -> Result<String, String> {
+    use std::io::Read;
+    let result = crate::git::run(dir, &["ls-files", "--others", "--exclude-standard", "-z"]);
+    if !result.ok { return Err(result.message()); }
+    let mut paths: Vec<_> = result.stdout.split('\0').filter(|path| !path.is_empty()).collect();
+    paths.sort_by_key(|path| (context_priority(path), *path));
+    let mut output = String::new(); let mut summarized = 0usize; let mut total = 0u64;
+    for path in paths {
+        let full = dir.join(path);
+        let metadata = std::fs::symlink_metadata(&full).map_err(|e| e.to_string())?;
+        total += metadata.len();
+        if output.len() >= CONTENT_BUDGET { summarized += 1; continue; }
+        append_context(&mut output, &format!("\nNew (untracked) file {} ({} bytes):\n", serde_json::to_string(path).unwrap(), metadata.len()));
+        if metadata.file_type().is_symlink() { append_context(&mut output, "Symlink; target contents not read.\n"); continue; }
+        if dependency(path).is_some() && !retain_import(path) { append_context(&mut output, "Vendored source import; contents omitted.\n"); continue; }
+        let limit = DETAIL_PER_FILE.min(CONTENT_BUDGET.saturating_sub(output.len()));
+        let mut bytes = Vec::new();
+        std::fs::File::open(&full).map_err(|e| e.to_string())?.take(limit as u64 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+        if crate::files::is_binary(&bytes) { append_context(&mut output, "Binary file; contents omitted.\n"); continue; }
+        let excerpted = metadata.len() > limit as u64;
+        bytes.truncate(limit);
+        let text = if let Some(encoding) = crate::prefs::encoding_for(dir) { crate::prefs::decode(&bytes, encoding) } else { String::from_utf8_lossy(&bytes).into_owned() };
+        append_context(&mut output, &text);
+        if excerpted { summarized += 1; append_context(&mut output, "\n[File excerpt only; remaining contents omitted.]\n"); }
+    }
+    if summarized > 0 { output.push_str(&format!("\n[AI context budget: {summarized} new files have excerpted or omitted contents; total new-file size is {total} bytes. Do not infer omitted implementation details.]\n")); }
+    Ok(output)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn added(path: &str, body: &str) -> String {
-        format!("diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+{body}\n")
-    }
-    #[test]
-    fn compacts_large_imports_and_preserves_patch_evidence_and_app_code() {
-        let mut diff = added("vendor/example/src/lib.rs", &"dependency-source".repeat(100_000));
-        for path in ["vendor/example/GITCRAFT-PATCH.txt", "vendor/example/Cargo.toml", "vendor/example/LICENSE", "src/main.rs"] {
-            diff.push_str(&added(path, "retained-evidence"));
+    fn fixture() -> tempfile::TempDir {
+        let folder = tempfile::tempdir().unwrap();
+        for args in [vec!["init", "-q"], vec!["config", "user.name", "Test"], vec!["config", "user.email", "test@example.invalid"], vec!["config", "commit.gpgsign", "false"], vec!["commit", "--allow-empty", "-qm", "base"]] {
+            assert!(crate::git::run(folder.path(), &args).ok);
         }
-        let result = summarize(&diff);
-        assert!(result.len() < 3000);
-        assert!(!result.contains("dependency-source"));
-        assert!(result.contains("1 bulk files"));
-        assert!(result.contains("added, +1/-0 lines"));
-        assert_eq!(result.matches("+retained-evidence").count(), 4);
+        folder
     }
     #[test]
-    fn preserves_existing_vendor_edits_and_nonvendor_imports() {
-        let modified = "diff --git a/vendor/pkg/src/lib.rs b/vendor/pkg/src/lib.rs\n--- a/vendor/pkg/src/lib.rs\n+++ b/vendor/pkg/src/lib.rs\n@@ -1 +1 @@\n-old\n+security-fix\n";
-        let diff = format!("{modified}{}", added("src/vendor_feature.rs", "application"));
-        assert_eq!(summarize(&diff), diff);
+    fn existing_vendor_edits_and_literal_unicode_files_keep_their_contents() {
+        let folder = fixture(); let dir = folder.path();
+        std::fs::create_dir_all(dir.join("vendor/pkg/src")).unwrap();
+        std::fs::write(dir.join("vendor/pkg/src/lib.rs"), "original\n").unwrap();
+        assert!(crate::git::run(dir, &["add", "."]).ok);
+        assert!(crate::git::run(dir, &["commit", "-qm", "dependency"]).ok);
+        std::fs::write(dir.join("vendor/pkg/src/lib.rs"), "security fix\n").unwrap();
+        std::fs::write(dir.join("space café.txt"), "application content\n").unwrap();
+        assert!(crate::git::run(dir, &["add", "."]).ok);
+        let prompt = diff(dir, &["diff", "HEAD"]).unwrap();
+        assert!(prompt.contains("+security fix"));
+        assert!(prompt.contains("+application content"));
     }
     #[test]
-    fn handles_removed_nested_dependencies_and_quoted_unicode_paths() {
-        let diff = "diff --git a/libs/third_party/pkg/old.rs b/libs/third_party/pkg/old.rs\ndeleted file mode 100644\n--- a/libs/third_party/pkg/old.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n-old-source\n";
-        let result = summarize(diff);
-        assert!(!result.contains("-old-source"));
-        assert!(result.contains("removed, +0/-1 lines"));
-        assert_eq!(patch_path("+++ \"b/vendor/caf\\303\\251/a\\tfile.rs\""), Some("vendor/café/a\tfile.rs".into()));
+    fn removed_vendor_source_is_counted_and_untracked_text_is_read_without_staging() {
+        let folder = fixture(); let dir = folder.path();
+        std::fs::create_dir_all(dir.join("vendor/pkg/src")).unwrap();
+        std::fs::write(dir.join("vendor/pkg/src/lib.rs"), "old bulk source\n".repeat(1000)).unwrap();
+        assert!(crate::git::run(dir, &["add", "."]).ok);
+        assert!(crate::git::run(dir, &["commit", "-qm", "dependency"]).ok);
+        std::fs::remove_file(dir.join("vendor/pkg/src/lib.rs")).unwrap();
+        let prompt = diff(dir, &["diff", "HEAD"]).unwrap();
+        assert!(prompt.contains("removed, +0/-1000 lines"));
+        assert!(!prompt.contains("old bulk source"));
+        std::fs::write(dir.join("new-file.rs"), "new implementation\n").unwrap();
+        let status = crate::git::run(dir, &["status", "--porcelain"]).stdout;
+        assert!(untracked(dir).unwrap().contains("new implementation"));
+        assert_eq!(crate::git::run(dir, &["status", "--porcelain"]).stdout, status);
+    }
+}
+
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    #[test]
+    fn ordinary_new_files_are_excerpted_with_an_aggregate_bound() {
+        let folder=tempfile::tempdir().unwrap();let dir=folder.path();assert!(crate::git::run(dir,&["init","-q"]).ok);
+        let contents="x".repeat(1024*1024);
+        for index in 0..32 {std::fs::write(dir.join(format!("ordinary-{index:02}.txt")),&contents).unwrap();}
+        let result=untracked(dir).unwrap();assert!(result.len()<=CONTEXT_BUDGET);assert!(result.contains("excerpted or omitted"));assert!(result.contains("33554432"));
+        assert!(crate::git::run(dir,&["ls-files"]).stdout.is_empty());
+        assert!(crate::git::run(dir,&["add","."]).ok);
+        let result=diff(dir,&["diff","--cached"]).unwrap();assert!(result.len()<=CONTEXT_BUDGET);assert!(result.contains("budget reached"));
     }
 }

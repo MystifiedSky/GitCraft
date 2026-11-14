@@ -1,3 +1,6 @@
+import { signingOptions } from "@/lib/signing-keys";
+import { invoke } from "@tauri-apps/api/core";
+import { sameFolder } from "@/lib/agents";
 import { useQuery } from "@tanstack/react-query";
 import { CheckCircle2, CircleDashed, ExternalLink, AlertTriangle } from "lucide-react";
 import { useRef, useState } from "react";
@@ -84,10 +87,14 @@ function ServicePane({
       setBusy(null);
     }
   };
+  const selectedPublic = useQuery({ queryKey: ["sshPublicKey", set.sshPublicKey], queryFn: () => invoke<string>("read_ssh_public_key", { path: set.sshPublicKey }), enabled: !!set.sshPublicKey });
   const pubKey = () => {
     const keys = acc.data?.ssh_keys ?? [];
-    const chosen = set.sshPublicKey ? keys.find((k) => k.path.replace(/\\/g, "/").endsWith(set.sshPublicKey.replace(/\\/g, "/").split("/").pop() ?? "")) : undefined;
-    return chosen ?? keys.find((k) => /id_ed25519/.test(k.path)) ?? keys[0];
+    if (set.sshPublicKey) {
+      const chosen = keys.find(k => sameFolder(k.path.replace(/\.pub$/, ""), set.sshPublicKey.replace(/\.pub$/, "")));
+      return selectedPublic.data ? { path: set.sshPublicKey, public: selectedPublic.data } : chosen;
+    }
+    return keys.find(k => /id_ed25519/.test(k.path)) ?? keys[0];
   };
   return (
     <div>
@@ -193,6 +200,7 @@ export function SigningSection() {
   const save = async (k: string, v: string) => {
     await api.setGitConfig(null, "global", k, v);
     cfg.refetch();
+    await acc.refetch();
   };
   const ssh = c["gpg.format"] === "ssh";
   const program = c["gpg.program"] || "gpg";
@@ -211,7 +219,7 @@ export function SigningSection() {
             <Select
               value={c["user.signingkey"] ?? ""}
               onChange={(v) => save("user.signingkey", v)}
-              options={[["", "(none)"], ...(acc.data?.gpg_keys ?? []).map((k) => [k.id, `${k.id} - ${k.uid}`] as [string, string])]}
+              options={signingOptions(acc.data?.gpg_keys ?? [], c["user.signingkey"] ?? "")}
             />
             <Btn onClick={() => acc.refetch()}>Reload GPG keys</Btn>
           </Row>

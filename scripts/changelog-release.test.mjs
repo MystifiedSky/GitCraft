@@ -77,3 +77,14 @@ test('release versions are validated instead of interpreted as regular expressio
   const withNearbyVersion = current + '\n## [10.1.6] - 2026-11-13\n';
   assert.ok(recordRelease({ current: withNearbyVersion, shipped, version: '0.1.6', repo: 'o/r', date: '2026-11-14' }));
 });
+
+
+test('records all shipped notes when only some pending notes were reworded', () => {
+  const changed = shipped.replace('First feature.', 'First feature reworded.');
+  const result = recordRelease({ current: changed, shipped, version: '0.1.7', repo: 'o/r', date: '2026-11-14' });
+  const [pending, release] = result.split('## [0.1.7]');
+  assert.match(pending, /First feature reworded/);
+  assert.match(release, /First feature\./);
+  assert.match(release, /Second feature/);
+  assert.match(release, /A fix/);
+});

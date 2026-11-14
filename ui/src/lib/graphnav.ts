@@ -39,12 +39,12 @@ export function defaultSelection(commits: NavCommit[], headSha: string, hasWip: 
  * Rows marked while a label is hovered. A tag marks only its own commit; a branch marks its commit and the unlabelled commits
  * below it along the first parent, up to (not including) the next commit that has a label of its own.
  */
-export function hoverSegment(commits: NavCommit[], labelled: Set<string>, index: number, isTag: boolean): Set<number> {
+export function hoverSegment(commits: NavCommit[], labelled: Set<string>, index: number, isTag: boolean, positions?: ReadonlyMap<string, number>): Set<number> {
   const out = new Set<number>();
   if (index < 0 || index >= commits.length) return out;
   out.add(index);
   if (isTag) return out;
-  const position = new Map(commits.map((c, i) => [c.sha, i]));
+  const position = positions ?? new Map(commits.map((c, i) => [c.sha, i]));
   let i = index;
   for (;;) {
     const parent = commits[i].parents[0];

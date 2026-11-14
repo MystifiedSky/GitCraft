@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { conflictOutput, hasConflictMarkers, parseConflicts } from "./conflict";
+import { conflictOutput, hasConflictMarkers, parseConflicts, conflictRefsKey } from "./conflict";
 
 describe("conflict output safety", () => {
   const block = "<<<<<<< ours\ncurrent\n||||||| base\nancestor\n=======\nincoming\n>>>>>>> theirs";
@@ -49,4 +49,10 @@ describe("conflict output safety", () => {
     expect(conflictOutput(parseConflicts(text), {}, text)).toBe(block + "\n");
     expect(conflictOutput(parseConflicts(block), { 0: { a: [false], b: [false], touched: true } }, block)).toBe("");
   });
+});
+
+it("invalidates conflict warnings when a local target moves without HEAD or remote changes", () => {
+  const local = { name: "main", full: "refs/heads/main", sha: "old-target", kind: "Local" as const, upstream: "", ahead: 0, behind: 0 };
+  const original = { head_sha: "feature-tip", refs: [local] };
+  expect(conflictRefsKey(original)).not.toBe(conflictRefsKey({ ...original, refs: [{ ...local, sha: "new-target" }] }));
 });

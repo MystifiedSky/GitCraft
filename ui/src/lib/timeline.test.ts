@@ -35,3 +35,12 @@ describe("graph timeline", () => {
     expect(showsTimeline(3, true, true)).toBe(true);
   });
 });
+
+
+it("clamps month ends and leap days without rolling into another month", () => {
+  const march = buildTimeline(new Date(2026, 2, 31, 15));
+  expect(march.find(m => m.unit === "month" && m.value === 1)?.date).toBe(new Date(2026, 1, 28).getTime());
+  expect(march.find(m => m.unit === "month" && m.value === 2)?.date).toBe(new Date(2026, 0, 31).getTime());
+  const leap = buildTimeline(new Date(2024, 1, 29, 15));
+  expect(leap.find(m => m.unit === "year" && m.value === 1)?.date).toBe(new Date(2023, 1, 28).getTime());
+});

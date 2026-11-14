@@ -143,15 +143,26 @@ pub fn gitflow_finish(dir: &Path, kind: &str, name: &str, keep: bool, tag_messag
                 return err(format!("{b} branch is required to finish {kind}"));
             }
         }
-        let o = merge_into(&cfg.master);
-        if !o.ok {
-            return o;
-        }
         let tag = format!("{}{name}", cfg.versiontag);
-        let msg = if tag_message.trim().is_empty() { tag.clone() } else { tag_message.trim().to_string() };
-        let o = run(&["tag", "-a", &tag, "-m", &msg]);
-        if !o.ok {
-            return o;
+        let checkpoint = git::run(dir, &["rev-parse", "--git-path", "gitcraft-gitflow-finish.json"]).stdout.trim().to_owned();
+        let checkpoint = dir.join(checkpoint);
+        let existing = git::run(dir, &["rev-parse", "--verify", &format!("refs/tags/{tag}^{{commit}}")]);
+        if existing.ok {
+            let saved: serde_json::Value = std::fs::read_to_string(&checkpoint).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
+            let branch_sha = git::run(dir, &["rev-parse", &branch]).stdout.trim().to_owned();
+            if saved["branch"] != branch || saved["source"] != branch_sha || saved["tag"] != tag || saved["commit"] != existing.stdout.trim() {
+                return err(format!("Tag {tag} already exists and does not match this unfinished operation."));
+            }
+        } else {
+            let o = merge_into(&cfg.master);
+            if !o.ok { return o; }
+            let commit = git::run(dir, &["rev-parse", "HEAD"]).stdout.trim().to_owned();
+            let source = git::run(dir, &["rev-parse", &branch]).stdout.trim().to_owned();
+            let saved = serde_json::json!({ "branch": branch, "source": source, "tag": tag, "commit": commit });
+            if let Err(error) = std::fs::write(&checkpoint, saved.to_string()) { return err(error.to_string()); }
+            let msg = if tag_message.trim().is_empty() { tag.clone() } else { tag_message.trim().to_string() };
+            let o = run(&["tag", "-a", &tag, "-m", &msg]);
+            if !o.ok { return o; }
         }
         let o = merge_into(&cfg.develop);
         if !o.ok {
@@ -200,24 +211,11 @@ pub struct Remote {
 }
 
 pub fn remotes(dir: &Path) -> Vec<Remote> {
-    let mut out: Vec<Remote> = Vec::new();
-    for l in git::run(dir, &["remote", "-v"]).stdout.lines() {
-        let mut it = l.split_whitespace();
-        let (Some(name), Some(url), Some(kind)) = (it.next(), it.next(), it.next()) else { continue };
-        let r = match out.iter_mut().find(|r| r.name == name) {
-            Some(r) => r,
-            None => {
-                out.push(Remote { name: name.into(), fetch_url: String::new(), push_url: String::new() });
-                out.last_mut().unwrap()
-            }
-        };
-        if kind.contains("fetch") {
-            r.fetch_url = url.into();
-        } else {
-            r.push_url = url.into();
-        }
-    }
-    out
+    git::run(dir, &["remote"]).stdout.lines().map(|name| Remote {
+        name: name.into(),
+        fetch_url: git::run(dir, &["remote", "get-url", name]).stdout.trim_end_matches(['\r', '\n']).into(),
+        push_url: git::run(dir, &["remote", "get-url", "--push", name]).stdout.trim_end_matches(['\r', '\n']).into(),
+    }).collect()
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -230,23 +228,20 @@ pub struct Submodule {
 }
 
 pub fn submodules(dir: &Path) -> Vec<Submodule> {
-    git::run(dir, &["submodule", "status"])
-        .stdout
-        .lines()
-        .filter_map(|l| {
-            let state = match l.chars().next()? {
-                '-' => "uninitialized",
-                '+' => "out-of-sync",
-                'U' => "conflict",
-                _ => "in-sync",
-            };
-            let mut it = l[1..].split_whitespace();
-            let sha = it.next()?.to_string();
-            let path = it.next()?.to_string();
-            let url = git::run(dir, &["config", "--file", ".gitmodules", "--get", &format!("submodule.{path}.url")]).stdout.trim().to_string();
-            Some(Submodule { path, sha, state: state.into(), url })
-        })
-        .collect()
+    let config = git::run(dir, &["config", "--file", ".gitmodules", "-z", "--get-regexp", "^submodule\\..*\\.(path|url)$"]);
+    let mut modules: std::collections::BTreeMap<String, (String, String)> = Default::default();
+    for record in config.stdout.split('\0') {
+        let Some((key, value)) = record.split_once('\n') else { continue };
+        if let Some(name) = key.strip_prefix("submodule.").and_then(|k| k.strip_suffix(".path")) { modules.entry(name.into()).or_default().0 = value.into(); }
+        if let Some(name) = key.strip_prefix("submodule.").and_then(|k| k.strip_suffix(".url")) { modules.entry(name.into()).or_default().1 = value.into(); }
+    }
+    let status = git::run(dir, &["-c", "core.quotePath=false", "submodule", "status"]);
+    modules.into_values().filter(|(path, _)| !path.is_empty()).map(|(path, url)| {
+        let found = status.stdout.lines().find(|line| line.len() > 2 && line[1..].split_once(' ').is_some_and(|(_, rest)| rest == path || rest.strip_prefix(&path).is_some_and(|suffix| suffix.starts_with(" ("))));
+        let sha = found.and_then(|line| line[1..].split_once(' ')).map(|(sha, _)| sha.into()).unwrap_or_default();
+        let state = match found.and_then(|line| line.chars().next()) { Some('-') | None => "uninitialized", Some('+') => "out-of-sync", Some('U') => "conflict", _ => "in-sync" };
+        Submodule { path, url, sha, state: state.into() }
+    }).collect()
 }
 
 
@@ -273,26 +268,30 @@ pub fn lfs_info(dir: &Path) -> LfsInfo {
     if !v.ok {
         return LfsInfo::default();
     }
-    let gd = git::run(dir, &["rev-parse", "--absolute-git-dir"]).stdout.trim().to_string();
-    let enabled = std::fs::read_to_string(Path::new(&gd).join("hooks").join("pre-push")).map(|s| s.contains("git lfs")).unwrap_or(false);
+    let hook = git::run(dir, &["rev-parse", "--git-path", "hooks/pre-push"]).stdout.trim().to_string();
+    let enabled = std::fs::read_to_string(dir.join(hook)).map(|s| s.contains("git lfs")).unwrap_or(false);
     let patterns = std::fs::read_to_string(dir.join(".gitattributes"))
         .unwrap_or_default()
         .lines()
         .filter(|l| l.contains("filter=lfs"))
         .filter_map(|l| l.split_whitespace().next().map(|s| s.to_string()))
         .collect();
-    // Locks need a server that supports them; ask without failing if it doesn't.
+    LfsInfo { available: true, version: v.stdout.trim().to_string(), enabled, patterns, locks: vec![] }
+}
+
+pub fn lfs_locks(dir: &Path) -> Result<Vec<LfsLock>, String> {
     let locks = git::run(dir, &["lfs", "locks", "--json"]);
-    let locks = serde_json::from_str::<Vec<serde_json::Value>>(locks.stdout.trim())
-        .unwrap_or_default()
-        .iter()
+    if !locks.ok { return Err(locks.message()); }
+    let value: serde_json::Value = serde_json::from_str(locks.stdout.trim()).map_err(|e| e.to_string())?;
+    let rows = value.as_array().or_else(|| value["locks"].as_array()).cloned().unwrap_or_default();
+    let locks = rows.iter()
         .map(|l| LfsLock {
             id: l["id"].as_str().unwrap_or_default().to_string(),
             path: l["path"].as_str().unwrap_or_default().to_string(),
             owner: l["owner"]["name"].as_str().unwrap_or_default().to_string(),
         })
         .collect();
-    LfsInfo { available: true, version: v.stdout.trim().to_string(), enabled, patterns, locks }
+    Ok(locks)
 }
 
 /// Add a pattern to .gitignore unless it's already there.
@@ -360,6 +359,14 @@ pub struct InitOptions {
 
 /// Write the starting files and make the first commit if there are any.
 pub fn init_files(dir: &Path, name: &str, opts: &InitOptions, run: &dyn Fn(&[&str]) -> GitOut) -> GitOut {
+    if git::run(dir, &["rev-parse", "--verify", "HEAD"]).ok || std::fs::read_dir(dir).map(|items| items.filter_map(Result::ok).any(|e| e.file_name() != ".git")).unwrap_or(true) {
+        return err("Choose an empty folder for a new repository. Existing files were not changed.");
+    }
+    let mut generated = Vec::new();
+    let write_new = |name: &str, contents: String| -> Result<(), std::io::Error> {
+        use std::io::Write;
+        std::fs::OpenOptions::new().write(true).create_new(true).open(dir.join(name))?.write_all(contents.as_bytes())
+    };
     let mut wrote = false;
     let mut ignore = String::new();
     for t in &opts.gitignore {
@@ -368,23 +375,26 @@ pub fn init_files(dir: &Path, name: &str, opts: &InitOptions, run: &dyn Fn(&[&st
         }
     }
     if !ignore.is_empty() {
-        if let Err(e) = std::fs::write(dir.join(".gitignore"), ignore) {
+        if let Err(e) = write_new(".gitignore", ignore) {
             return err(e.to_string());
         }
+        generated.push(".gitignore");
         wrote = true;
     }
     if opts.license == "MIT" {
         let who = git::run(dir, &["config", "user.name"]).stdout.trim().to_string();
         let year: i32 = chrono::Local::now().format("%Y").to_string().parse().unwrap_or(2026);
-        if let Err(e) = std::fs::write(dir.join("LICENSE"), mit_license(year, if who.is_empty() { "the authors" } else { &who })) {
+        if let Err(e) = write_new("LICENSE", mit_license(year, if who.is_empty() { "the authors" } else { &who })) {
             return err(e.to_string());
         }
+        generated.push("LICENSE");
         wrote = true;
     }
     if opts.readme {
-        if let Err(e) = std::fs::write(dir.join("README.md"), format!("# {name}\n")) {
+        if let Err(e) = write_new("README.md", format!("# {name}\n")) {
             return err(e.to_string());
         }
+        generated.push("README.md");
         wrote = true;
     }
     if !wrote {
@@ -392,9 +402,21 @@ pub fn init_files(dir: &Path, name: &str, opts: &InitOptions, run: &dyn Fn(&[&st
         let _ = run(&["commit", "-q", "--allow-empty", "-m", "Initial commit"]);
         return ok();
     }
-    let o = run(&["add", "-A"]);
+    let mut args = vec!["add", "--"];
+    args.extend(generated);
+    let o = run(&args);
     if !o.ok {
         return o;
     }
     run(&["commit", "-q", "-m", "Initial commit"])
+}
+
+#[derive(Serialize)]
+pub struct InitOutcome { pub path: String, pub warning: Option<String> }
+pub fn initialize_lfs(dir: &Path, requested: bool, run: &dyn Fn(&[&str]) -> GitOut) -> InitOutcome {
+    let warning = if requested {
+        let result = run(&["lfs", "install", "--local"]);
+        (!result.ok).then(|| format!("Repository created, but Git LFS setup did not finish: {}. Check Git LFS installation and the existing pre-push hook, then retry Initialize LFS in repository preferences.", result.message()))
+    } else { None };
+    InitOutcome { path: dir.to_string_lossy().into_owned(), warning }
 }

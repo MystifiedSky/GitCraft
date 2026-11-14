@@ -181,8 +181,9 @@ function TermView({ cwd, run, agentEnv, visible, onReady, onExit }: { cwd: strin
     let runTimer: ReturnType<typeof setTimeout> | undefined;
     const earlyData: { id: number; data: string }[] = [];
     const earlyExits = new Set<number>();
+    const writeOutput = (id: number, data: string) => t.write(data, () => { void invoke("term_ack", { id, bytes: new TextEncoder().encode(data).length }).catch(() => undefined); });
     const unData = listen<{ id: number; data: string }>("term-data", (e) => {
-      if (e.payload.id === idRef.current) t.write(e.payload.data);
+      if (e.payload.id === idRef.current) writeOutput(e.payload.id, e.payload.data);
       else if (idRef.current === null && !disposed) earlyData.push(e.payload);
     });
     const unExit = listen<number>("term-exit", (e) => {
@@ -196,7 +197,7 @@ function TermView({ cwd, run, agentEnv, visible, onReady, onExit }: { cwd: strin
         const id = await invoke<number>("term_open", { cwd, cols: t.cols, rows: t.rows, shell: pref.termShell || null, agentEnv: agentEnv ?? null });
         if (disposed) return invoke("term_close", { id });
         idRef.current = id;
-        for (const event of earlyData) if (event.id === id) t.write(event.data);
+        for (const event of earlyData) if (event.id === id) writeOutput(id, event.data);
         earlyData.length = 0;
         cb.current.onReady(id);
         if (earlyExits.has(id)) return cb.current.onExit();
@@ -206,7 +207,7 @@ function TermView({ cwd, run, agentEnv, visible, onReady, onExit }: { cwd: strin
         }, 700);
       })
       .catch((e) => { if (!disposed) t.write(`\r\nCould not start a shell: ${e}\r\n`); });
-    const input = t.onData((d) => idRef.current && invoke("term_write", { id: idRef.current, data: d }));
+    const input = t.onData((d) => idRef.current && invoke("term_write", { id: idRef.current, data: d }).catch(error => t.writeln(`\r\nTerminal input was not sent: ${String(error)}`)));
     const resize = t.onResize(({ cols, rows }) => idRef.current && invoke("term_resize", { id: idRef.current, cols, rows }));
     const ro = new ResizeObserver(() => {
       try {

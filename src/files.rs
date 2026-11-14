@@ -53,6 +53,7 @@ fn preview_contents(dir: &Path, rev: &str, file: &str, limit: usize) -> Result<O
 
 #[derive(Serialize, Default)]
 pub struct FileVersions {
+    pub new_token: Option<String>,
     pub too_large: bool,
     pub preview_limit: usize,
     pub old: Option<String>,
@@ -130,12 +131,14 @@ pub fn versions(dir: &Path, src: &DiffSource, file: &str, parent: Option<&str>, 
 pub fn versions_with_limit(dir: &Path, src: &DiffSource, file: &str, parent: Option<&str>, untracked: bool, allow_large: bool) -> FileVersions {
     let limit = if allow_large { LARGE_PREVIEW_MAX } else { PREVIEW_MAX };
     let (old_rev, new_rev) = sides(src, parent);
-    let old = if untracked { Ok(None) } else { old_rev.as_deref().map(|r| preview_contents(dir, r, file, limit)).unwrap_or(Ok(None)) };
+    let original = if untracked { file.to_owned() } else { git::rename_source(dir, src, file, parent) };
+    let old = if untracked { Ok(None) } else { old_rev.as_deref().map(|r| preview_contents(dir, r, &original, limit)).unwrap_or(Ok(None)) };
     let new = preview_contents(dir, &new_rev, file, limit);
     let (Ok(old), Ok(new)) = (old, new) else {
         return FileVersions { too_large: true, preview_limit: limit, ..Default::default() };
     };
     let mut v = FileVersions { encoding: "UTF-8".into(), editable: new_rev == WORKDIR, ..Default::default() };
+    if new_rev == WORKDIR { v.new_token = Some(content_token(new.as_deref())); }
     if let Some(mime) = mime_of(file) {
         let enc = |b: &Vec<u8>| format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(b));
         v.old_image = old.as_ref().map(enc);
@@ -231,7 +234,18 @@ pub enum PatchOp {
 
 /// Stage, unstage or discard one hunk (or chosen lines of it). Returns the patch that was
 /// applied and how, so it can be undone.
+pub fn apply_part_checked(dir: &Path, file: &str, untracked: bool, op: PatchOp, hunk: usize, lines: Option<&[usize]>, expected: &[git::DiffLine]) -> Result<(String, bool, bool), String> {
+    let src = if op == PatchOp::Unstage { DiffSource::Staged } else { DiffSource::Unstaged };
+    if git::file_diff_opts(dir, &src, file, untracked, None, false) != expected {
+        return Err("The displayed diff has changed. Refresh it and select the change again.".into());
+    }
+    apply_part(dir, file, untracked, op, hunk, lines)
+}
+
 pub fn apply_part(dir: &Path, file: &str, untracked: bool, op: PatchOp, hunk: usize, lines: Option<&[usize]>) -> Result<(String, bool, bool), String> {
+    if untracked && std::fs::read(dir.join(file)).is_ok_and(|bytes| std::str::from_utf8(&bytes).is_err()) {
+        return Err("Partial staging requires UTF-8 text. Stage the whole file to preserve its original encoding.".into());
+    }
     if untracked {
         // Make the new file visible to `git diff` without staging its contents.
         let o = run(dir, &["add", "--intent-to-add", "--", file]);
@@ -240,7 +254,7 @@ pub fn apply_part(dir: &Path, file: &str, untracked: bool, op: PatchOp, hunk: us
         }
     }
     let src = if op == PatchOp::Unstage { DiffSource::Staged } else { DiffSource::Unstaged };
-    let diff = git::diff_text(dir, &src, file, None, false);
+    let diff = git::diff_text_checked(dir, &src, file, None, false)?;
     let reverse = op != PatchOp::Stage;
     let patch = partial_patch(&diff, hunk, lines, reverse).ok_or("That change is no longer there. The file changed; try again.")?;
     let cached = op != PatchOp::Discard;
@@ -349,21 +363,51 @@ pub fn apply_patch(dir: &Path, patch: &str, cached: bool, reverse: bool) -> Resu
     }
 }
 
-pub fn save(dir: &Path, file: &str, content: &str) -> Result<(), String> {
+/// Optimistic concurrency token for the exact bytes displayed by an editor.
+pub fn content_token(bytes: Option<&[u8]>) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hash);
+    format!("{:016x}", hash.finish())
+}
+
+pub fn save_checked(dir: &Path, file: &str, content: &str, expected: Option<&str>) -> Result<(), String> {
+    save_checked_mode(dir, file, content, expected, false)
+}
+
+pub fn save_checked_mode(dir: &Path, file: &str, content: &str, expected: Option<&str>, utf8: bool) -> Result<(), String> {
+    if let Some(expected) = expected {
+        let current = match std::fs::read(dir.join(file)) {
+            Ok(bytes) => Some(bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.to_string()),
+        };
+        if content_token(current.as_deref()) != expected {
+            return Err("The file changed outside this editor. Your draft was kept; reopen the file and compare before saving.".into());
+        }
+    }
+    save_mode(dir, file, content, utf8)
+}
+
+pub fn save(dir: &Path, file: &str, content: &str) -> Result<(), String> { save_mode(dir, file, content, false) }
+
+fn save_mode(dir: &Path, file: &str, content: &str, utf8: bool) -> Result<(), String> {
     let p = dir.join(file);
     // Keep the file's existing line endings.
     let before = std::fs::read(&p).unwrap_or_default();
-    let enc = crate::prefs::encoding_for(dir);
+    let enc = encoding_rs::Encoding::for_bom(&before).map(|(encoding, _)| encoding).or_else(|| crate::prefs::encoding_for(dir));
     let old_text = match enc {
         Some(e) => crate::prefs::decode(&before, e),
         None => String::from_utf8_lossy(&before).into_owned(),
     };
     let crlf = old_text.contains("\r\n");
     let text = if crlf { content.replace("\r\n", "\n").replace('\n', "\r\n") } else { content.to_string() };
-    let bytes = match enc {
-        Some(e) => crate::prefs::encode(&text, e, before.starts_with(&[0xFF, 0xFE]) || before.starts_with(&[0xFE, 0xFF])),
+    let bytes = if utf8 || before.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        [vec![0xEF, 0xBB, 0xBF], text.as_bytes().to_vec()].concat()
+    } else { match enc {
+        Some(e) => crate::prefs::encode(&text, e, before.starts_with(&[0xFF, 0xFE]) || before.starts_with(&[0xFE, 0xFF]))?,
         None => text.into_bytes(),
-    };
+    } };
     std::fs::write(p, bytes).map_err(|e| e.to_string())
 }
 
@@ -378,39 +422,30 @@ pub struct HistoryEntry {
 
 /// Commits that changed a file, newest first, following renames.
 pub fn history(dir: &Path, file: &str, max: usize) -> Vec<HistoryEntry> {
-    let n = format!("-n{max}");
-    let o = run(dir, &["log", "--follow", &n, "--name-status", "--format=%x1e%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%s%x1f%b%x1d", "--", file]);
-    let mut out = Vec::new();
-    for rec in o.stdout.split('\x1e').filter(|r| !r.trim().is_empty()) {
-        let (meta, files) = rec.split_once('\x1d').unwrap_or((rec, ""));
-        let f: Vec<&str> = meta.splitn(7, '\x1f').collect();
-        if f.len() < 7 {
-            continue;
+    let count = format!("-n{max}");
+    let output = run(dir, &["log", "--follow", "-M", &count, "--name-status", "-z", "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%s%x00%b%x00", "--", file]);
+    let fields: Vec<_> = output.stdout.split('\0').collect();
+    let mut position = 0; let mut entries = Vec::new();
+    while position < fields.len() {
+        while position < fields.len() && fields[position].trim_matches(['\r', '\n']).is_empty() { position += 1; }
+        if position + 7 > fields.len() { break; }
+        let Some(commit) = git::parse_commit_fields(&fields[position..position + 7]) else { break; };
+        position += 7;
+        let mut path = file.to_owned(); let mut status = 'M'; let mut found = false;
+        while position < fields.len() {
+            let token = fields[position].trim_start_matches(['\r', '\n']);
+            if token.is_empty() { position += 1; continue; }
+            let kind = token.chars().next().unwrap();
+            if !matches!(kind, 'A' | 'M' | 'D' | 'R' | 'C' | 'T' | 'U' | 'X' | 'B') || !token[1..].bytes().all(|byte| byte.is_ascii_digit()) { break; }
+            position += 1;
+            let names = if matches!(kind, 'R' | 'C') { 2 } else { 1 };
+            if position + names > fields.len() { break; }
+            if !found { path = fields[position + names - 1].into(); status = kind; found = true; }
+            position += names;
         }
-        let mut path = file.to_string();
-        let mut status = 'M';
-        if let Some(line) = files.lines().find(|l| !l.trim().is_empty()) {
-            let parts: Vec<&str> = line.split('\t').collect();
-            status = parts[0].chars().next().unwrap_or('M');
-            if let Some(p) = parts.last() {
-                path = p.to_string();
-            }
-        }
-        out.push(HistoryEntry {
-            commit: Commit {
-                sha: f[0].to_string(),
-                parents: f[1].split_whitespace().map(|s| s.to_string()).collect(),
-                author: f[2].to_string(),
-                email: f[3].to_string(),
-                time: f[4].parse().unwrap_or(0),
-                summary: f[5].to_string(),
-                body: f[6].trim().to_string(),
-            },
-            path,
-            status,
-        });
+        entries.push(HistoryEntry { commit, path, status });
     }
-    out
+    entries
 }
 
 #[derive(Serialize, Clone)]
@@ -458,7 +493,7 @@ pub fn blame(dir: &Path, file: &str, rev: Option<&str>) -> Result<Vec<BlameLine>
         } else {
             let mut it = l.split_whitespace();
             if let (Some(sha), Some(_orig), Some(fin)) = (it.next(), it.next(), it.next()) {
-                if sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()) {
+                if matches!(sha.len(), 40 | 64) && sha.chars().all(|c| c.is_ascii_hexdigit()) {
                     cur_sha = sha.to_string();
                     cur_line = fin.parse().unwrap_or(0);
                     if let Some((a, tm, s)) = info.get(&cur_sha) {
@@ -536,7 +571,7 @@ pub fn range_files(dir: &Path, from: &str, to: &str) -> Vec<FileChange> {
 
 /// Every tracked file (for the file history finder).
 pub fn tracked_files(dir: &Path) -> Vec<String> {
-    run(dir, &["ls-files"]).stdout.lines().map(|s| s.to_string()).collect()
+    run(dir, &["ls-files", "-z"]).stdout.split('\0').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect()
 }
 
 #[cfg(test)]

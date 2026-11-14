@@ -24,18 +24,13 @@ describe("all AI features share the selected connection", () => {
     ["ai_resolve_conflict", () => aiApi.resolveConflict("base", "ours", "theirs", "file")],
     ["ai_test_connection", () => aiApi.test()],
   ];
-  it.each(requests)("%s waits for the latest local connection settings", async (command, run) => {
+  it.each(requests)("%s carries the selected connection with the operation", async (command, run) => {
     const config = { ...DEFAULT_AI, provider: "custom" as const, endpoint: "http://localhost:1234/v1", defaultModel: "local-model", responseFormat: "text" as const };
     useStore.getState().setSettings({ ai: config });
-    let release!: () => void;
-    vi.mocked(invoke).mockImplementationOnce(() => new Promise<void>((resolve) => { release = resolve; }));
     vi.mocked(invoke).mockResolvedValueOnce("result");
-    const request = run();
+    await expect(run()).resolves.toBe("result");
     expect(invoke).toHaveBeenCalledTimes(1);
-    expect(invoke).toHaveBeenNthCalledWith(1, "set_ai_config", { config });
-    release();
-    await expect(request).resolves.toBe("result");
-    expect(vi.mocked(invoke).mock.calls[1][0]).toBe(command);
+    expect(invoke).toHaveBeenCalledWith(command, expect.objectContaining({ config }));
   });
 
   it("does not send a request if applying connection settings fails", async () => {
@@ -48,10 +43,9 @@ describe("all AI features share the selected connection", () => {
     const cliPath = "/example/bin/agent";
     const cliConfigDir = "/example/account";
     useStore.getState().setSettings({ ai: { ...DEFAULT_AI, provider, cliPath, cliConfigDir } });
-    vi.mocked(invoke).mockResolvedValueOnce(undefined).mockResolvedValueOnce(["Summarize changes", ""]);
+    vi.mocked(invoke).mockResolvedValueOnce(["Summarize changes", ""]);
     await expect(ai.commitMessage("/repo")).resolves.toEqual(["Summarize changes", ""]);
-    expect(invoke).toHaveBeenNthCalledWith(1, "set_ai_config", { config: expect.objectContaining({ provider, cliPath, cliConfigDir }) });
-    expect(invoke).toHaveBeenNthCalledWith(2, "ai_commit_message", { path: "/repo", sha: null });
+    expect(invoke).toHaveBeenCalledWith("ai_commit_message", { path: "/repo", sha: null, config: expect.objectContaining({ provider, cliPath, cliConfigDir }) });
   });
 });
 
@@ -79,4 +73,16 @@ it("preserves a commit message edited while AI generation was running", async ()
     expect(useStore.getState().drafts[path].summary).toBe("Keep my newer draft");
     expect(useStore.getState().dialog).toMatchObject({ kind: "choice", text: expect.stringContaining("Generated suggestion") });
   } finally { request.mockRestore(); useStore.setState({ dialog: null }); }
+});
+
+
+it("keeps concurrent operations bound to different connection snapshots", async () => {
+  const pending: (() => void)[] = [];
+  vi.mocked(invoke).mockImplementation((_command, args) => new Promise(resolve => pending.push(() => resolve((args as {config: {provider: string}}).config.provider))));
+  useStore.getState().setSettings({ ai: { ...DEFAULT_AI, provider: "codex" } });
+  const first = aiApi.test();
+  useStore.getState().setSettings({ ai: { ...DEFAULT_AI, provider: "claude_code" } });
+  const second = aiApi.test();
+  pending[1](); pending[0]();
+  await expect(first).resolves.toBe("codex"); await expect(second).resolves.toBe("claude_code");
 });

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_SETTINGS } from "./store";
 import { agentLaunch, sameFolder } from "./agents";
 import { workingChanges } from "./working-changes";
@@ -20,8 +20,10 @@ describe("agent launch and matching", () => {
   });
 
   it("quotes configured executables and passes config paths outside the shell command", () => {
+    vi.stubGlobal("navigator", { platform: "Win32" });
     const settings = { ...DEFAULT_SETTINGS, termShell: "powershell", ai: { ...DEFAULT_SETTINGS.ai, provider: "codex" as const, cliPath: "C:\\Program Files\\O'Brien\\codex.exe", cliConfigDir: "C:\\Agent Config" } };
     expect(agentLaunch(settings, "codex", "id")).toEqual({ command: "& 'C:\\Program Files\\O''Brien\\codex.exe' resume id", env: { CODEX_HOME: "C:\\Agent Config" } });
+    vi.unstubAllGlobals();
   });
 
   it("normalizes Windows separators, extended paths and case, preserving POSIX case", () => {
@@ -30,4 +32,15 @@ describe("agent launch and matching", () => {
     expect(sameFolder("/Projects/App", "/projects/app")).toBe(false);
     expect(sameFolder("C:/repo", "C:/repo-other")).toBe(false);
   });
+});
+
+
+it("uses POSIX quoting for fresh Linux and macOS settings", () => {
+  for (const platform of ["Linux x86_64", "MacIntel"]) {
+    vi.stubGlobal("navigator", { platform });
+    const settings = { ...DEFAULT_SETTINGS, ai: { ...DEFAULT_SETTINGS.ai, provider: "codex" as const, cliPath: "/opt/my agent/codex" } };
+    expect(agentLaunch(settings, "codex").command).toBe("'/opt/my agent/codex'");
+    expect(agentLaunch({ ...settings, termShell: "powershell" }, "codex").command).toBe("'/opt/my agent/codex'");
+  }
+  vi.unstubAllGlobals();
 });

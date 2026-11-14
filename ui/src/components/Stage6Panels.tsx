@@ -1,26 +1,23 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, Bot, CheckCircle2, ChevronDown, FileDown, FileUp, Folder, GitBranch, House, MoreVertical, Plug, Search, Plus } from "lucide-react";
 import { api, type RepoView } from "@/lib/api";
 import { ai, applyPatch, patchName, savePatch, type AgentSession } from "@/lib/ai";
 import { act, copy, openRepoPath } from "@/lib/repo";
-import { conflictTarget } from "@/lib/conflict";
+import { conflictTarget, conflictRefsKey } from "@/lib/conflict";
 import { runInTerminal } from "@/lib/terminal-launch";
 import { useStore } from "@/lib/store";
 import { cn, timeSince } from "@/lib/utils";
 import { CtxMenu, DropMenu } from "./ui/menu";
-import { AGENT_LABEL, AGENT_COMMAND, agentConnection, agentLaunch, sameFolder } from "@/lib/agents";
+import { AGENT_LABEL, AGENT_COMMAND, agentConnection, agentLaunch, sameFolder, folderKey } from "@/lib/agents";
 import { workingChanges } from "@/lib/working-changes";
-
-/** Key that changes whenever HEAD or any remote branch moves, so the check re-runs after commits and fetches. */
-const refsKey = (repo: RepoView) => repo.head_sha + repo.refs.filter((r) => r.kind === "Remote").map((r) => r.sha.slice(0, 8)).join("");
 
 export function useConflictCheck(repo: RepoView | undefined) {
   const global = useStore((s) => s.settings.conflictDetection !== false);
   const prefs = useStore((s) => (repo ? s.settings.repoPrefs[repo.path] : undefined));
   const target = repo ? conflictTarget(repo, prefs?.baseBranches ?? "", prefs?.excludedBranches ?? "", global && prefs?.conflictDetection !== false) : null;
   return useQuery({
-    queryKey: ["conflictCheck", repo?.path, repo ? refsKey(repo) : "", target],
+    queryKey: ["conflictCheck", repo?.path, repo ? conflictRefsKey(repo) : "", target],
     queryFn: () => ai.conflictCheck(repo!.path, target ?? undefined),
     enabled: !!repo && !!repo.head_branch && target !== null,
     staleTime: Infinity,
@@ -140,10 +137,18 @@ export function AgentsView({ repo, tabId }: { repo: RepoView | undefined; tabId:
     enabled: !!repo,
     refetchInterval: 10000,
   });
+  const grouped = useMemo(() => {
+    const groups = new Map<string, AgentSession[]>();
+    for (const session of q.data ?? []) {
+      const key = folderKey(session.path);
+      const group = groups.get(key) ?? [];
+      group.push(session); groups.set(key, group);
+    }
+    return groups;
+  }, [q.data]);
   if (!repo) return <Note>Open a repository to see its worktrees and saved coding sessions.</Note>;
   const agentName = AGENT_LABEL[settings.codingAgent];
-  const list = q.data ?? [];
-  const visible = worktrees.filter((w) => [w.path, w.branch, ...list.filter((a) => sameFolder(a.path, w.path)).map((a) => a.title)].join(" ").toLowerCase().includes(filter.toLowerCase()));
+  const visible = worktrees.filter((w) => [w.path, w.branch, ...(grouped.get(folderKey(w.path)) ?? []).map((a) => a.title)].join(" ").toLowerCase().includes(filter.toLowerCase()));
   const agentItems = Object.entries(AGENT_LABEL).map(([key, name]) => ({
     label: (settings.codingAgent === key ? "✓ " : "") + name,
     onSelect: () => setSettings({ codingAgent: key }),
@@ -167,7 +172,7 @@ export function AgentsView({ repo, tabId }: { repo: RepoView | undefined; tabId:
       </div>
       {q.isLoading && <div className="py-2 text-[12px] text-fg2">Finding saved sessions…</div>}
       {q.isError && <div className="py-2 text-[12px] text-bad">Could not read saved sessions. <button className="underline" onClick={() => q.refetch()}>Retry</button></div>}
-      {visible.map((w) => <AgentWorktree key={w.path} worktree={w} repo={repo} tabId={tabId} sessions={list.filter((a) => sameFolder(a.path, w.path))} />)}
+      {visible.map((w) => <AgentWorktree key={w.path} worktree={w} repo={repo} tabId={tabId} sessions={(grouped.get(folderKey(w.path)) ?? [])} />)}
       {visible.length === 0 && <div className="py-3 text-[12px] text-fg2">No matching worktrees or sessions.</div>}
       <div className="pt-2 text-[11px] text-fg3 leading-relaxed">
         Codex CLI and Claude Code session history

@@ -1,3 +1,4 @@
+import { RevisionGuard } from "@/lib/revision";
 import { aiApi } from "@/lib/integrations";
 import { Sparkles } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
@@ -25,6 +26,11 @@ export function ConflictView({ repo, tabId, file }: { repo: RepoView; tabId: str
   const [manual, setManual] = useState<string | null>(null);
   const [current, setCurrent] = useState(0);
   const [aiBusy, setAiBusy] = useState(false);
+  const guard = useRef(new RevisionGuard()).current;
+  const requestKey = `${repo.path}\0${file}\0${info?.working_token ?? ""}`;
+  guard.observe(requestKey);
+  const changeManual = (value: string | null) => { guard.invalidate(); setManual(value); };
+  useEffect(() => () => { guard.invalidate(); }, []);
   const panes = useRef<(HTMLDivElement | null)[]>([]);
   const crlf = !!info?.working?.includes("\r\n");
   useEffect(() => {
@@ -37,8 +43,9 @@ export function ConflictView({ repo, tabId, file }: { repo: RepoView; tabId: str
     const seg = segments[i] as Extract<Segment, { kind: "conflict" }>;
     return picks[i] ?? { a: seg.ours.map(() => false), b: seg.theirs.map(() => false), touched: false };
   };
-  const setPick = (i: number, p: Pick) => setPicks((old) => ({ ...old, [i]: { ...p, touched: true } }));
+  const setPick = (i: number, p: Pick) => { guard.invalidate(); setPicks((old) => ({ ...old, [i]: { ...p, touched: true } })); };
   const takeAll = (side: "a" | "b", on: boolean) => {
+    guard.invalidate();
     const next: Record<number, Pick> = { ...picks };
     for (const { i } of chunks) {
       const p = pickOf(i);
@@ -54,20 +61,22 @@ export function ConflictView({ repo, tabId, file }: { repo: RepoView; tabId: str
     : parseConflicts(output).filter((seg) => seg.kind === "conflict").length;
   const allDone = !hasConflictMarkers(output);
 
-  const save = async () => {
+  const save = async (utf8 = false) => {
     const normalized = output.replace(/\r\n/g, "\n");
     const text = crlf ? normalized.replace(/\n/g, "\r\n") : normalized;
     try {
       if (allDone) {
-        const ok = await act(repo.path, { type: "saveResolved", file, content: text });
+        const ok = await act(repo.path, { type: "saveResolved", file, content: text, expected: info?.working_token, utf8 });
         if (ok) s.setUi(tabId, { conflict: null });
       } else {
-        await api.saveFile(repo.path, file, text);
+        await api.saveFile(repo.path, file, text, info?.working_token, utf8);
         await refresh(repo.path);
         s.toast(true, `Saved ${file}; conflict markers remain to resolve`);
       }
     } catch (e) {
-      s.toast(false, String(e));
+      if (String(e).includes("ENCODING_UNREPRESENTABLE")) {
+        s.setDialog({ kind: "choice", title: "Save this file as UTF-8?", text: "The current encoding cannot preserve all characters. The original file is unchanged. Convert it to UTF-8 with a byte-order mark?", choices: [{ label: "Save as UTF-8", onSelect: () => { void save(true); } }] });
+      } else s.toast(false, String(e));
     }
   };
 
@@ -191,10 +200,15 @@ export function ConflictView({ repo, tabId, file }: { repo: RepoView; tabId: str
             disabled={aiBusy}
             title="Ask the AI (Preferences > AI) to merge both sides; check the result before saving"
             onClick={async () => {
+              const current = guard.capture();
               setAiBusy(true);
               try {
                 const merged = await aiApi.resolveConflict(info.base ?? "", info.ours ?? "", info.theirs ?? "", file);
-                setManual(merged.replace(/\r\n/g, "\n"));
+                if (!current()) {
+                  s.toast(false, "The conflict or your output changed. The outdated AI suggestion was not applied.");
+                  return;
+                }
+                changeManual(merged.replace(/\r\n/g, "\n"));
                 s.toast(true, "AI suggestion is in the Output - review it, then Save Output");
               } catch (e) {
                 s.toast(false, String(e));
@@ -206,21 +220,21 @@ export function ConflictView({ repo, tabId, file }: { repo: RepoView; tabId: str
             <Sparkles size={11} /> {aiBusy ? "Resolving…" : "Auto-resolve with AI"}
           </Button>
           {manual === null && (
-            <Button size="sm" className="h-[22px]" onClick={() => setManual(built)} title="Type in the output directly">
+            <Button size="sm" className="h-[22px]" onClick={() => changeManual(built)} title="Type in the output directly">
               <Pencil size={11} /> Edit
             </Button>
           )}
-          <Button size="sm" className="h-[22px]" onClick={() => (setPicks({}), setManual(null))}>
+          <Button size="sm" className="h-[22px]" onClick={() => (setPicks({}), changeManual(null))}>
             Reset
           </Button>
-          <Button size="sm" variant="success" className="h-[22px]" onClick={save}>
+          <Button size="sm" variant="success" className="h-[22px]" onClick={() => save()}>
             {allDone ? "Save Output" : "Create Conflict Chunks"}
           </Button>
         </div>
         {manual !== null ? (
           <textarea
             value={manual}
-            onChange={(e) => setManual(e.target.value)}
+            onChange={(e) => changeManual(e.target.value)}
             spellCheck={false}
             className="flex-1 bg-app mono text-[12px] leading-[19px] text-white/90 p-2 outline-none resize-none"
           />

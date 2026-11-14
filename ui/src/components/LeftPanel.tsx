@@ -1,3 +1,4 @@
+import { issueIdentity } from "@/lib/hosting";
 import {
   Archive,
   Bot,
@@ -23,7 +24,7 @@ import {
 import { useMemo, useRef, useState, type ReactNode } from "react";
 import type { GitRef, RepoView } from "@/lib/api";
 import { useStore, usePanelStore } from "@/lib/store";
-import { act, openRepoPath, setHiddenMany, toggleHidden } from "@/lib/repo";
+import { act, confirmThen, openRepoPath, setHiddenMany, toggleHidden } from "@/lib/repo";
 import type { MenuEntry } from "./ui/menu";
 import { openWebLink } from "@/lib/weblinks";
 import { useQuery } from "@tanstack/react-query";
@@ -246,7 +247,7 @@ export function LeftPanel({ repo, tabId, onSelectSha }: { repo: RepoView | undef
           <Section title="STASHES" icon={<Archive size={14} />} count={stashes.length} open={isOpen("stashes")} onToggle={() => toggle("stashes")}>
             {stashes.map((st) => (
               <CtxMenu key={st.sha} items={() => (repo ? stashMenu(repo, st) : [])}>
-                <Row indent={1} title={st.message} onDoubleClick={() => repo && act(repo.path, { type: "stashApply", index: st.index })}>
+                <Row indent={1} title={st.message} onClick={() => s.setUi(tabId, { selection: { type: "commit", sha: st.sha }, diff: null, multi: [], history: null, conflict: null, pr: null, issue: null, rebase: null, compareWorkdir: null })} onDoubleClick={() => repo && act(repo.path, { type: "stashApply", index: st.index, expected: st.sha })}>
                   <Archive size={13} className="opacity-60" />
                   <span className="truncate">{st.message}</span>
                 </Row>
@@ -515,7 +516,7 @@ function Submodules({ repo }: { repo: RepoView }) {
             { label: `Open submodule: ${m.path}`, disabled: m.state === "uninitialized", onSelect: () => openRepoPath(joinSub(repo.path, m.path)) },
             { label: m.state === "uninitialized" ? `Initialize ${m.path}` : `Update ${m.path}`, onSelect: () => act(repo.path, { type: "submoduleUpdate", paths: [m.path] }) },
             { separator: true },
-            { label: "Delete this submodule", danger: true, onSelect: () => act(repo.path, { type: "submoduleRemove", path: m.path }) },
+            { label: "Delete this submodule", danger: true, onSelect: () => confirmThen("Remove this submodule?", `Remove ${m.path}? Local changes must be committed, stashed, or backed up first.`, "Remove", () => act(repo.path, { type: "submoduleRemove", path: m.path })) },
           ]}
         >
           <Row indent={1} title={`${m.url}\n${SUB_STATE[m.state]?.[1] ?? ""}`} onDoubleClick={() => m.state !== "uninitialized" && openRepoPath(joinSub(repo.path, m.path))}>
@@ -578,7 +579,8 @@ function GitflowSection({ repo, open, onToggle }: { repo: RepoView; open: boolea
 
 /** LFS: tracked patterns and locked files. */
 function LfsSection({ repo, open, onToggle }: { repo: RepoView; open: boolean; onToggle: () => void }) {
-  const q = useQuery({ queryKey: ["lfs", repo.path, JSON.stringify(repo.status)], queryFn: () => api.lfsInfo(repo.path), staleTime: 30_000 });
+  const q = useQuery({ queryKey: ["lfsInfo", repo.path], queryFn: () => api.lfsInfo(repo.path), staleTime: 30_000 });
+  const locks = useQuery({ queryKey: ["lfsLocks", repo.path], queryFn: () => api.lfsLocks(repo.path), enabled: open && !!q.data?.available, staleTime: 30_000 });
   const lfs = q.data;
   if (!lfs?.available || (!lfs.enabled && lfs.patterns.length === 0)) return null;
   return (
@@ -591,7 +593,7 @@ function LfsSection({ repo, open, onToggle }: { repo: RepoView; open: boolean; o
           </Row>
         </CtxMenu>
       ))}
-      {lfs.locks.map((l) => (
+      {(locks.data ?? []).map((l) => (
         <CtxMenu
           key={l.id}
           items={[
@@ -616,8 +618,8 @@ function HostedLists({ repo, tabId, prsOpen, issuesOpen, toggle }: { repo: RepoV
   const s = usePanelStore();
   const remote = useQuery({ queryKey: ["remote", repo.path, repo.remotes.join()], queryFn: () => hosting.remote(repo.path), staleTime: Infinity });
   const on = !!remote.data;
-  const prs = useQuery({ queryKey: ["prs", repo.path], queryFn: () => hosting.prs(repo.path), enabled: on && prsOpen, staleTime: 60_000 });
-  const issues = useQuery({ queryKey: ["issues", repo.path], queryFn: () => hosting.issues(repo.path), enabled: on && issuesOpen, staleTime: 60_000 });
+  const prs = useQuery({ queryKey: ["prs", repo.path, remote.data?.web], queryFn: () => hosting.prs(repo.path), enabled: on && prsOpen, staleTime: 60_000 });
+  const issues = useQuery({ queryKey: ["issues", repo.path, remote.data?.web], queryFn: () => hosting.issues(repo.path), enabled: on && issuesOpen, staleTime: 60_000 });
   const service = remote.data?.provider === "gitlab" ? "GitLab" : "GitHub";
   const note = (q: { isLoading: boolean; isError: boolean; error: unknown }) =>
     !on ? (
@@ -668,14 +670,14 @@ function HostedLists({ repo, tabId, prsOpen, issuesOpen, toggle }: { repo: RepoV
         {note(issues)}
         {issues.data?.map((i) => (
           <CtxMenu
-            key={i.number}
+            key={issueIdentity(i)}
             items={[
-              { label: "View issue", onSelect: () => s.setUi(tabId, { issue: i.number, pr: null }) },
+              { label: "View issue", onSelect: () => s.setUi(tabId, { issue: issueIdentity(i), pr: null }) },
               { label: "Create branch for this issue", onSelect: () => branchFromIssue(repo.path, i) },
               { label: `View issue in ${service}`, onSelect: () => hosting.openUrl(i.url) },
             ]}
           >
-            <Row indent={1} title={i.labels.join(", ")} onClick={() => s.setUi(tabId, { issue: i.number, pr: null, diff: null, history: null })}>
+            <Row indent={1} title={i.labels.join(", ")} onClick={() => s.setUi(tabId, { issue: issueIdentity(i), pr: null, diff: null, history: null })}>
               <CircleDot size={13} className="text-good" />
               <span className="text-fg3 text-[11.5px]">{i.key || `#${i.number}`}</span>
               <span className="truncate flex-1">{i.title}</span>

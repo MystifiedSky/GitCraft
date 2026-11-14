@@ -14,6 +14,9 @@ concurrency:
   queue: max
 
 jobs:
+  tests:
+    uses: ./.github/workflows/test.yml
+
   version:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
@@ -45,7 +48,7 @@ jobs:
           echo "number=$number" >> "$GITHUB_OUTPUT"
 
   build:
-    needs: version
+    needs: [version, tests]
     strategy:
       fail-fast: false
       matrix:
@@ -145,7 +148,7 @@ jobs:
           overwrite: true
 
   publish:
-    needs: [version, build]
+    needs: [version, build, tests]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

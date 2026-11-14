@@ -106,7 +106,7 @@ mod win {
     }
 
     /// Show an item in its folder (runs on a COM worker thread).
-    pub fn open_folder_and_select(folder: &Path, file: &Path) -> Result<(), String> {
+    pub fn open_folder_and_select(_folder: &Path, file: &Path) -> Result<(), String> {
         // SAFETY: plain COM calls on this thread; every item list is freed and COM is closed if it was opened here.
         unsafe {
             let com = CoInitializeEx(std::ptr::null(), (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as _);
@@ -116,18 +116,16 @@ mod win {
                 let hr = SHParseDisplayName(w.as_ptr(), std::ptr::null_mut(), &mut pidl, 0, std::ptr::null_mut());
                 if hr >= 0 { Some(pidl) } else { None }
             };
-            let dir = parse(folder);
             let item = parse(file);
-            let result = match (dir, item) {
-                (Some(d), Some(i)) => {
-                    let items = [i as *const ITEMIDLIST];
-                    if SHOpenFolderAndSelectItems(d, 1, items.as_ptr(), 0) >= 0 { Ok(()) } else { Err(OPEN_PATH_FAILED.to_string()) }
+            let result = match item {
+                Some(item) => {
+                    // The single-item form accepts an absolute PIDL and selects it in its parent.
+                    let result = if SHOpenFolderAndSelectItems(item, 0, std::ptr::null(), 0) >= 0 { Ok(()) } else { Err(OPEN_PATH_FAILED.to_string()) };
+                    CoTaskMemFree(item as *const _);
+                    result
                 }
-                _ => Err(OPEN_PATH_FAILED.to_string()),
+                None => Err(OPEN_PATH_FAILED.to_string()),
             };
-            for p in [dir, item].into_iter().flatten() {
-                CoTaskMemFree(p as *const _);
-            }
             if com >= 0 {
                 CoUninitialize();
             }

@@ -6,15 +6,21 @@ use crate::git::{self, GitOut};
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
-use std::process::{Child, Stdio};
-use std::sync::{Arc, Mutex};
+use std::process::Stdio;
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}, mpsc};
+use std::time::{Duration, Instant};
 
 pub type Listener = Arc<dyn Fn(&str, &str, Option<u32>) + Send + Sync>;
 
 #[derive(Default)]
 pub struct Jobs {
-    running: Mutex<HashMap<String, Arc<Mutex<Child>>>>,
+    running: Mutex<HashMap<String, Arc<Running>>>,
     listener: Mutex<Option<Listener>>,
+}
+
+struct Running {
+    tree: crate::process_tree::ProcessTree,
+    cancelled: AtomicBool,
 }
 
 /// The percentage at the end of a git progress line, if any ("...  45% (450/1000)").
@@ -81,39 +87,56 @@ impl Jobs {
     /// Runs git, reporting each progress line as (job id, text, percent). Can be cancelled by id.
     pub fn run(&self, id: &str, dir: &Path, args: &[&str]) -> GitOut {
         let mut cmd = git::git_cmd(dir);
+        crate::process_tree::prepare(&mut cmd);
         cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => return GitOut { ok: false, stdout: String::new(), stderr: format!("Could not start git: {e}") },
         };
+        let tree = match crate::process_tree::ProcessTree::attach(&child) {
+            Ok(tree) => tree,
+            Err(error) => { let _ = child.kill(); let _ = child.wait(); return GitOut::failed(&format!("Could not create a cancellable Git job: {error}")); }
+        };
+        let running = Arc::new(Running { tree, cancelled: AtomicBool::new(false) });
+        self.running.lock().unwrap().insert(id.to_string(), running.clone());
         let mut err_pipe = child.stderr.take().expect("stderr");
         let mut out_pipe = child.stdout.take().expect("stdout");
-        let child = Arc::new(Mutex::new(child));
-        self.running.lock().unwrap().insert(id.to_string(), child.clone());
-        let out_thread = std::thread::spawn(move || {
-            let mut s = String::new();
-            let _ = out_pipe.read_to_string(&mut s);
-            s
+        let (out_tx, out_rx) = mpsc::channel();
+        std::thread::spawn(move || { let mut text = String::new(); let _ = out_pipe.read_to_string(&mut text); let _ = out_tx.send(text); });
+        let (err_tx, err_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut bytes = [0; 1024];
+            loop { match err_pipe.read(&mut bytes) { Ok(0) | Err(_) => break, Ok(n) => if err_tx.send(bytes[..n].to_vec()).is_err() { break; } } }
         });
         let listener = self.listener.lock().unwrap().clone();
         let mut output = ProgressOutput::default();
-        let mut buf = [0u8; 1024];
+        let mut cancelled_at = None;
         loop {
-            let n = match err_pipe.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => n,
-            };
-            for text in output.push(&buf[..n]) {
-                if let Some(l) = &listener {
-                    l(id, &text, percent(&text));
-                }
+            if running.cancelled.load(Ordering::Acquire) {
+                let at = cancelled_at.get_or_insert_with(Instant::now);
+                if at.elapsed() > Duration::from_secs(2) { break; }
+            }
+            match err_rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(bytes) => for text in output.push(&bytes) { if let Some(listener) = &listener { listener(id, &text, percent(&text)); } },
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {},
             }
         }
-        let stderr = output.finish();
-        let status = child.lock().unwrap().wait();
+        let mut stderr = output.finish();
+        let status = loop {
+            if running.cancelled.load(Ordering::Acquire) { cancelled_at.get_or_insert_with(Instant::now); }
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if cancelled_at.is_none() => std::thread::sleep(Duration::from_millis(20)),
+                Ok(None) if cancelled_at.unwrap().elapsed() < Duration::from_secs(2) => std::thread::sleep(Duration::from_millis(20)),
+                _ => { let _ = child.kill(); break None; },
+            }
+        };
         self.running.lock().unwrap().remove(id);
-        let stdout = out_thread.join().unwrap_or_default();
-        let ok = status.map(|s| s.success()).unwrap_or(false);
+        let stdout = out_rx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
+        let cancelled = running.cancelled.load(Ordering::Acquire);
+        if cancelled { stderr = "Cancelled".into(); }
+        let ok = !cancelled && status.is_some_and(|status| status.success());
         if let Some(l) = &listener {
             l(id, "", None); // finished
         }
@@ -124,7 +147,7 @@ impl Jobs {
     pub fn cancel(&self, id: &str) -> bool {
         let job = self.running.lock().unwrap().get(id).cloned();
         match job {
-            Some(c) => c.lock().map(|mut c| c.kill().is_ok()).unwrap_or(false),
+            Some(job) => { job.cancelled.store(true, Ordering::Release); job.tree.kill() },
             None => false,
         }
     }

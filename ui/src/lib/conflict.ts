@@ -1,5 +1,8 @@
 import type { RepoView } from "./api";
 
+/** Include full local and remote target identities in conflict cache invalidation. */
+export const conflictRefsKey = (repo: Pick<RepoView, "head_sha" | "refs">) => JSON.stringify([repo.head_sha, repo.refs.map((r) => [r.full, r.sha]).sort((a, b) => a[0].localeCompare(b[0]))]);
+
 /** "origin/**", "origin/feature/**", "!origin/abc" (Conflict Prevention > Base branches). */
 export function globMatch(pattern: string, name: string) {
   const re = pattern

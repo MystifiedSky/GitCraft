@@ -145,13 +145,14 @@ export function GraphView({ repo, tabId }: Props) {
   // Rows that belong to a hovered label. A tag marks only its own commit; a branch marks its commit and the unlabelled
   // commits below it (its first-parent chain) up to the next commit that carries a label of its own.
   // The other rows are dimmed (see CommitRow), so nothing is tinted.
+  const labelled = useMemo(() => new Set(refsBySha.keys()), [refsBySha]);
   const highlighted = useMemo(() => {
     const set = new Set<number>();
     // UI Customization > Highlight associated rows when hovering over a branch.
     if (hoverRef === null || useStore.getState().settings.highlightRowsOnHover === false) return set;
-    const labelled = new Set(refsBySha.keys());
+
     const isTag = (refsBySha.get(repo.commits[hoverRef]?.sha ?? "") ?? [])[0]?.kind === "Tag";
-    return hoverSegment(repo.commits, labelled, hoverRef, isTag);
+    return hoverSegment(repo.commits, labelled, hoverRef, isTag, commitIndex);
   }, [hoverRef, repo.commits, refsBySha]);
   const hoverActive = hoverRef !== null && highlighted.size > 0;
 
@@ -221,6 +222,7 @@ export function GraphView({ repo, tabId }: Props) {
     else if (top + ROW > el.scrollTop + el.clientHeight) el.scrollTop = top + ROW - el.clientHeight;
   }, [selIdx]);
 
+  const visibleCommitIds = repo.commits.slice(Math.max(0, first - off), Math.max(0, last - off + 1)).map((c) => c.sha).join("\0");
   // CHANGES column: counts for the visible commits, fetched in small batches and kept.
   const [stats, setStats] = useState<Map<string, Stats>>(new Map());
   useEffect(() => {
@@ -241,7 +243,7 @@ export function GraphView({ repo, tabId }: Props) {
       ).catch(() => undefined);
     }, 80);
     return () => clearTimeout(t);
-  }, [first, last, extras.join(), repo.path]);
+  }, [first, last, extras.join(), repo.path, visibleCommitIds]);
 
   // Draw the visible part of the graph on the canvas.
   useLayoutEffect(() => {
@@ -752,6 +754,10 @@ function ChangesBar({ stats }: { stats: Stats | undefined }) {
 function StateBanner({ repo }: { repo: RepoView }) {
   const merging = repo.state_note === "merging";
   const rebasing = repo.state_note === "rebasing";
+  const sequencer = ({ "cherry-picking": "cherry-pick", reverting: "revert", "applying-mailbox": "am" } as Record<string, string>)[repo.state_note ?? ""];
+  const recovery = (command: "continue" | "skip" | "abort") => sequencer
+    ? act(repo.path, { type: "sequencer", operation: sequencer, command })
+    : act(repo.path, { type: command === "continue" ? "continueRebase" : command === "skip" ? "skipRebase" : "abortRebase" });
   return (
     <div className="flex items-center gap-2 px-3 h-[34px] bg-warn/25 border-b border-warn/50 text-[12.5px] shrink-0">
       <span className="flex-1 truncate">
@@ -768,18 +774,18 @@ function StateBanner({ repo }: { repo: RepoView }) {
               : `${repo.state_note} in progress`}
         {repo.status.conflicted ? " — merge conflicts detected" : ""}
       </span>
-      {rebasing && (
-        <Button size="sm" onClick={() => act(repo.path, { type: "skipRebase" })}>
+      {(rebasing || sequencer) && (
+        <Button size="sm" onClick={() => recovery("skip")}>
           Skip Commit
         </Button>
       )}
-      {rebasing && (
-        <Button size="sm" variant="success" onClick={() => act(repo.path, { type: "continueRebase" })}>
-          Continue Rebase
+      {(rebasing || sequencer) && (
+        <Button size="sm" variant="success" onClick={() => recovery("continue")}>
+          Continue {sequencer ?? "Rebase"}
         </Button>
       )}
-      <Button size="sm" variant="danger" onClick={() => act(repo.path, merging ? { type: "abortMerge" } : { type: "abortRebase" })}>
-        {merging ? "Abort Merge" : "Abort Rebase"}
+      <Button size="sm" variant="danger" onClick={() => merging ? act(repo.path, { type: "abortMerge" }) : recovery("abort")}>
+        {merging ? "Abort Merge" : `Abort ${sequencer ?? "Rebase"}`}
       </Button>
     </div>
   );

@@ -81,18 +81,16 @@ export function recordRelease({ current, shipped, version, repo, date }) {
 
   const { head, body, tail } = splitUnreleased(text);
   const remaining = parseEntries(body);
-  const moved = {};
   for (const [category, list] of Object.entries(shippedEntries)) {
     for (const entry of list) {
       const at = remaining[category]?.indexOf(entry) ?? -1;
       if (at >= 0) {
         remaining[category].splice(at, 1);
-        (moved[category] ??= []).push(entry);
       }
     }
   }
   // The shipped entries are the record of the release even if a later commit reworded one of them in Unreleased.
-  const section = isEmpty(moved) ? shippedEntries : moved;
+  const section = shippedEntries;
 
   const unreleased = isEmpty(remaining) ? '\n' : `\n${renderEntries(remaining)}\n`;
   let tailText = tail;

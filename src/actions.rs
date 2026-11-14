@@ -43,6 +43,7 @@ pub enum Action {
     },
     Checkout { target: String },
     CheckoutRemote { remote_branch: String },
+    CheckoutPullRequest { url: String, reference: String, expected: String },
     CreateBranch { name: String, at: Option<String>, checkout: bool },
     DeleteBranch { name: String },
     DeleteRemoteBranch { remote_branch: String },
@@ -59,20 +60,21 @@ pub enum Action {
     /// Push the selected local branch without changing the checked-out branch.
     PushBranch { branch: String },
     Stash { message: String },
-    StashPop { index: usize },
-    StashApply { index: usize },
-    StashDrop { index: usize },
+    StashPop { index: usize, expected: Option<String> },
+    StashApply { index: usize, expected: Option<String> },
+    StashDrop { index: usize, expected: Option<String> },
     CherryPick { sha: String, #[serde(default)] mainline: Option<usize> },
     Revert { sha: String, #[serde(default)] mainline: Option<usize> },
     Reset { sha: String, mode: String },
     Merge { branch: String },
     Rebase { onto: String },
     AbortMerge,
+    Sequencer { operation: String, command: String },
     AbortRebase,
     ContinueRebase,
     SkipRebase,
     /// Interactive rebase onto `base` ("--root" for the whole history) with our own todo list.
-    InteractiveRebase { base: String, items: Vec<crate::rewrite::TodoItem> },
+    InteractiveRebase { base: String, items: Vec<crate::rewrite::TodoItem>, expected: crate::rewrite::PlanState },
     /// Interactive cherry pick of the listed commits onto HEAD.
     InteractiveCherryPick { items: Vec<crate::rewrite::TodoItem> },
     /// Conflicts: take "ours" (current) or "theirs" (incoming) for whole files.
@@ -80,10 +82,10 @@ pub enum Action {
     MarkResolved { paths: Vec<String> },
     MarkConflicted { paths: Vec<String> },
     /// Write the merge tool's output and mark the file resolved.
-    SaveResolved { file: String, content: String },
+    SaveResolved { file: String, content: String, expected: Option<String>, utf8: Option<bool> },
     FastForward { branch: String, to: String },
     SetUpstream { branch: String, upstream: String },
-    StashRename { index: usize, message: String },
+    StashRename { index: usize, expected: Option<String>, message: String },
     /// Background fetch of every remote (auto-fetch), optionally pruning.
     AutoFetch { prune: bool },
     FetchRemote { remote: String },
@@ -107,7 +109,7 @@ pub enum Action {
     /// "Stash this file" / "Stash N files": stash only the chosen files.
     StashFiles { paths: Vec<String>, message: String },
     /// "Cherry pick file from stash": copy one file's stashed version into the working folder.
-    StashTakeFile { index: usize, path: String },
+    StashTakeFile { index: usize, expected: Option<String>, path: String },
     /// "Revert this hunk": undo one hunk (or chosen lines) of a commit in the working folder.
     RevertHunk { sha: String, parent: Option<String>, file: String, hunk: usize, lines: Option<Vec<usize>> },
     /// Squash merge: bring a branch's changes in as staged changes, to commit as one commit.
@@ -128,7 +130,7 @@ pub enum Action {
     GitflowFinish { kind: String, name: String, keep: bool, tag_message: String },
     AddRemote { name: String, url: String },
     /// Stage, unstage or discard one hunk, or some lines of it.
-    Patch { file: String, untracked: bool, op: crate::files::PatchOp, hunk: usize, lines: Option<Vec<usize>> },
+    Patch { file: String, untracked: bool, op: crate::files::PatchOp, hunk: usize, lines: Option<Vec<usize>>, expected: Vec<git::DiffLine> },
     CherryPickMany { shas: Vec<String> },
     Undo,
     Redo,
@@ -150,13 +152,14 @@ pub struct ActionResult {
 #[derive(Debug, Clone)]
 enum UndoRec {
     Commit { before: String, after: String, label: String, branch: String },
+    InitialCommit { after: String, branch: String, label: String },
     Checkout { from: String, to: String },
     CreateBranch { name: String, sha: String },
     DeleteBranch { name: String, sha: String },
     Reset { before: String, after: String, mode: String, branch: String },
     CreateTag { name: String, sha: String },
     DeleteTag { name: String, sha: String },
-    Discard { stash: String },
+    Discard { stash: String, paths: Option<Vec<String>>, redo_state: Option<String> },
     Patch { patch: String, cached: bool, reverse: bool, label: String },
     /// History rewritten (rebase, cherry pick, fast-forward): move the branch back with reset --keep.
     Rewrite { before: String, after: String, label: String, branch: String },
@@ -165,7 +168,7 @@ enum UndoRec {
 impl UndoRec {
     fn label(&self) -> String {
         match self {
-            UndoRec::Commit { label, .. } => label.clone(),
+            UndoRec::Commit { label, .. } | UndoRec::InitialCommit { label, .. } => label.clone(),
             UndoRec::Checkout { to, .. } => format!("checkout {to}"),
             UndoRec::CreateBranch { name, .. } => format!("create branch {name}"),
             UndoRec::DeleteBranch { name, .. } => format!("delete branch {name}"),
@@ -188,6 +191,7 @@ struct Stacks {
 #[derive(Default)]
 pub struct Engine {
     log: Mutex<Vec<LogEntry>>,
+    log_version: std::sync::atomic::AtomicU64,
     stacks: Mutex<HashMap<String, Stacks>>,
     /// Long network jobs with progress and Cancel (clone, fetch, pull, push).
     pub jobs: crate::jobs::Jobs,
@@ -223,6 +227,12 @@ impl Engine {
         self.log.lock().unwrap().clone()
     }
 
+    pub fn log_snapshot(&self, version: Option<u64>) -> Option<(u64, Vec<LogEntry>)> {
+        let log = self.log.lock().unwrap();
+        let current = self.log_version.load(std::sync::atomic::Ordering::Relaxed);
+        if version == Some(current) { None } else { Some((current, log.clone())) }
+    }
+
     pub fn undo_info(&self, repo: &str) -> UndoInfo {
         let s = self.stacks.lock().unwrap();
         match s.get(repo) {
@@ -255,6 +265,7 @@ impl Engine {
         };
         let mut l = self.log.lock().unwrap();
         l.push(entry);
+        self.log_version.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if l.len() > 500 {
             l.remove(0);
         }
@@ -271,6 +282,7 @@ impl Engine {
 
     fn record(&self, command: &str, o: &git::GitOut) {
         let mut l = self.log.lock().unwrap();
+        self.log_version.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         l.push(LogEntry { time: chrono::Local::now().format("%H:%M:%S").to_string(), command: command.to_string(), ok: o.ok, output: log_output(o) });
     }
 
@@ -324,8 +336,10 @@ impl Engine {
         ActionResult { ok: out.ok, message: if out.ok { if revert { "Reverted commit" } else { "Cherry picked commit" }.into() } else { out.message() } }
     }
 
-    pub fn perform(&self, repo: &str, action: Action) -> ActionResult {
+    pub fn perform(&self, repo: &str, mut action: Action) -> ActionResult {
         let dir = Path::new(repo);
+        let operation = crate::operation::lock_for(dir);
+        let _guard = operation.lock().unwrap_or_else(|e| e.into_inner());
         let done = |o: git::GitOut, msg: &str| -> ActionResult {
             if o.ok {
                 ActionResult { ok: true, message: msg.to_string() }
@@ -333,6 +347,21 @@ impl Engine {
                 ActionResult { ok: false, message: o.message() }
             }
         };
+        match &mut action {
+            Action::StashPop { index, expected } | Action::StashApply { index, expected } | Action::StashDrop { index, expected }
+                | Action::StashRename { index, expected, .. } | Action::StashTakeFile { index, expected, .. } => {
+                if let Some(expected) = expected {
+                    let list = self.git(dir, &["stash", "list", "--format=%H"]);
+                    let Some(current) = list.stdout.lines().position(|sha| sha == expected) else {
+                        return done(git::GitOut::failed("The selected stash no longer exists. Refresh the stash list and try again."), "");
+                    };
+                    *index = current;
+                }
+            },
+            _ => {},
+        }
+        if matches!(&action, Action::Merge { .. } | Action::MergeSquash { .. } | Action::Rebase { .. } | Action::CherryPick { .. } | Action::CherryPickMany { .. } | Action::InteractiveRebase { .. }) { crate::prefs::begin_orig_cleanup(dir); }
+        if matches!(&action, Action::AbortMerge | Action::AbortRebase) { crate::prefs::cancel_orig_cleanup(dir); }
         let deleting_tag = matches!(&action, Action::DeleteRemoteTag { .. });
         match action {
             Action::Stage { paths } => {
@@ -342,14 +371,14 @@ impl Engine {
             }
             Action::Unstage { paths } => {
                 let has_head = !self.rev(dir, "HEAD").is_empty();
-                let mut a: Vec<&str> = if has_head { vec!["reset", "-q", "HEAD", "--"] } else { vec!["rm", "--cached", "-q", "--"] };
+                let mut a: Vec<&str> = if has_head { vec!["reset", "-q", "HEAD", "--"] } else { vec!["rm", "--cached", "-f", "-q", "--"] };
                 a.extend(paths.iter().map(|s| s.as_str()));
                 done(self.git(dir, &a), "Unstaged")
             }
             Action::StageAll => done(self.git(dir, &["add", "-A"]), "Staged all changes"),
             Action::UnstageAll => {
                 if self.rev(dir, "HEAD").is_empty() {
-                    done(self.git(dir, &["rm", "-r", "--cached", "-q", "."]), "Unstaged all changes")
+                    done(self.git(dir, &["rm", "-r", "--cached", "-f", "-q", "."]), "Unstaged all changes")
                 } else {
                     done(self.git(dir, &["reset", "-q"]), "Unstaged all changes")
                 }
@@ -397,6 +426,20 @@ impl Engine {
                     self.push_undo(repo, UndoRec::Checkout { from, to: target.clone() });
                 }
                 done(o, &format!("Checked out {target}"))
+            }
+            Action::CheckoutPullRequest { url, reference, expected } => {
+                if !matches!(expected.len(), 40 | 64) || !expected.bytes().all(|c| c.is_ascii_hexdigit()) || reference.starts_with('-') {
+                    return done(git::GitOut::failed("The pull request has an invalid source commit."), "");
+                }
+                let from = self.head_name(dir);
+                let fetched = self.job(repo, "fetch", dir, &["fetch", "--no-tags", "--", &url, &reference]);
+                if !fetched.ok { return done(fetched, ""); }
+                if self.rev(dir, "FETCH_HEAD^{commit}") != expected {
+                    return done(git::GitOut::failed("The pull request changed during checkout. Refresh it and try again."), "");
+                }
+                let result = self.git(dir, &["checkout", "--detach", "-q", &expected]);
+                if result.ok { self.push_undo(repo, UndoRec::Checkout { from, to: expected }); }
+                done(result, "Checked out the pull request's source commit")
             }
             Action::CheckoutRemote { remote_branch } => {
                 let local = remote_branch.splitn(2, '/').nth(1).unwrap_or(&remote_branch).to_string();
@@ -494,7 +537,7 @@ impl Engine {
                 }
             },
             Action::Push { force, lease } => {
-                let branch = git::run(dir, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim().to_string();
+                let branch = git::run(dir, &["symbolic-ref", "-q", "HEAD"]).stdout.trim().strip_prefix("refs/heads/").unwrap_or_default().to_string();
                 if branch.is_empty() {
                     return ActionResult { ok: false, message: "Push is not available when in a detached HEAD state".into() };
                 }
@@ -516,7 +559,7 @@ impl Engine {
                     } else {
                         return ActionResult { ok: false, message: "This repository has no remote to push to. Add one first.".into() };
                     };
-                    self.job(repo, "push", dir, &["push", "-u", "--progress", &remote, &branch])
+                    self.job(repo, "push", dir, &["push", "-u", "--progress", &remote, &format!("refs/heads/{branch}:refs/heads/{branch}")])
                 };
                 done(o, &format!("Pushed {branch}"))
             }
@@ -561,9 +604,9 @@ impl Engine {
                 }
                 done(o, "Stashed changes")
             }
-            Action::StashPop { index } => done(self.git(dir, &["stash", "pop", "-q", &format!("stash@{{{index}}}")]), "Popped stash"),
-            Action::StashApply { index } => done(self.git(dir, &["stash", "apply", "-q", &format!("stash@{{{index}}}")]), "Applied stash"),
-            Action::StashDrop { index } => done(self.git(dir, &["stash", "drop", "-q", &format!("stash@{{{index}}}")]), "Deleted stash"),
+            Action::StashPop { index, .. } => done(self.git(dir, &["stash", "pop", "-q", &format!("stash@{{{index}}}")]), "Popped stash"),
+            Action::StashApply { index, .. } => done(self.git(dir, &["stash", "apply", "-q", &format!("stash@{{{index}}}")]), "Applied stash"),
+            Action::StashDrop { index, .. } => done(self.git(dir, &["stash", "drop", "-q", &format!("stash@{{{index}}}")]), "Deleted stash"),
             Action::CherryPick { sha, mainline } => self.apply_commit(dir, &sha, mainline, false),
             Action::Revert { sha, mainline } => self.apply_commit(dir, &sha, mainline, true),
             Action::Reset { sha, mode } => {
@@ -597,6 +640,13 @@ impl Engine {
                 done(o, &format!("Rebased onto {onto}"))
             }
             Action::AbortMerge => done(self.git(dir, &["merge", "--abort"]), "Merge aborted"),
+            Action::Sequencer { operation, command } => {
+                if !["cherry-pick", "revert", "am"].contains(&operation.as_str()) || !["continue", "skip", "abort"].contains(&command.as_str()) {
+                    return done(git::GitOut::failed("Unsupported recovery command."), "");
+                }
+                let flag = format!("--{command}");
+                done(self.git(dir, &["-c", "core.editor=true", &operation, &flag]), "Git operation updated")
+            },
             Action::AbortRebase => done(self.git(dir, &["rebase", "--abort"]), "Rebase aborted"),
             Action::ContinueRebase => done(self.git(dir, &["-c", "core.editor=true", "rebase", "--continue"]), "Rebase continued"),
             Action::SkipRebase => done(self.git(dir, &["rebase", "--skip"]), "Skipped commit"),
@@ -667,11 +717,20 @@ impl Engine {
                 done(self.git(dir, &a), "Submodules updated")
             }
             Action::SubmoduleRemove { path } => {
-                let o = self.git(dir, &["submodule", "deinit", "-f", "--", &path]);
+                let module = dir.join(&path);
+                if module.join(".git").exists() {
+                    let status = git::run(&module, &["status", "--porcelain", "--untracked-files=all", "--ignored=matching", "--ignore-submodules=none"]);
+                    if !status.ok || !status.stdout.trim().is_empty() {
+                        return done(git::GitOut::failed("The submodule has local work. Commit, stash, or back it up before removing it."), "");
+                    }
+                } else if module.exists() && std::fs::read_dir(&module).map(|mut items| items.next().is_some()).unwrap_or(true) {
+                    return done(git::GitOut::failed("The submodule folder contains local files. Back them up before removing it."), "");
+                }
+                let o = self.git(dir, &["submodule", "deinit", "--", &path]);
                 if !o.ok {
                     return done(o, "");
                 }
-                done(self.git(dir, &["rm", "-f", "--", &path]), &format!("Removed submodule {path}"))
+                done(self.git(dir, &["rm", "--", &path]), &format!("Removed submodule {path}"))
             }
             Action::DeleteBranches { names, remotes } => {
                 let mut failed = Vec::new();
@@ -718,26 +777,38 @@ impl Engine {
             }
             Action::ComposeCommits { commits } => {
                 let before = self.rev(dir, "HEAD");
-                let o = self.git(dir, &["reset", "-q"]);
-                if !o.ok && !before.is_empty() {
-                    return done(o, "");
-                }
+                let o = if before.is_empty() { self.git(dir, &["rm", "-r", "--cached", "--ignore-unmatch", "--", "."]) }
+                    else { self.git(dir, &["reset", "-q"]) };
+                if !o.ok { return done(o, ""); }
+                let failed = |i: usize, o: git::GitOut| {
+                    let after = self.rev(dir, "HEAD");
+                    if before != after && !after.is_empty() {
+                        let branch = self.branch_ref(dir);
+                        let label = "partially composed commits".into();
+                        self.push_undo(repo, if before.is_empty() { UndoRec::InitialCommit { after, branch, label } }
+                            else { UndoRec::Commit { before: before.clone(), after, branch, label } });
+                    }
+                    ActionResult { ok: false, message: format!("Commit {} of {}: {}. Completed commits remain and can be undone.", i + 1, commits.len(), o.message()) }
+                };
                 for (i, c) in commits.iter().enumerate() {
                     let mut add = vec!["add", "-A", "--"];
                     add.extend(c.files.iter().map(|s| s.as_str()));
                     let o = self.git(dir, &add);
                     if !o.ok {
-                        return ActionResult { ok: false, message: format!("Commit {} of {}: {}", i + 1, commits.len(), o.message()) };
+                        return failed(i, o);
                     }
                     let msg = if c.description.trim().is_empty() { c.summary.trim().to_string() } else { format!("{}\n\n{}", c.summary.trim(), c.description.trim()) };
                     let o = self.git(dir, &["commit", "-q", "-m", &msg]);
                     if !o.ok {
-                        return ActionResult { ok: false, message: format!("Commit {} of {}: {}", i + 1, commits.len(), o.message()) };
+                        return failed(i, o);
                     }
                 }
-                if !before.is_empty() {
-                    let after = self.rev(dir, "HEAD");
-                    self.push_undo(repo, UndoRec::Commit { before, after, branch: self.branch_ref(dir), label: format!("{} composed commits", commits.len()) });
+                let after = self.rev(dir, "HEAD");
+                if before != after && !after.is_empty() {
+                    let branch = self.branch_ref(dir);
+                    let label = format!("{} composed commits", commits.len());
+                    self.push_undo(repo, if before.is_empty() { UndoRec::InitialCommit { after, branch, label } }
+                        else { UndoRec::Commit { before, after, branch, label } });
                 }
                 ActionResult { ok: true, message: format!("Created {} commits", commits.len()) }
             }
@@ -758,7 +829,7 @@ impl Engine {
                 let n = paths.len();
                 done(self.git(dir, &args), &format!("Stashed {n} file{}", if n == 1 { "" } else { "s" }))
             }
-            Action::StashTakeFile { index, path } => {
+            Action::StashTakeFile { index, path, .. } => {
                 // Tracked files are in the stash commit; new files are in its third parent.
                 let status = git::run(dir, &["status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "--", &path]);
                 if !status.ok { return done(status, ""); }
@@ -777,7 +848,7 @@ impl Engine {
                 done(o, &format!("Took {path} from the stash"))
             }
             Action::RevertHunk { sha, parent, file, hunk, lines } => {
-                let diff = git::diff_text(dir, &git::DiffSource::Commit(sha.clone()), &file, parent.as_deref(), false);
+                let diff = match git::diff_text_checked(dir, &git::DiffSource::Commit(sha.clone()), &file, parent.as_deref(), false) { Ok(diff) => diff, Err(error) => return done(git::GitOut::failed(&error), "") };
                 let Some(patch) = crate::files::partial_patch(&diff, hunk, lines.as_deref(), true) else {
                     return ActionResult { ok: false, message: "That change could not be found in the commit.".into() };
                 };
@@ -838,7 +909,10 @@ impl Engine {
             Action::GitflowFinish { kind, name, keep, tag_message } => {
                 done(crate::manage::gitflow_finish(dir, &kind, &name, keep, &tag_message, &|a: &[&str]| self.git(dir, a)), &format!("Finished {kind}: '{name}'"))
             }
-            Action::InteractiveRebase { base, items } => {
+            Action::InteractiveRebase { base, items, expected } => {
+                if crate::rewrite::plan_state(dir, &base).ok().as_ref() != Some(&expected) {
+                    return done(git::GitOut::failed("The branch, tip, or base changed after this plan was prepared. Reopen the planner and review the current history."), "");
+                }
                 let before = self.rev(dir, "HEAD");
                 let o = crate::rewrite::interactive_rebase(dir, &base, &items);
                 self.record(&format!("git rebase -i {base} ({} steps)", items.len()), &o);
@@ -886,8 +960,8 @@ impl Engine {
                 a.extend(paths.iter().map(|s| s.as_str()));
                 done(self.git(dir, &a), "Marked conflicted")
             }
-            Action::SaveResolved { file, content } => {
-                if let Err(e) = crate::files::save(dir, &file, &content) {
+            Action::SaveResolved { file, content, expected, utf8 } => {
+                if let Err(e) = crate::files::save_checked_mode(dir, &file, &content, expected.as_deref(), utf8.unwrap_or(false)) {
                     return ActionResult { ok: false, message: e };
                 }
                 done(self.git(dir, &["add", "--", &file]), &format!("Saved and resolved {file}"))
@@ -915,7 +989,7 @@ impl Engine {
                     done(self.git(dir, &["branch", &format!("--set-upstream-to={up}"), &branch]), &format!("{branch} now tracks {up}"))
                 }
             }
-            Action::StashRename { index, message } => {
+            Action::StashRename { index, message, .. } => {
                 // git has no rename: drop the entry and store the same stash commit with the new message.
                 let sha = self.rev(dir, &format!("stash@{{{index}}}"));
                 if sha.is_empty() {
@@ -928,7 +1002,7 @@ impl Engine {
                 done(self.git(dir, &["stash", "store", "-m", message.trim(), &sha]), "Stash message updated")
             }
             Action::AddRemote { name, url } => done(self.git(dir, &["remote", "add", name.trim(), url.trim()]), "Remote added"),
-            Action::Patch { file, untracked, op, hunk, lines } => {
+            Action::Patch { file, untracked, op, hunk, lines, expected } => {
                 let what = if lines.is_some() { "lines" } else { "hunk" };
                 let verb = match op {
                     crate::files::PatchOp::Stage => "stage",
@@ -936,7 +1010,7 @@ impl Engine {
                     crate::files::PatchOp::Discard => "discard",
                 };
                 self.log_note(&format!("git apply ({verb} {what} of {file})"));
-                match crate::files::apply_part(dir, &file, untracked, op, hunk, lines.as_deref()) {
+                match crate::files::apply_part_checked(dir, &file, untracked, op, hunk, lines.as_deref(), &expected) {
                     Ok((patch, cached, reverse)) => {
                         // Staging is easy to reverse by hand; discards are recorded for Undo.
                         if op == crate::files::PatchOp::Discard {
@@ -969,13 +1043,17 @@ impl Engine {
             a.push("--");
             a.extend(p.iter().map(|s| s.as_str()));
         }
+        let previous = self.rev(dir, "stash@{0}");
         let o = self.git(dir, &a);
         if !o.ok {
             return ActionResult { ok: false, message: o.message() };
         }
         let sha = self.rev(dir, "stash@{0}");
+        if sha.is_empty() || sha == previous {
+            return ActionResult { ok: false, message: "There are no changes to discard.".into() };
+        }
         let _ = self.git(dir, &["stash", "drop", "-q"]);
-        self.push_undo(repo, UndoRec::Discard { stash: sha });
+        self.push_undo(repo, UndoRec::Discard { stash: sha, paths, redo_state: None });
         ActionResult { ok: true, message: "Discarded changes".into() }
     }
 
@@ -986,7 +1064,15 @@ impl Engine {
                 return git::GitOut::failed("Return to the original branch and commit before undoing or redoing this action; the repository has changed.");
             }
         }
+        if let UndoRec::InitialCommit { after, branch, .. } = rec {
+            let expected = if undo { after.as_str() } else { "" };
+            if self.branch_ref(dir) != *branch || self.rev(dir, "HEAD") != expected {
+                return git::GitOut::failed("Return to the original branch and commit before undoing or redoing this action; the repository has changed.");
+            }
+        }
         match (rec, undo) {
+            (UndoRec::InitialCommit { after, branch, .. }, true) => self.git(dir, &["update-ref", "-d", branch, after]),
+            (UndoRec::InitialCommit { after, branch, .. }, false) => self.git(dir, &["update-ref", branch, after, &"0".repeat(after.len())]),
             (UndoRec::Commit { before, .. }, true) => self.git(dir, &["reset", "-q", "--soft", before]),
             (UndoRec::Commit { after, .. }, false) => self.git(dir, &["reset", "-q", "--soft", after]),
             (UndoRec::Checkout { from, .. }, true) => self.git(dir, &["checkout", "-q", from]),
@@ -1018,8 +1104,19 @@ impl Engine {
             }
             (UndoRec::CreateTag { name, .. }, true) | (UndoRec::DeleteTag { name, .. }, false) => self.git(dir, &["tag", "-d", name]),
             (UndoRec::CreateTag { name, sha }, false) | (UndoRec::DeleteTag { name, sha }, true) => self.git(dir, &["tag", name, sha]),
-            (UndoRec::Discard { stash }, true) => self.git(dir, &["stash", "apply", "-q", stash]),
-            (UndoRec::Discard { .. }, false) => self.git(dir, &["stash", "push", "--include-untracked", "-m", "Auto stash before redo discard"]),
+            (UndoRec::Discard { stash, .. }, true) => self.git(dir, &["stash", "apply", "-q", stash]),
+            (UndoRec::Discard { paths, redo_state, .. }, false) => {
+                if !matches!((redo_state.as_deref(), discard_state(dir)), (Some(expected), Ok(current)) if expected == current) {
+                    return git::GitOut::failed("The working tree changed after Undo. Discard the intended files again instead of redoing this action.");
+                }
+                let previous = self.rev(dir, "stash@{0}");
+                let mut args = vec!["stash", "push", "--include-untracked", "-m", "Auto stash before redo discard"];
+                if let Some(paths) = paths { args.push("--"); args.extend(paths.iter().map(String::as_str)); }
+                let out = self.git(dir, &args);
+                if out.ok && self.rev(dir, "stash@{0}") == previous { return git::GitOut::failed("There are no changes to discard."); }
+                if out.ok { let _ = self.git(dir, &["stash", "drop", "-q"]); }
+                out
+            },
             (UndoRec::Rewrite { before, .. }, true) => self.git(dir, &["reset", "-q", "--keep", before]),
             (UndoRec::Rewrite { after, .. }, false) => self.git(dir, &["reset", "-q", "--keep", after]),
             (UndoRec::Patch { patch, cached, reverse, .. }, undo) => {
@@ -1038,11 +1135,12 @@ impl Engine {
             let mut s = self.stacks.lock().unwrap();
             s.get_mut(repo).and_then(|st| st.undo.pop())
         };
-        let Some(rec) = rec else {
+        let Some(mut rec) = rec else {
             return ActionResult { ok: false, message: "Nothing to undo".into() };
         };
         let o = self.apply(dir, &rec, true);
         if o.ok {
+            if let UndoRec::Discard { redo_state, .. } = &mut rec { *redo_state = discard_state(dir).ok(); }
             let label = rec.label();
             self.stacks.lock().unwrap().entry(repo.to_string()).or_default().redo.push(rec);
             ActionResult { ok: true, message: format!("Undo Successful: {label}") }
@@ -1375,7 +1473,7 @@ mod tests {
         assert!(e.perform(&repo, Action::Stash { message: "wip".into() }).ok);
         assert_eq!(git::load(&d, 100).stashes.len(), 1);
         assert!(git::status(&d).unstaged.is_empty());
-        assert!(e.perform(&repo, Action::StashPop { index: 0 }).ok);
+        assert!(e.perform(&repo, Action::StashPop { index: 0, expected: None }).ok);
         // Everything is staged before stashing, so a new file comes back staged (git stash pop re-adds it).
         let st = git::status(&d);
         assert_eq!(st.unstaged.len() + st.staged.len(), 1);
@@ -1387,7 +1485,7 @@ mod tests {
         assert!(named.lines().next().unwrap_or("").ends_with("WIP on master"), "default stash name: {named}");
         let none = e.perform(&repo, Action::Stash { message: String::new() });
         assert!(!none.ok && none.message == STASH_NOTHING, "{}", none.message);
-        assert!(e.perform(&repo, Action::StashPop { index: 0 }).ok);
+        assert!(e.perform(&repo, Action::StashPop { index: 0, expected: None }).ok);
         assert_eq!(git::status(&d).staged.len(), 1);
         assert!(e.perform(&repo, Action::UnstageAll).ok);
 
@@ -1428,22 +1526,22 @@ mod tests {
         let base = head(&d);
         fs::write(d.join("f.txt"), "a\nB\nc\nnew\n").unwrap();
         // Hunk body: " a", "-b", "+B", " c", "+new" -> stage only "+new" (index 4)
-        let r = e.perform(&repo, Action::Patch { file: "f.txt".into(), untracked: false, op: crate::files::PatchOp::Stage, hunk: 0, lines: Some(vec![4]) });
+        let r = e.perform(&repo, Action::Patch { file: "f.txt".into(), untracked: false, op: crate::files::PatchOp::Stage, hunk: 0, lines: Some(vec![4]), expected: git::file_diff_opts(&d, &git::DiffSource::Unstaged, "f.txt", false, None, false) });
         assert!(r.ok, "{}", r.message);
         assert_eq!(index("f.txt"), "a\nb\nc\nnew\n");
         // Discard the remaining unstaged change (b -> B), then undo the discard.
-        let r = e.perform(&repo, Action::Patch { file: "f.txt".into(), untracked: false, op: crate::files::PatchOp::Discard, hunk: 0, lines: None });
+        let r = e.perform(&repo, Action::Patch { file: "f.txt".into(), untracked: false, op: crate::files::PatchOp::Discard, hunk: 0, lines: None, expected: git::file_diff_opts(&d, &git::DiffSource::Unstaged, "f.txt", false, None, false) });
         assert!(r.ok, "{}", r.message);
         assert_eq!(read("f.txt"), "a\nb\nc\nnew\n");
         assert!(e.perform(&repo, Action::Undo).ok);
         assert_eq!(read("f.txt"), "a\nB\nc\nnew\n");
         // Unstage the staged line again.
-        let r = e.perform(&repo, Action::Patch { file: "f.txt".into(), untracked: false, op: crate::files::PatchOp::Unstage, hunk: 0, lines: None });
+        let r = e.perform(&repo, Action::Patch { file: "f.txt".into(), untracked: false, op: crate::files::PatchOp::Unstage, hunk: 0, lines: None, expected: git::file_diff_opts(&d, &git::DiffSource::Staged, "f.txt", false, None, false) });
         assert!(r.ok, "{}", r.message);
         assert!(git::status(&d).staged.is_empty());
         // Untracked file: stage one line of a brand-new file.
         fs::write(d.join("n.txt"), "one\ntwo\n").unwrap();
-        let r = e.perform(&repo, Action::Patch { file: "n.txt".into(), untracked: true, op: crate::files::PatchOp::Stage, hunk: 0, lines: Some(vec![0]) });
+        let r = e.perform(&repo, Action::Patch { file: "n.txt".into(), untracked: true, op: crate::files::PatchOp::Stage, hunk: 0, lines: Some(vec![0]), expected: git::file_diff_opts(&d, &git::DiffSource::Unstaged, "n.txt", true, None, false) });
         assert!(r.ok, "{}", r.message);
         assert_eq!(index("n.txt"), "one\n");
 
@@ -1496,7 +1594,7 @@ mod tests {
             TodoItem { action: Step::Squash, sha: c3.clone(), message: None },
             TodoItem { action: Step::Drop, sha: c4.clone(), message: None },
         ];
-        let r = e.perform(&repo, Action::InteractiveRebase { base: base.clone(), items });
+        let r = e.perform(&repo, Action::InteractiveRebase { expected: crate::rewrite::plan_state(&d, &base).unwrap(), base: base.clone(), items });
         assert!(r.ok, "{}", r.message);
         let log = git::run(&d, &["log", "--format=%s", &format!("{base}..HEAD")]).stdout;
         assert_eq!(log.lines().collect::<Vec<_>>(), vec!["two (reworded)"]);
@@ -1516,7 +1614,7 @@ mod tests {
             TodoItem { action: Step::Pick, sha: c2.clone(), message: None },
             TodoItem { action: Step::Pick, sha: c3.clone(), message: None },
         ];
-        assert!(e.perform(&repo, Action::InteractiveRebase { base: base.clone(), items }).ok);
+        assert!(e.perform(&repo, Action::InteractiveRebase { expected: crate::rewrite::plan_state(&d, &base).unwrap(), base: base.clone(), items }).ok);
         let log = git::run(&d, &["log", "--reverse", "--format=%s", &format!("{base}..HEAD")]).stdout;
         assert_eq!(log.lines().collect::<Vec<_>>(), vec!["four", "two", "three"]);
         assert!(e.perform(&repo, Action::CreateBranch { name: "side".into(), at: Some(base.clone()), checkout: true }).ok);
@@ -1547,7 +1645,7 @@ mod tests {
         assert_eq!(read("a.txt"), "side\n");
         assert!(e.perform(&repo, Action::MarkConflicted { paths: vec!["a.txt".into()] }).ok);
         assert!(read("a.txt").contains("<<<<<<<"));
-        assert!(e.perform(&repo, Action::SaveResolved { file: "a.txt".into(), content: "master\nside\n".into() }).ok);
+        assert!(e.perform(&repo, Action::SaveResolved { file: "a.txt".into(), content: "master\nside\n".into(), expected: None, utf8: None }).ok);
         assert!(!git::status(&d).conflicted);
         assert!(git::load(&d, 50).merge_msg.unwrap().contains("Merge branch 'side'"));
         assert!(e.perform(&repo, Action::Commit { summary: "Merge side".into(), description: String::new(), amend: false, stage_all: false, skip_hooks: false, strip_comments: false }).ok);
@@ -1561,7 +1659,7 @@ mod tests {
         assert_eq!(git::run(&d, &["rev-parse", "--abbrev-ref", "old@{u}"]).stdout.trim(), "master");
         fs::write(d.join("e.txt"), "x").unwrap();
         assert!(e.perform(&repo, Action::Stash { message: "first".into() }).ok);
-        assert!(e.perform(&repo, Action::StashRename { index: 0, message: "renamed".into() }).ok);
+        assert!(e.perform(&repo, Action::StashRename { index: 0, message: "renamed".into(), expected: None }).ok);
         assert_eq!(git::load(&d, 5).stashes[0].message, "renamed");
         let _ = fs::remove_dir_all(&d);
     }
@@ -1669,7 +1767,7 @@ mod tests {
         let r = e.perform(&repo, Action::StashFiles { paths: vec!["a.txt".into()], message: String::new() });
         assert!(!r.ok && r.message.contains("does not have any changes to stash"), "{}", r.message);
         // Take a.txt back out of the stash without applying the rest.
-        assert!(e.perform(&repo, Action::StashTakeFile { index: 0, path: "a.txt".into() }).ok);
+        assert!(e.perform(&repo, Action::StashTakeFile { index: 0, path: "a.txt".into(), expected: None }).ok);
         assert!(rd(d.join("a.txt")).ends_with("ten\n"));
         commit("two changes");
 
@@ -1751,4 +1849,20 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
+}
+
+// Conservatively refuse replay after any intervening tracked or untracked edit.
+fn discard_state(dir: &Path) -> Result<String, String> {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    for args in [vec!["diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", "HEAD"], vec!["diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--no-color"], vec!["ls-files", "--others", "--exclude-standard", "-z"]] {
+        let output = git::git_cmd(dir).args(&args).output().map_err(|e| e.to_string())?;
+        if !output.status.success() { return Err(String::from_utf8_lossy(&output.stderr).into_owned()); }
+        output.stdout.hash(&mut hash);
+        if args[0] == "ls-files" {
+            let names = std::str::from_utf8(&output.stdout).map_err(|_| "Cannot safely verify a non-UTF-8 file name for Redo.")?;
+            for name in names.split('\0').filter(|s| !s.is_empty()) { std::fs::read(dir.join(name)).map_err(|e| e.to_string())?.hash(&mut hash); }
+        }
+    }
+    Ok(format!("{:x}", hash.finish()))
 }

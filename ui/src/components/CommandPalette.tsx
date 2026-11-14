@@ -1,3 +1,4 @@
+import { topMatches } from "@/lib/ranking";
 import { useShallow } from "zustand/react/shallow";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -90,12 +91,7 @@ export function CommandPalette() {
   }, [mode, path, files.data, s.tabs, s.settings, s.profiles, s.activeProfile]);
 
   const shown = useMemo(() => {
-    return items
-      .map((it) => ({ it, score: Math.max(fuzzy(q, it.label) * 2, fuzzy(q, it.hint ?? "")) }))
-      .filter((x) => x.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 80)
-      .map((x) => x.it);
+    return topMatches(items, it => Math.max(fuzzy(q, it.label) * 2, fuzzy(q, it.hint ?? "")));
   }, [items, q]);
 
   if (!mode) return null;

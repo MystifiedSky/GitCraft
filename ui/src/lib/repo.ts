@@ -39,6 +39,7 @@ function generationFor(path: string) {
   if (!generations.has(path)) generations.set(path, ++nextGeneration);
   return generations.get(path)!;
 }
+const actionQueue = new Map<string, Promise<boolean>>();
 const actionChanges = new Map<string, { full: boolean }>();
 const fullRefreshes = new Map<string, { again: boolean; promise: Promise<void> }>();
 
@@ -51,25 +52,19 @@ function historySignature(repo: RepoView) {
 export async function readRepoSnapshot(path: string, initial: number, view: RefView, previous?: RepoView, signal?: AbortSignal): Promise<RepoView> {
   const checkCancelled = () => { if (signal?.aborted) throw new Error("Repository read cancelled"); };
   checkCancelled();
-  let next = await api.openRepo(path, initial, view);
+  const next = await api.openRepo(path, initial, view);
   checkCancelled();
   if (previous && historySignature(previous) === historySignature(next) &&
       next.commits.every((c, i) => previous.commits[i]?.sha === c.sha)) {
-    return { ...next, commits: previous.commits, graph: previous.graph, has_more: previous.has_more, history_cursor: previous.history_cursor };
+    return { ...next, commits: previous.commits, graph: previous.graph, has_more: previous.has_more, history_cursor: previous.history_cursor, history_restore: previous.history_restore, history_restore_selection: previous.history_restore_selection };
   }
-  const target = previous?.commits.length ?? 0;
   const state = useStore.getState();
   const tab = state.tabs.find((t) => t.id === state.activeId && t.path === path);
   const selection = tab ? state.ui[tab.id]?.selection : undefined;
-  const selected = selection?.type === "commit" && previous?.commits.some((c) => c.sha === selection.sha) ? selection.sha : null;
-  while (next.history_cursor && (next.commits.length < target || (selected && !next.commits.some((c) => c.sha === selected)))) {
-    checkCancelled();
-    const page = await api.historyPage(path, next.history_cursor, initial);
-    checkCancelled();
-    next = { ...next, ...page, commits: [...next.commits, ...page.commits], graph: { rows: [...next.graph.rows, ...page.graph.rows], width: page.graph.width } };
-    if (!page.commits.length) break;
-  }
-  return next;
+  const selected = selection?.type === "commit" && previous?.commits.some((c) => c.sha === selection.sha)
+    ? selection.sha : previous?.history_restore_selection;
+  return { ...next, history_restore: Math.max(previous?.commits.length ?? 0, previous?.history_restore ?? 0),
+    history_restore_selection: selected && !next.commits.some((c) => c.sha === selected) ? selected : null };
 }
 
 export function useRepo(path: string | undefined, active = true) {
@@ -98,11 +93,11 @@ export function useRepo(path: string | undefined, active = true) {
     if (full) void refresh(path); else void refreshStatus(path);
   }, [path, active]);
   useEffect(() => {
-    if (!path || !active || !(settings.showAllCommits || (q.data?.commits.length ?? 0) < Math.max(500, settings.initialCommits || 2000)) || !q.data?.history_cursor || q.isFetching || q.isPlaceholderData) return;
+    if (!path || !active || !(settings.showAllCommits || q.data?.history_restore_selection || (q.data?.commits.length ?? 0) < Math.max(500, settings.initialCommits || 2000, q.data?.history_restore ?? 0)) || !q.data?.history_cursor || q.isFetching || q.isPlaceholderData) return;
     // Yield between bounded pages; hiding or closing the tab stops further requests.
     const timer = window.setTimeout(() => void loadMoreRepo(path).catch((e) => useStore.getState().toast(false, String(e))), 25);
     return () => clearTimeout(timer);
-  }, [path, active, settings.showAllCommits, settings.initialCommits, q.data?.history_cursor, q.isFetching, q.isPlaceholderData]);
+  }, [path, active, settings.showAllCommits, settings.initialCommits, q.data?.history_cursor, q.data?.history_restore, q.data?.history_restore_selection, q.isFetching, q.isPlaceholderData]);
   return q;
 }
 
@@ -120,7 +115,7 @@ export function loadMoreRepo(path: string): Promise<void> {
     if (generations.get(path) !== generation || !isActive(path) || JSON.stringify(repoRequest(path).key) !== key) return;
     queryClient.setQueryData<RepoView>(request.key, (current) => {
       if (!current || current.history_cursor !== cursor) return current;
-      const next = { ...current, commits: [...current.commits, ...page.commits], graph: { rows: [...current.graph.rows, ...page.graph.rows], width: page.graph.width }, has_more: page.has_more, history_cursor: page.history_cursor };
+      const next = { ...current, history_restore_selection: !page.has_more || page.commits.some((c) => c.sha === current.history_restore_selection) ? null : current.history_restore_selection, commits: [...current.commits, ...page.commits], graph: { rows: [...current.graph.rows, ...page.graph.rows], width: page.graph.width }, has_more: page.has_more, history_cursor: page.history_cursor };
       latest.set(path, next);
       return next;
     });
@@ -158,7 +153,7 @@ export async function refresh(path: string): Promise<void> {
     try {
       do {
         task.again = false;
-        await Promise.all(["repo", "diff", "versions", "history", "blame", "range", "conflict"].map((kind) =>
+        await Promise.all(["repo", "diff", "versions", "history", "blame", "range", "conflict", "remote", "pr"].map((kind) =>
           queryClient.invalidateQueries({ queryKey: [kind, path] }, { cancelRefetch: false }),
         ));
       } while (task.again && isActive(path));
@@ -293,13 +288,24 @@ export async function act(path: string, action: Action, quiet = false): Promise<
   if (action.type === "commit" && set.stripComments) action = { ...action, stripComments: true };
   // Pull / Push / Stash / Pop show a spinning circle on their toolbar button while this runs (lib/spin.ts).
   const run = action;
-  return withSpin(path, spinButtonFor(run, quiet), () => runAct(path, run, quiet));
+  const execute = () => withSpin(path, spinButtonFor(run, quiet), () => runAct(path, run, quiet));
+  const previous = actionQueue.get(path);
+  const task = (previous ? previous.catch(() => false).then(execute) : execute()).finally(() => {
+    if (actionQueue.get(path) === task) actionQueue.delete(path);
+  });
+  actionQueue.set(path, task);
+  return task;
 }
+
+const activeActions = new Map<string, string>();
+let bulkProgress: string | null = null;
+function updateBusy() { useStore.getState().setBusy(bulkProgress ?? (activeActions.size > 1 ? `Working in ${activeActions.size} repositories…` : activeActions.values().next().value ?? null)); }
+export function setBulkProgress(text: string | null) { bulkProgress = text; updateBusy(); }
 
 async function runAct(path: string, action: Action, quiet: boolean): Promise<boolean> {
   const st = useStore.getState();
   const wasMerging = !!latest.get(path)?.state_note;
-  st.setBusy(BUSY_LABEL[action.type] ?? "Working…");
+  activeActions.set(path, BUSY_LABEL[action.type] ?? "Working…"); updateBusy();
   const light = indexOnly(action);
   const before = latest.get(path)?.status;
   if (light && before) {
@@ -334,7 +340,7 @@ async function runAct(path: string, action: Action, quiet: boolean): Promise<boo
     try {
       if (light && ok && !changes?.full) await refreshStatus(path);
       else await refresh(path);
-    } finally { st.setBusy(null); }
+    } finally { activeActions.delete(path); updateBusy(); }
   }
 }
 
@@ -344,12 +350,17 @@ const MOVES_HEAD = new Set<Action["type"]>(["pull", "checkout", "checkoutRemote"
 /** Preferences that act after a Git action finishes. */
 async function afterAction(path: string, action: Action, ok: boolean, message: string, wasMerging: boolean) {
   const set = useStore.getState().settings;
+  if (ok && ["lfsInstall", "lfsTrack", "lfsUntrack"].includes(action.type)) await queryClient.invalidateQueries({ queryKey: ["lfsInfo", path] });
+  if (ok && ["lfsLock", "lfsUnlock", "addRemote", "editRemote", "removeRemote"].includes(action.type)) await queryClient.invalidateQueries({ queryKey: ["lfsLocks", path] });
   // General > Keep submodules up to date: "Automatically update all submodules after performing a Git action".
   if (ok && set.autoUpdateSubmodules && MOVES_HEAD.has(action.type) && (latest.get(path)?.submodules.length ?? 0) > 0)
     await api.run(path, { type: "submoduleUpdate", paths: [] }).catch(() => undefined);
   // General > Delete ".orig" files after merging.
-  if (ok && set.deleteOrigAfterMerge && (wasMerging && (action.type === "commit" || action.type === "markResolved" || action.type === "continueRebase") || action.type === "merge"))
-    await invoke<string[]>("delete_orig_files", { path }).catch(() => undefined);
+  if (ok && set.deleteOrigAfterMerge && (wasMerging && (action.type === "commit" || action.type === "continueRebase") || action.type === "merge"))
+    {
+      const candidates = await invoke<{path: string; expected: string}[]>("orig_cleanup_candidates", {path}).catch(() => []);
+      if (candidates.length) confirmThen("Delete merge backup files?", `Review these new backup files before deleting them:\n${candidates.map(candidate => candidate.path).join("\n")}`, "Delete backups", () => invoke("delete_orig_files", {path, candidates}).catch(error => useStore.getState().toast(false, String(error))));
+    }
   // Notifications > Enable Desktop Notifications: a finished network action while GitCraft is in the background. Failures reach the
   // bell (and from there a desktop notification) through the error toast, so only successes are posted here.
   if (ok && NETWORK.has(action.type)) postDesktopNotifications([`${path.split(/[\\/]/).pop()}: ${message.split("\n")[0]}`]);

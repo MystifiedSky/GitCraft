@@ -1,3 +1,4 @@
+import { sameFolder } from "./agents";
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 import type { DiffSource, Metrics } from "./api";
@@ -39,7 +40,7 @@ export interface TabUi {
   conflict: string | null;
   /** Pull request / issue open in the centre. */
   pr: number | null;
-  issue: number | null;
+  issue: string | number | null;
 }
 
 export interface RebaseItem {
@@ -53,6 +54,7 @@ export interface RebaseItem {
 }
 
 export interface RebasePlan {
+  expected?: import("./api").RebaseState;
   mode: "rebase" | "cherry";
   /** Commit (or "--root") the rebase replays onto; unused for cherry pick. */
   base: string;
@@ -95,7 +97,7 @@ export interface Toast {
 
 export type DialogState =
   | null
-  | { kind: "prompt"; title: string; label: string; value: string; confirm: string; onSubmit: (v: string, extra?: string) => void; extraLabel?: string }
+  | { kind: "prompt"; title: string; label: string; value: string; confirm: string; onSubmit: (v: string, extra?: string) => void; extraLabel?: string; allowEmpty?: boolean }
   | { kind: "confirm"; title: string; text: string; confirm: string; danger?: boolean; onConfirm: () => void }
   | { kind: "clone" }
   | { kind: "init" }
@@ -433,7 +435,7 @@ export const DEFAULT_SETTINGS: Settings = {
   editorTabSize: 4,
   editorEol: typeof navigator !== "undefined" && /Win/.test(navigator.platform) ? "crlf" : "lf",
   monospaceOnly: true,
-  termShell: "powershell",
+  termShell: "",
   termFontFamily: "",
   termFontSize: 12,
   termLineHeight: 1.2,
@@ -613,8 +615,8 @@ export const useStore = create<Store>((set, get) => {
 
     openRepoTab: (path, name, group) => {
       const s = get();
-      const existing = s.tabs.find((t) => t.kind === "repo" && t.path?.toLowerCase() === path.toLowerCase());
-      const recents = [path, ...s.settings.recents.filter((r) => r.toLowerCase() !== path.toLowerCase())].slice(0, 20);
+      const existing = s.tabs.find((t) => t.kind === "repo" && !!t.path && sameFolder(t.path, path));
+      const recents = [path, ...s.settings.recents.filter((r) => !sameFolder(r, path))].slice(0, 20);
       if (existing) {
         set({ activeId: existing.id, settings: { ...s.settings, recents } });
         return;
@@ -631,8 +633,8 @@ export const useStore = create<Store>((set, get) => {
         });
       } else {
         // UI Customization > Automatically group worktree tabs together: a linked worktree opens next to its repository.
-        const norm = (p?: string) => (p ?? "").replace(/\\/g, "/").toLowerCase();
-        const at = group && s.settings.autogroupWorktreeTabs !== false ? s.tabs.map((t) => norm(t.path) === norm(group)).lastIndexOf(true) : -1;
+        const norm = (p?: string) => (p ?? "").replace(/\\/g, "/");
+        const at = group && s.settings.autogroupWorktreeTabs !== false ? s.tabs.map((t) => sameFolder(norm(t.path), norm(group))).lastIndexOf(true) : -1;
         const tabs = at >= 0 ? [...s.tabs.slice(0, at + 1), tab, ...s.tabs.slice(at + 1)] : [...s.tabs, tab];
         set({ tabs, activeId: tab.id, ui: { ...s.ui, [tab.id]: defaultUi() }, settings: { ...s.settings, recents } });
       }
@@ -656,7 +658,8 @@ export const useStore = create<Store>((set, get) => {
       let tabs = s.tabs.filter((t) => t.id !== id);
       if (tabs.length === 0) tabs = [{ id: newId(), kind: "start", title: "New Tab" }];
       const activeId = s.activeId === id ? tabs[Math.min(idx, tabs.length - 1)].id : s.activeId;
-      set({ tabs, activeId, closed: tab.kind === "repo" ? [...s.closed, tab].slice(-10) : s.closed });
+      const ui = { ...s.ui }; delete ui[id];
+      set({ tabs, activeId, ui, closed: tab.kind === "repo" ? [...s.closed, tab].slice(-10) : s.closed });
     },
     reopenTab: () => {
       const s = get();

@@ -23,17 +23,15 @@ export function buildTimeline(now: Date = new Date()): TimelineMark[] {
   for (let n = 1; n <= TIMELINE_COUNTS.day; n++) out.push({ date: t - 864e5 * n, unit: "day", value: n, text: plural(n, "yesterday", "{0} days ago") });
   for (let n = 1; n <= TIMELINE_COUNTS.week; n++) out.push({ date: t - 6048e5 * n, unit: "week", value: n, text: plural(n, "a week ago", "{0} weeks ago") });
   // Months and years step back by calendar, at local midnight.
-  const month = new Date(now);
-  month.setHours(0, 0, 0, 0);
   for (let n = 1; n <= TIMELINE_COUNTS.month; n++) {
-    month.setMonth(month.getMonth() - 1);
+    const month = new Date(now.getFullYear(), now.getMonth() - n, 1);
+    month.setDate(Math.min(now.getDate(), new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate()));
     month.setHours(0, 0, 0, 0);
     out.push({ date: month.getTime(), unit: "month", value: n, text: plural(n, "a month ago", "{0} months ago") });
   }
-  const year = new Date(now);
-  year.setHours(0, 0, 0, 0);
   for (let n = 1; n <= TIMELINE_COUNTS.year; n++) {
-    year.setFullYear(year.getFullYear() - 1);
+    const year = new Date(now.getFullYear() - n, now.getMonth(), 1);
+    year.setDate(Math.min(now.getDate(), new Date(year.getFullYear(), year.getMonth() + 1, 0).getDate()));
     year.setHours(0, 0, 0, 0);
     const text = n === 1 ? "a year ago" : n === TIMELINE_COUNTS.year ? `${n}+ years ago` : `${n} years ago`;
     out.push({ date: year.getTime(), unit: "year", value: n, text });

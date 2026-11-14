@@ -124,7 +124,7 @@ export function MonacoDiff({
     ed.current?.updateOptions({ renderSideBySide: sideBySide, ignoreTrimWhitespace: ignoreWhitespace, wordWrap: wordWrap ? "on" : "off" } as monaco.editor.IDiffEditorOptions);
     ed.current?.getModifiedEditor().updateOptions({ readOnly: !editable, wordWrap: wordWrap ? "on" : "off" });
     ed.current?.getOriginalEditor().updateOptions({ wordWrap: wordWrap ? "on" : "off" });
-  }, [sideBySide, ignoreWhitespace, wordWrap, editable]);
+  }, [file, sideBySide, ignoreWhitespace, wordWrap, editable]);
 
   useEffect(() => {
     ed.current?.updateOptions(prefOptions(prefs) as monaco.editor.IDiffEditorOptions);
@@ -185,7 +185,7 @@ export function MonacoFile({
 
   useEffect(() => {
     ed.current?.updateOptions({ readOnly, wordWrap: wordWrap ? "on" : "off" });
-  }, [readOnly, wordWrap]);
+  }, [file, readOnly, wordWrap]);
 
   useEffect(() => {
     ed.current?.updateOptions(prefOptions(prefs));

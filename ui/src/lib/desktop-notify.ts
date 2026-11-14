@@ -27,6 +27,11 @@ const open = new Map<number, Notification>();
 let pending: { id: number; text: string }[] = [];
 let timer: ReturnType<typeof setTimeout> | undefined;
 
+function closeToast(toast: Notification) {
+  for (const [id, current] of open) if (current === toast) open.delete(id);
+  toast.close();
+}
+
 function show(body: string, id?: number): Notification | null {
   if (!("Notification" in window) || Notification.permission !== "granted") return null;
   try {
@@ -39,10 +44,10 @@ function show(body: string, id?: number): Notification | null {
         .catch(() => undefined);
       window.focus();
       useStore.getState().setNoticeMenuOpen(true);
-      n.close();
+      closeToast(n);
     };
     // IGNORED: after 20 s the toast is treated as ignored and dismissed.
-    setTimeout(() => n.close(), DESKTOP_NOTIFICATION_IGNORED_TIMEOUT);
+    setTimeout(() => closeToast(n), DESKTOP_NOTIFICATION_IGNORED_TIMEOUT);
     return n;
   } catch {
     return null;
@@ -53,8 +58,10 @@ function show(body: string, id?: number): Notification | null {
 export function postDesktopNotifications(messages: string[], ids: number[] = []) {
   const st = useStore.getState();
   if (!shouldPostDesktopNotification(messages, st.settings.desktopNotifications, document.hasFocus())) return;
-  const n = show(desktopNotificationBody(messages), messages.length === 1 ? ids[0] : undefined);
-  if (n && messages.length === 1 && ids[0] !== undefined) open.set(ids[0], n);
+  const current = ids.length ? messages.map((text, i) => ({ text, id: ids[i] })).filter(({ id }) => st.notices.some((notice) => notice.id === id && !notice.readAt)) : messages.map((text) => ({ text, id: undefined }));
+  if (!current.length) return;
+  const n = show(desktopNotificationBody(current.map((item) => item.text)), current.length === 1 ? current[0].id : undefined);
+  if (n) for (const item of current) if (item.id !== undefined) open.set(item.id, n);
 }
 
 /** Turning the setting on shows a native "Desktop notifications enabled" toast. Returns whether one was shown. */
@@ -69,16 +76,21 @@ export async function enableDesktopNotifications(): Promise<boolean> {
  */
 export function startDesktopNotifications() {
   let known = new Map<number, boolean>(useStore.getState().notices.map((n) => [n.id, !!n.readAt]));
-  return useStore.subscribe((state) => {
+  const unsubscribe = useStore.subscribe((state, previous) => {
+    if (state.notices === previous.notices && state.settings.desktopNotifications === previous.settings.desktopNotifications) return;
     const now = new Map(state.notices.map((n) => [n.id, !!n.readAt] as const));
-    for (const n of state.notices) if (!known.has(n.id)) pending.push({ id: n.id, text: n.text });
+    for (const n of state.notices) if (!known.has(n.id) && !n.readAt) pending.push({ id: n.id, text: n.text });
     for (const [id, toast] of open) {
       if (!now.has(id) || now.get(id)) {
-        toast.close();
-        open.delete(id);
+        closeToast(toast);
       }
     }
     known = now;
+    pending = pending.filter((item) => now.has(item.id) && !now.get(item.id));
+    if (!state.settings.desktopNotifications) {
+      pending = [];
+      for (const toast of new Set(open.values())) closeToast(toast);
+    }
     if (pending.length && !timer) {
       timer = setTimeout(() => {
         const batch = pending;
@@ -91,4 +103,11 @@ export function startDesktopNotifications() {
       }, DESKTOP_NOTIFICATION_BATCH_MS);
     }
   });
+  return () => {
+    unsubscribe();
+    if (timer) clearTimeout(timer);
+    timer = undefined;
+    pending = [];
+    for (const toast of new Set(open.values())) closeToast(toast);
+  };
 }

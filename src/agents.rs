@@ -73,7 +73,7 @@ fn title_from(text: &str) -> Option<String> {
     Some(text.lines().next().unwrap_or_default().chars().take(120).collect())
 }
 
-fn read_session(file: &Path, agent: &str, roots: &[String], fallback: Option<&str>) -> Option<AgentSession> {
+fn parse_session(file: &Path, agent: &str, roots: &[String], fallback: Option<&str>) -> Option<AgentSession> {
     let meta = fs::metadata(file).ok()?;
     let modified = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
     // A corrupt or enormous log cannot allocate unbounded memory. Partial JSON lines are ignored.
@@ -136,6 +136,31 @@ fn read_session(file: &Path, agent: &str, roots: &[String], fallback: Option<&st
         modified, messages,
         status: if finished && meta.len() <= 32 * 1024 * 1024 { "finished" } else if now.saturating_sub(modified) < 120 { "recent" } else { "idle" }.into(),
     })
+}
+
+fn read_session(file: &Path, agent: &str, roots: &[String], fallback: Option<&str>) -> Option<AgentSession> {
+    use std::sync::{Mutex, OnceLock};
+    type Entry = (u64, SystemTime, Option<AgentSession>);
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, Entry>>> = OnceLock::new();
+    let metadata = fs::metadata(file).ok()?;
+    let modified = metadata.modified().ok()?;
+    let key = serde_json::to_string(&(file, agent, roots, fallback)).ok()?;
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some((size, time, result)) = cache.lock().unwrap().get(&key) {
+        if *size == metadata.len() && *time == modified {
+            let mut result = result.clone();
+            if let Some(session) = &mut result {
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
+                if session.status == "recent" && now.saturating_sub(session.modified) >= 120 { session.status = "idle".into(); }
+            }
+            return result;
+        }
+    }
+    let result = parse_session(file, agent, roots, fallback);
+    let mut entries = cache.lock().unwrap();
+    if entries.len() >= 4096 { entries.clear(); }
+    entries.insert(key, (metadata.len(), modified, result.clone()));
+    result
 }
 
 /// Only sessions whose recorded working directory is in one of this repository's worktrees.
@@ -204,6 +229,14 @@ mod tests {
         let x = found.iter().find(|s| s.agent == "codex").unwrap();
         assert_eq!((&*x.path, &*x.title, &*x.status), (&*worktree, "Add the banner", "finished"));
         assert!(!belongs(&format!("{repo}-other"), &repo));
+        // Unchanged results can be reused, but appended messages must invalidate the cached parse.
+        assert_eq!(sessions(&roots, claude.to_str(), codex.to_str()).len(), 2);
+        let file = cdir.join("claude-id.jsonl");
+        let mut text = fs::read_to_string(&file).unwrap();
+        text.push_str(&format!("\n{}\n", json!({"type":"user", "cwd":repo, "message":{"content":"another request"}})));
+        fs::write(file, text).unwrap();
+        let updated = sessions(&roots, claude.to_str(), codex.to_str());
+        assert_eq!(updated.iter().find(|s| s.agent == "claude").unwrap().messages, 3);
         fs::remove_dir_all(temp).unwrap();
     }
 }

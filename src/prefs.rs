@@ -27,7 +27,7 @@ pub struct RuntimeSettings {
 
 fn same_path(a: &Path, b: &str) -> bool {
     let n = |s: &str| s.replace('\\', "/").trim_end_matches('/').to_lowercase();
-    n(&a.to_string_lossy()) == n(b)
+    if cfg!(windows) { n(&a.to_string_lossy()) == n(b) } else { a == Path::new(b) }
 }
 
 /// The encoding chosen for files in this repository (None = UTF-8).
@@ -43,7 +43,7 @@ pub fn decode(bytes: &[u8], enc: &'static encoding_rs::Encoding) -> String {
 }
 
 /// Bytes for saving text in the repository's encoding. UTF-16 is written by hand (encoding_rs only decodes it).
-pub fn encode(text: &str, enc: &'static encoding_rs::Encoding, had_bom: bool) -> Vec<u8> {
+pub fn encode(text: &str, enc: &'static encoding_rs::Encoding, had_bom: bool) -> Result<Vec<u8>, String> {
     if enc == encoding_rs::UTF_16LE || enc == encoding_rs::UTF_16BE {
         let le = enc == encoding_rs::UTF_16LE;
         let mut out = Vec::new();
@@ -51,9 +51,11 @@ pub fn encode(text: &str, enc: &'static encoding_rs::Encoding, had_bom: bool) ->
         for u in units {
             out.extend(if le { u.to_le_bytes() } else { u.to_be_bytes() });
         }
-        return out;
+        return Ok(out);
     }
-    enc.encode(text).0.into_owned()
+    let (bytes, _, errors) = enc.encode(text);
+    if errors { return Err(format!("ENCODING_UNREPRESENTABLE: This text cannot be saved as {}. Save as UTF-8 to preserve all characters.", enc.name())); }
+    Ok(bytes.into_owned())
 }
 
 static RUNTIME: RwLock<Option<RuntimeSettings>> = RwLock::new(None);
@@ -84,7 +86,7 @@ pub fn ssh_command(r: &RuntimeSettings) -> Option<String> {
         return None;
     }
     let key = r.ssh_private_key.trim().replace('\\', "/");
-    Some(format!("ssh -i \"{key}\" -o IdentitiesOnly=yes"))
+    Some(format!("ssh -i '{}' -o IdentitiesOnly=yes", key.replace('\'', "'\\''")))
 }
 
 #[derive(Serialize, Default)]
@@ -127,16 +129,14 @@ pub fn versions(gpg_program: &str) -> Versions {
 /// Read several Git config values at once (scope "global" or "local").
 pub fn config_get(dir: Option<&Path>, scope: &str, keys: &[String]) -> HashMap<String, String> {
     let d = dir.map(|p| p.to_path_buf()).unwrap_or_else(std::env::temp_dir);
-    keys.iter()
-        .map(|k| {
-            let mut a = vec!["config"];
-            if !scope.is_empty() {
-                a.push(if scope == "local" { "--local" } else { "--global" });
-            }
-            a.extend(["--get", k.as_str()]);
-            (k.clone(), git::run(&d, &a).stdout.trim().to_string())
-        })
-        .collect()
+    let mut args = vec!["config", "--list", "-z", "--includes"];
+    if !scope.is_empty() { args.push(if scope == "local" { "--local" } else { "--global" }); }
+    let output = git::run(&d, &args);
+    let mut values = HashMap::new();
+    for record in output.stdout.split('\0') {
+        if let Some((key, value)) = record.split_once('\n') { values.insert(key.to_lowercase(), value.trim().to_owned()); }
+    }
+    keys.iter().map(|key| (key.clone(), values.get(&key.to_lowercase()).cloned().unwrap_or_default())).collect()
 }
 
 /// gpg --quick-gen-key: "a 4096 bit key with the name and email in your current profile that expires in 2 years"
@@ -148,13 +148,18 @@ pub fn gpg_generate(program: &str, name: &str, email: &str, passphrase: &str) ->
     let program = if program.trim().is_empty() { "gpg" } else { program.trim() };
     let uid = format!("{} <{}>", name.trim(), email.trim());
     let mut c = std::process::Command::new(program);
-    c.args(["--batch", "--pinentry-mode", "loopback", "--passphrase", passphrase, "--quick-gen-key", &uid, "rsa4096", "sign", "2y"]);
+    c.args(["--batch", "--pinentry-mode", "loopback", "--passphrase-fd", "0", "--quick-gen-key", &uid, "rsa4096", "sign", "2y"]);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         c.creation_flags(0x0800_0000);
     }
-    let o = c.output().map_err(|e| format!("Could not start {program}: {e}"))?;
+    if passphrase.contains(['\r', '\n']) { return Err("A GPG passphrase cannot contain line breaks.".into()); }
+    use std::io::Write;
+    c.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let mut child = c.spawn().map_err(|e| format!("Could not start {program}: {e}"))?;
+    if let Some(mut input) = child.stdin.take() { input.write_all(format!("{passphrase}\n").as_bytes()).map_err(|e| e.to_string())?; }
+    let o = child.wait_with_output().map_err(|e| e.to_string())?;
     if !o.status.success() {
         return Err(String::from_utf8_lossy(&o.stderr).trim().to_string());
     }
@@ -209,16 +214,46 @@ pub fn forget_credentials(hosts: &[String]) -> usize {
 }
 
 /// General > Delete ".orig" files after merging: the backup copies merge tools leave behind.
-pub fn delete_orig_files(dir: &Path) -> Vec<String> {
-    let o = git::run(dir, &["ls-files", "--others", "-z", "--", "*.orig"]);
-    let mut gone = Vec::new();
-    for f in o.stdout.split('\0').filter(|s| s.ends_with(".orig")) {
-        let p: PathBuf = dir.join(f);
-        if p.is_file() && std::fs::remove_file(&p).is_ok() {
-            gone.push(f.to_string());
-        }
+fn orig_manifest(dir: &Path) -> PathBuf {
+    dir.join(git::run(dir, &["rev-parse", "--git-path", "gitcraft-orig-before.json"]).stdout.trim())
+}
+pub fn orig_files(dir: &Path) -> Vec<String> {
+    git::run(dir, &["ls-files", "--others", "-z", "--", "*.orig"]).stdout.split('\0').filter(|s| s.ends_with(".orig")).map(str::to_owned).collect()
+}
+pub fn begin_orig_cleanup(dir: &Path) {
+    if operation_in_progress(dir) { return; }
+    if let Ok(bytes) = serde_json::to_vec(&orig_files(dir)) { let _ = std::fs::write(orig_manifest(dir), bytes); }
+}
+pub fn cancel_orig_cleanup(dir: &Path) { let _ = std::fs::remove_file(orig_manifest(dir)); }
+fn operation_in_progress(dir: &Path) -> bool {
+    ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply"].iter().any(|state| dir.join(git::run(dir, &["rev-parse", "--git-path", state]).stdout.trim()).exists())
+}
+#[derive(serde::Deserialize, Serialize)]
+pub struct OrigCandidate { pub path: String, pub expected: String }
+pub fn orig_cleanup_candidates(dir: &Path) -> Vec<OrigCandidate> {
+    if operation_in_progress(dir) { return vec![]; }
+    let Some(before) = std::fs::read(orig_manifest(dir)).ok().and_then(|s| serde_json::from_slice::<Vec<String>>(&s).ok()) else { return vec![] };
+    let output = git::run(dir, &["ls-files", "--others", "--exclude-standard", "-z", "--", "*.orig"]);
+    output.stdout.split('\0').filter(|path| path.ends_with(".orig") && !before.iter().any(|old| old == path)).filter_map(|path| {
+        let bytes = std::fs::read(dir.join(path)).ok()?;
+        Some(OrigCandidate { path: path.into(), expected: crate::files::content_token(Some(&bytes)) })
+    }).collect()
+}
+pub fn delete_orig_selected(dir: &Path, selected: &[OrigCandidate]) -> Result<Vec<String>, String> {
+    let current = orig_cleanup_candidates(dir);
+    if selected.iter().any(|chosen| !current.iter().any(|candidate| candidate.path == chosen.path && candidate.expected == chosen.expected)) {
+        return Err("The backup files or Git operation changed. Review the candidates again before deleting them.".into());
     }
-    gone
+    let mut removed = Vec::new();
+    for candidate in selected { std::fs::remove_file(dir.join(&candidate.path)).map_err(|e| e.to_string())?; removed.push(candidate.path.clone()); }
+    cancel_orig_cleanup(dir);
+    Ok(removed)
+}
+#[cfg(test)]
+pub fn delete_orig_files(dir: &Path) -> Vec<String> {
+    let candidates = orig_cleanup_candidates(dir);
+    if candidates.is_empty() { return vec![]; }
+    delete_orig_selected(dir, &candidates).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -230,13 +265,14 @@ mod tests {
     fn repository_encodings_round_trip() {
         let w1252 = encoding_rs::Encoding::for_label(b"windows-1252").unwrap();
         assert_eq!(decode(&[0x63, 0x61, 0x66, 0xE9], w1252), "café");
-        assert_eq!(encode("café", w1252, false), vec![0x63, 0x61, 0x66, 0xE9]);
+        assert_eq!(encode("café", w1252, false).unwrap(), vec![0x63, 0x61, 0x66, 0xE9]);
         let le = encoding_rs::UTF_16LE;
-        let bytes = encode("hi", le, true);
+        let bytes = encode("hi", le, true).unwrap();
         assert_eq!(bytes, vec![0xFF, 0xFE, b'h', 0, b'i', 0]);
         assert_eq!(decode(&bytes, le), "hi");
         set_runtime(RuntimeSettings { encodings: [(r"C:\Repo".to_string(), "windows-1252".to_string())].into(), ssh_use_agent: true, ..Default::default() });
-        assert_eq!(encoding_for(Path::new("c:/repo/")), Some(w1252));
+        #[cfg(windows)] assert_eq!(encoding_for(Path::new("c:/repo/")), Some(w1252));
+        #[cfg(not(windows))] assert_eq!(encoding_for(Path::new("c:/repo/")), None);
         assert_eq!(encoding_for(Path::new("c:/other")), None);
         set_runtime(RuntimeSettings { ssh_use_agent: true, ..Default::default() });
     }
@@ -244,7 +280,7 @@ mod tests {
     #[test]
     fn chosen_ssh_key_becomes_ssh_command() {
         let mut r = RuntimeSettings { ssh_use_agent: false, ssh_private_key: r"C:\Users\Sam\.ssh\id_ed25519".into(), ..Default::default() };
-        assert_eq!(ssh_command(&r).as_deref(), Some("ssh -i \"C:/Users/Sam/.ssh/id_ed25519\" -o IdentitiesOnly=yes"));
+        assert_eq!(ssh_command(&r).as_deref(), Some("ssh -i 'C:/Users/Sam/.ssh/id_ed25519' -o IdentitiesOnly=yes"));
         r.ssh_use_agent = true;
         assert_eq!(ssh_command(&r), None);
     }
@@ -256,6 +292,7 @@ mod tests {
         fs::create_dir_all(d.join("src")).unwrap();
         assert!(git::run(&d, &["init", "-q"]).ok);
         fs::write(d.join("a.txt"), "a").unwrap();
+        begin_orig_cleanup(&d);
         fs::write(d.join("a.txt.orig"), "backup").unwrap();
         fs::write(d.join("src").join("b.rs.orig"), "backup").unwrap();
         let mut gone = delete_orig_files(&d);

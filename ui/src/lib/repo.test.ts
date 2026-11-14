@@ -26,6 +26,21 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 describe("repository loading and refresh", () => {
+  it("queues overlapping mutations until the preceding action and refresh finish", async () => {
+    await open();
+    let finish!: (value: { ok: boolean; message: string }) => void;
+    const run = vi.spyOn(api, "run").mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }))
+      .mockResolvedValue({ ok: true, message: "done" });
+    vi.spyOn(api, "repoStatus").mockResolvedValue(repo.status);
+    const first = act(repo.path, { type: "stageAll" }, true);
+    const second = act(repo.path, { type: "unstageAll" }, true);
+    expect(run).toHaveBeenCalledTimes(1);
+    finish({ ok: true, message: "staged" });
+    expect(await first).toBe(true);
+    expect(await second).toBe(true);
+    expect(run.mock.calls.map((call) => call[1].type)).toEqual(["stageAll", "unstageAll"]);
+  });
+
   it("seeds a fresh query on open instead of reading the repository twice", async () => {
     await open();
     const read = vi.fn(() => api.openRepo(repo.path));
@@ -136,13 +151,25 @@ describe("repository refresh safety", () => {
       expect(useStore.getState().ui[tab].selection).toEqual({ type: "commit", sha: "second" });
     } finally { stop(); }
   });
-  it("restores the selected older commit when new commits shift it onto later pages", async () => {
+  it("defers old history restoration until after the initial refresh", async () => {
     await open();
     const previous = { ...repo, commits: [commit("first"), commit("selected")] };
     useStore.getState().setUi(useStore.getState().activeId, { selection: { type: "commit", sha: "selected" } });
     vi.mocked(api.openRepo).mockResolvedValue({ ...repo, head_sha: "new", commits: [commit("new")] });
     vi.spyOn(api, "historyPage").mockResolvedValue({ ...page, commits: [commit("first"), commit("selected")] });
     const result = await readRepoSnapshot(repo.path, 500, { hidden: [], solo: [] }, previous);
-    expect(result.commits.map((c) => c.sha)).toEqual(["new", "first", "selected"]);
+    expect(result.commits.map((c) => c.sha)).toEqual(["new"]);
+    expect(result.history_restore).toBe(2);
+    expect(result.history_restore_selection).toBe("selected");
+    expect(api.historyPage).not.toHaveBeenCalled();
   });
+});
+
+
+it("invalidates hosting remote resolution even when remote names are unchanged", async () => {
+  await open();
+  const key=["remote",repo.path,"origin"];
+  queryClient.setQueryData(key,{web:"https://github.com/old/repo"});
+  await refresh(repo.path);
+  expect(queryClient.getQueryState(key)?.isInvalidated).toBe(true);
 });

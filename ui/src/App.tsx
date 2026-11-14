@@ -1,3 +1,5 @@
+import { startPersistence, flushPersistence, hasUnsavedPreferences } from "@/lib/persistence";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useShallow } from "zustand/react/shallow";
 import { startBackendSync } from "@/lib/integrations";
 import { syncGitCredentials } from "@/lib/hosting";
@@ -284,21 +286,18 @@ function useStartup() {
       const savedPaths = useStore.getState().settings.rememberTabs ? [...new Set(saved?.tabs ?? [])] : [];
       if (savedPaths.length) restoreTabs(savedPaths, saved?.active ?? 0);
       startBackendSync();
-      // Persist settings and open tabs whenever they change.
-      let timer: number | undefined;
-      useStore.subscribe((st, prev) => {
-        if (st.settings === prev.settings && st.tabs === prev.tabs && st.activeId === prev.activeId && st.profiles === prev.profiles && st.activeProfile === prev.activeProfile) return;
-        clearTimeout(timer);
-        timer = window.setTimeout(() => {
-          const rt = st.tabs.filter((t) => t.kind === "repo");
-          api.saveSettings({
-            settings: st.settings,
-            tabs: rt.map((t) => t.path),
-            active: Math.max(0, rt.findIndex((t) => t.id === st.activeId)),
-            profiles: st.profiles,
-            activeProfile: st.activeProfile,
-          });
-        }, 400);
+      startPersistence();
+      let closing = false;
+      let allowClose = false;
+      await getCurrentWindow().onCloseRequested(event => {
+        if (allowClose && !hasUnsavedPreferences()) return;
+        event.preventDefault();
+        if (closing) return;
+        closing = true;
+        void flushPersistence().then(() => { closing = false; allowClose = true; return getCurrentWindow().close(); }).catch(error => {
+          closing = false; allowClose = false;
+          useStore.getState().toast(false, "Could not save preferences before closing: " + String(error));
+        });
       });
       setSettingsLoaded(true);
       await syncGitCredentials();

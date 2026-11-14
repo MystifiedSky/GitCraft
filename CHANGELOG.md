@@ -6,6 +6,8 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Added
 
+- A maintained bug and optimization checklist tracks priorities, ownership, reproduction evidence, and verification before issues are marked fixed.
+
 - A test workflow runs frontend and native regression suites on Windows, Ubuntu, and macOS for pull requests and pushes to main. Platform setup and desktop validation instructions document how to test all three targets.
 
 - An optional strip of coloured ticks beside the graph's scrollbar (Preferences > UI Customization > Show markers beside the graph scrollbar) can mark branches, tags, remote branches, the checked-out commit and the selection. It is off by default, so the graph looks as before.
@@ -19,6 +21,13 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 - The bell in the tab bar is now a notification center: unread badge (50+ from fifty), All / Read / Unread filter, newest first with Today / Yesterday / date labels, mark as read or unread, remove, and Mark all as read / unread. Failed actions and available updates appear there. File > Sign Out removes the saved service sign-ins and shows "Successfully signed out". The status bar says "Connect an integration" until a service is connected, then "Select an integration" for repositories on a service you have not connected. The start screen gains Intro Tutorials and Documentation links.
 
 ### Changed
+
+- Load independent hosting services and repository summaries with bounded concurrency. Batch configuration and submodule reads, cache ignored-file classifications, and avoid retransmitting unchanged activity logs.
+- Keep large file lists, folder counts, file-finder ranking, branch grouping, graph highlighting, and coding-session grouping responsive with bounded rendering and reusable indexes.
+- Bound terminal input and output queues, let the renderer acknowledge consumed output, and cancel Git helpers together with their parent process.
+- Automatically excerpt large AI contexts, prioritizing manifests and local changes and clearly summarizing omitted contents instead of collecting an unlimited request.
+
+- Branch operations refresh their first history page promptly and restore older pages in the background. Session discovery reuses unchanged logs, Git object and reflog activity no longer triggers unnecessary graph refreshes, and AI context generation omits bulk dependency source before building patches.
 
 - AI helpers summarize bulk vendored dependency imports and removals while retaining manifests, licenses, patch notes, and edits to existing dependency files. Large changes are no longer rejected by a fixed local byte limit; the selected provider enforces its context capacity.
 
@@ -53,6 +62,22 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
+- Protect existing files during repository initialization and submodule removal. Stash actions follow the selected stash, and discard Redo preserves its original file selection and refuses later edits.
+- Reject stale hunk selections and history-edit plans. Internal patches use consistent file paths, and partial operations refuse non-UTF-8 patches rather than changing their bytes.
+- Preserve complete interactive replay plans through conflicts and allow interrupted Gitflow finishes to resume without recreating release tags. Conflict recovery uses the correct Git operation.
+- Keep profile identities, selected SSH keys, signing fingerprints, and case-sensitive repository paths consistent across settings changes.
+- Check out the exact pull-request source commit, create pull requests from the configured push destination, and load all result pages. Server-side rebases finish before their merge is sent.
+- Preserve new commit drafts while an earlier commit finishes. File editors retain layout and wrapping when switching files, and read or removed notifications dismiss their desktop pop-ups.
+- Show untracked stash files with the correct previews and copy actions. Support SHA-256 blame, Unicode file names, spaced remote URLs, custom LFS hooks, file-based sparse clones, and unstaging or exporting changes before the first commit.
+- Save pending preferences and tabs before closing or installing an update, and report incomplete LFS initialization while keeping the created repository available. Merge-backup cleanup waits for completion and lets you review new backup files before deletion.
+- Keep complete shipped release notes when pending notes are reworded. Commit-message control characters remain message content instead of creating extra history entries.
+- Preserve quoted custom arguments and literal repository/file placeholders. Windows file reveal uses the selected item's correct shell identifier.
+
+- Discard preserves existing stashes when there is nothing new to discard. Partially completed composed commits remain undoable, and repository mutations run in order.
+- File and conflict-editor saves refuse to overwrite newer disk changes. AI conflict suggestions cannot replace output after its file or edits have changed.
+- Renamed files retain their original contents in previews, status errors are reported instead of showing a clean repository, and large ref lists no longer block history recovery.
+- Conflict warnings refresh when local target branches move. AI helpers include untracked text files, and release publication waits for all platform test jobs.
+
 - Repository refreshes explicitly sort ref signatures with Unicode-aware comparison and a deterministic tie-breaker, preserving loaded history when refs arrive in a different order.
 
 - Undo and redo refuse to move a different branch or overwrite commits made after the recorded action. Undoing branch creation also preserves branches that have since changed.
@@ -68,6 +93,9 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 - An outdated test of the AI commit-message request was corrected; the frontend (61) and Rust (63) test suites now run and pass.
 
 ### Security
+
+- Keep AI connection settings isolated per request so concurrent calls use their selected provider and account.
+- Block authenticated hosting redirects and redact credentials from service errors. Send GPG passphrases through private input and quote selected SSH key paths literally.
 
 - Release recording validates version strings and matches existing release headings literally, removing command-line input from regular-expression construction.
 - Updated the embedded browser runtime to Wry 0.57.2, the latest compatible stable patch release.

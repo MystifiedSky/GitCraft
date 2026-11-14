@@ -30,6 +30,7 @@ export interface Stash {
 }
 
 export interface FileChange {
+  storage?: string | null;
   path: string;
   status: string; // M A D R ? U
 }
@@ -60,6 +61,8 @@ export interface HistoryPage {
   history_cursor: HistoryCursor | null;
 }
 export interface RepoView {
+  history_restore?: number;
+  history_restore_selection?: string | null;
   history_cursor?: HistoryCursor | null;
   path: string;
   name: string;
@@ -90,6 +93,7 @@ export type DiffSource =
 export const WORKDIR = "WORKDIR";
 
 export interface FileVersions {
+  new_token?: string | null;
   too_large?: boolean;
   preview_limit?: number;
   old: string | null;
@@ -151,7 +155,7 @@ export interface AccountInfo {
   ssh_keys: { path: string; kind: string; public: string }[];
   ssh_keygen: boolean;
   gpg: boolean;
-  gpg_keys: { id: string; uid: string }[];
+  gpg_keys: { id: string; uid: string; fingerprint?: string }[];
   signing_key: string;
   sign_commits: boolean;
   signing_format: string;
@@ -222,6 +226,7 @@ export interface SubmoduleInfo {
 }
 
 export interface ConflictInfo {
+  working_token: string;
   working: string | null;
   base: string | null;
   ours: string | null;
@@ -230,6 +235,8 @@ export interface ConflictInfo {
   theirs_label: string;
   binary: boolean;
 }
+
+export interface RebaseState { head: string; branch: string; base: string }
 
 export interface DiffLine {
   kind: "Context" | "Added" | "Removed" | "Hunk" | "Meta";
@@ -255,6 +262,7 @@ export type Action =
   | { type: "commit"; summary: string; description: string; amend: boolean; stageAll: boolean; skipHooks?: boolean; stripComments?: boolean }
   | { type: "checkout"; target: string }
   | { type: "checkoutRemote"; remoteBranch: string }
+  | { type: "checkoutPullRequest"; url: string; reference: string; expected: string }
   | { type: "createBranch"; name: string; at: string | null; checkout: boolean }
   | { type: "deleteBranch"; name: string }
   | { type: "deleteRemoteBranch"; remoteBranch: string }
@@ -268,15 +276,15 @@ export type Action =
   | { type: "push"; force: boolean; lease?: boolean }
   | { type: "pushBranch"; branch: string }
   | { type: "skipRebase" }
-  | { type: "interactiveRebase"; base: string; items: TodoItem[] }
+  | { type: "interactiveRebase"; base: string; items: TodoItem[]; expected: RebaseState }
   | { type: "interactiveCherryPick"; items: TodoItem[] }
   | { type: "takeSide"; paths: string[]; side: "ours" | "theirs" }
   | { type: "markResolved"; paths: string[] }
   | { type: "markConflicted"; paths: string[] }
-  | { type: "saveResolved"; file: string; content: string }
+  | { type: "saveResolved"; file: string; content: string; expected?: string; utf8?: boolean }
   | { type: "fastForward"; branch: string; to: string }
   | { type: "setUpstream"; branch: string; upstream: string }
-  | { type: "stashRename"; index: number; message: string }
+  | { type: "stashRename"; index: number; expected?: string; message: string }
   | { type: "autoFetch"; prune: boolean }
   | { type: "fetchRemote"; remote: string }
   | { type: "remoteEdit"; name: string; newName: string; url: string; pushUrl: string }
@@ -294,7 +302,7 @@ export type Action =
   | { type: "composeCommits"; commits: { summary: string; description: string; files: string[] }[] }
   | { type: "applyPatchFile"; file: string }
   | { type: "stashFiles"; paths: string[]; message: string }
-  | { type: "stashTakeFile"; index: number; path: string }
+  | { type: "stashTakeFile"; index: number; expected?: string; path: string }
   | { type: "revertHunk"; sha: string; parent: string | null; file: string; hunk: number; lines: number[] | null }
   | { type: "mergeSquash"; branch: string }
   | { type: "externalDiff"; file: string; staged: boolean; tool: string }
@@ -310,19 +318,20 @@ export type Action =
   | { type: "gitflowStart"; kind: string; name: string }
   | { type: "gitflowFinish"; kind: string; name: string; keep: boolean; tagMessage: string }
   | { type: "stash"; message: string }
-  | { type: "stashPop"; index: number }
-  | { type: "stashApply"; index: number }
-  | { type: "stashDrop"; index: number }
+  | { type: "stashPop"; index: number; expected?: string }
+  | { type: "stashApply"; index: number; expected?: string }
+  | { type: "stashDrop"; index: number; expected?: string }
   | { type: "cherryPick"; sha: string; mainline?: number }
   | { type: "revert"; sha: string; mainline?: number }
   | { type: "reset"; sha: string; mode: string }
   | { type: "merge"; branch: string }
   | { type: "rebase"; onto: string }
   | { type: "abortMerge" }
+  | { type: "sequencer"; operation: string; command: "continue" | "skip" | "abort" }
   | { type: "abortRebase" }
   | { type: "continueRebase" }
   | { type: "addRemote"; name: string; url: string }
-  | { type: "patch"; file: string; untracked: boolean; op: PatchOp; hunk: number; lines: number[] | null }
+  | { type: "patch"; file: string; untracked: boolean; op: PatchOp; hunk: number; lines: number[] | null; expected: DiffLine[] }
   | { type: "cherryPickMany"; shas: string[] }
   | { type: "undo" }
   | { type: "redo" };
@@ -385,10 +394,11 @@ export const api = {
   repoStatus: (path: string) => invoke<RepoView["status"]>("repo_status", { path }),
   openRepo: (path: string, max?: number, view?: RefView) => invoke<RepoView>("open_repo", { path, max: max ?? null, view: view ?? null }),
   historyPage: (path: string, cursor: HistoryCursor, max = 2000) => invoke<HistoryPage>("history_page", { path, cursor, max }),
+  commitDetails: (path: string, sha: string) => invoke<Commit>("commit_details", { path, sha }),
   commitFiles: (path: string, sha: string) => invoke<FileChange[]>("commit_files", { path, sha }),
   fileVersions: (path: string, source: DiffSource, file: string, untracked: boolean, parent: string | null, allowLarge = false) =>
     invoke<FileVersions>("file_versions", { path, source, file, untracked, parent, allowLarge }),
-  saveFile: (path: string, file: string, content: string) => invoke<void>("save_file", { path, file, content }),
+  saveFile: (path: string, file: string, content: string, expected?: string, utf8 = false) => invoke<void>("save_file", { path, file, content, expected, utf8 }),
   fileHistory: (path: string, file: string) => invoke<HistoryEntry[]>("file_history", { path, file }),
   blame: (path: string, file: string, rev: string | null) => invoke<BlameLine[]>("blame", { path, file, rev }),
   commitStats: (path: string, shas: string[]) => invoke<Stats[]>("commit_stats", { path, shas }),
@@ -400,9 +410,11 @@ export const api = {
     return invoke<void>("open_in_editor", { path, file: file ?? null, tool: t.externalEditor, exe: t.editorPath, fileArgs: t.editorFileArgs, repoArgs: t.editorRepoArgs });
   },
   accountInfo: (path: string | null) => invoke<AccountInfo>("account_info", { path }),
+  gitConfig: (path: string | null, scope: "global" | "local", keys: string[]) => invoke<Record<string, string>>("git_config_get", { path, scope, keys }),
   setGitConfig: (path: string | null, scope: "global" | "local", key: string, value: string) => invoke<void>("set_git_config", { path, scope, key, value }),
   generateSshKey: (email: string, name: string) => invoke<string>("generate_ssh_key", { email, name }),
   cancelJob: (id: string) => invoke<boolean>("cancel_job", { id }),
+  lfsLocks: (path: string) => invoke<LfsInfo["locks"]>("lfs_locks", { path }),
   lfsInfo: (path: string) => invoke<LfsInfo>("lfs_info", { path }),
   sparseInfo: (path: string) => invoke<{ enabled: boolean; patterns: string[] }>("sparse_info", { path }),
   gitignoreTemplates: () => invoke<string[]>("gitignore_templates"),
@@ -410,17 +422,19 @@ export const api = {
   cleanupList: (path: string) => invoke<CleanupBranch[]>("cleanup_list", { path }),
   remotesList: (path: string) => invoke<RemoteInfo[]>("remotes_list", { path }),
   submodulesList: (path: string) => invoke<SubmoduleInfo[]>("submodules_list", { path }),
+  rebasePlan: (path: string, base: string) => invoke<{ expected: RebaseState; commits: Commit[] }>("rebase_plan", { path, base }),
   rebaseCommits: (path: string, base: string) => invoke<Commit[]>("rebase_commits", { path, base }),
   conflictInfo: (path: string, file: string) => invoke<ConflictInfo>("conflict_info", { path, file }),
   fileDiff: (path: string, source: DiffSource, file: string, untracked: boolean, parent: string | null, ignoreWs = false) =>
     invoke<DiffLine[]>("file_diff", { path, source, file, untracked, parent, ignoreWs }),
   run: (path: string, action: Action) => invoke<ActionResult>("run_action", { path, action }),
+  activityLogSnapshot: (version?: number) => invoke<[number, LogEntry[]] | null>("activity_log_snapshot", { version }),
   activityLog: () => invoke<LogEntry[]>("activity_log"),
   sampleRepo: () => invoke<string>("sample_repo"),
   conflictSample: () => invoke<string>("conflict_sample"),
   lastCommitMessage: (path: string) => invoke<[string, string]>("last_commit_message", { path }),
   pickFolder: (title: string) => invoke<string | null>("pick_folder", { title }),
-  initRepo: (parent: string, name: string, options?: InitOptions) => invoke<string>("init_repo", { parent, name, options: options ?? null }),
+  initRepo: (parent: string, name: string, options?: InitOptions) => invoke<{path: string; warning: string | null}>("init_repo", { parent, name, options: options ?? null }),
   cloneRepo: (url: string, parent: string, options?: CloneOptions) => invoke<string>("clone_repo", { url, parent, options: options ?? null }),
   /** Preferences > External Tools > Terminal; General > Use In-App Terminal Instead opens the built-in one. */
   openTerminal: (path: string) => {

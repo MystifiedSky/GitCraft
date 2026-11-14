@@ -19,8 +19,7 @@ pub fn secret_get(name: &str) -> Option<String> {
 pub fn secret_set(name: &str, value: &str) -> Result<(), String> {
     let e = keyring::Entry::new(SERVICE, name).map_err(|e| e.to_string())?;
     if value.is_empty() {
-        let _ = e.delete_credential();
-        Ok(())
+        match e.delete_credential() { Ok(()) | Err(keyring::Error::NoEntry) => Ok(()), Err(error) => Err(error.to_string()) }
     } else {
         e.set_password(value).map_err(|e| e.to_string())
     }
@@ -150,12 +149,33 @@ fn b64(s: &str) -> String {
 }
 
 /// One HTTPS request to a service's REST API; JSON in and out.
+pub struct HttpPage { pub value: Value, pub link: Option<String>, pub next_page: Option<String>, pub continuation: Option<String> }
+
 pub fn http(method: &str, url: &str, auth: &Auth, body: Option<Value>) -> Result<Value, String> {
+    http_page(method, url, auth, body).map(|page| page.value)
+}
+
+pub fn http_page(method: &str, url: &str, auth: &Auth, body: Option<Value>) -> Result<HttpPage, String> {
+    http_page_request(method, url, auth, body).map_err(|mut error| {
+        let secrets = match auth {
+            Auth::Bearer(value) | Auth::Header(_, value) => vec![value.clone()],
+            Auth::Basic(user, password) => vec![password.clone(), b64(&format!("{user}:{password}"))],
+            Auth::Query(key, token) => vec![key.clone(), token.clone()],
+        };
+        for secret in secrets.into_iter().filter(|s| !s.is_empty()) {
+            error = error.replace(&crate::hosting_api::q(&secret), "[redacted]").replace(&secret, "[redacted]");
+        }
+        error
+    })
+}
+
+fn http_page_request(method: &str, url: &str, auth: &Auth, body: Option<Value>) -> Result<HttpPage, String> {
     let url = match auth {
-        Auth::Query(k, t) => format!("{url}{}key={k}&token={t}", if url.contains('?') { "&" } else { "?" }),
+        Auth::Query(k, t) => format!("{url}{}key={}&token={}", if url.contains('?') { "&" } else { "?" }, crate::hosting_api::q(k), crate::hosting_api::q(t)),
         _ => url.to_string(),
     };
-    let mut req = ureq::request(method, &url).set("User-Agent", "GitCraft").timeout(std::time::Duration::from_secs(30));
+    let agent = ureq::AgentBuilder::new().redirects(0).build();
+    let mut req = agent.request(method, &url).set("User-Agent", "GitCraft").timeout(std::time::Duration::from_secs(30));
     req = match auth {
         Auth::Bearer(t) => req.set("Authorization", &format!("Bearer {t}")),
         Auth::Header(h, t) => req.set(h, t),
@@ -173,8 +193,12 @@ pub fn http(method: &str, url: &str, auth: &Auth, body: Option<Value>) -> Result
     };
     match res {
         Ok(r) => {
+            if (300..400).contains(&r.status()) { return Err("The hosting service redirected this authenticated request. Update its configured address; credentials were not forwarded.".into()); }
+            let link = r.header("Link").map(str::to_owned);
+            let next_page = r.header("X-Next-Page").map(str::to_owned);
+            let continuation = r.header("X-MS-ContinuationToken").map(str::to_owned);
             let text = r.into_string().map_err(|e| e.to_string())?;
-            Ok(if text.trim().is_empty() { Value::Null } else { serde_json::from_str(&text).unwrap_or(Value::String(text)) })
+            Ok(HttpPage { value: if text.trim().is_empty() { Value::Null } else { serde_json::from_str(&text).unwrap_or(Value::String(text)) }, link, next_page, continuation })
         }
         Err(ureq::Error::Status(code, r)) => {
             let text = r.into_string().unwrap_or_default();
@@ -190,7 +214,7 @@ pub fn http(method: &str, url: &str, auth: &Auth, body: Option<Value>) -> Result
             };
             Err(format!("{code}: {}{hint}", msg.chars().take(300).collect::<String>()))
         }
-        Err(e) => Err(e.to_string()),
+        Err(ureq::Error::Transport(error)) => Err(format!("Could not contact the hosting service ({:?}). Check the service address and connection.", error.kind())),
     }
 }
 
@@ -359,14 +383,14 @@ pub struct RemoteRepo {
 /// Azure DevOps and Bitbucket Data Center address styles.
 pub fn parse_remote(url: &str, gitlab_host: &str) -> Option<RemoteRepo> {
     let u = url.trim().trim_end_matches('/').trim_end_matches(".git");
-    let (host, path) = if let Some(rest) = u.strip_prefix("git@") {
+    let (mut host, path) = if let Some(rest) = u.strip_prefix("git@") {
         let (h, p) = rest.split_once(':')?;
         (h.to_string(), p.to_string())
     } else {
         let rest = u.split_once("://").map(|(_, r)| r).unwrap_or(u);
         let rest = rest.split_once('@').map(|(_, r)| r).unwrap_or(rest);
         let (h, p) = rest.split_once('/')?;
-        (h.split(':').next().unwrap_or(h).to_string(), p.to_string())
+        (if u.starts_with("ssh://") { h.split(':').next().unwrap_or(h).to_string() } else { h.to_string() }, p.to_string())
     };
     let c = config();
     let gl_self = if gitlab_host.trim().is_empty() { clean_host(&c.gitlab_host) } else { clean_host(gitlab_host) };
@@ -382,6 +406,12 @@ pub fn parse_remote(url: &str, gitlab_host: &str) -> Option<RemoteRepo> {
         };
         let web = format!("https://dev.azure.com/{org}/{project}/_git/{repo}");
         return mk(Provider::Azure, "azure", "dev.azure.com", format!("{org}/{project}/{repo}"), web);
+    }
+    if u.starts_with("git@") || u.starts_with("ssh://") {
+        let hostname = |authority: &str| authority.split('/').next().unwrap_or(authority).split(':').next().unwrap_or(authority).to_ascii_lowercase();
+        for authority in [&gl_self, &clean_host(&c.github_enterprise_host), &clean_host(&c.bitbucket_server_host)] {
+            if !authority.is_empty() && hostname(authority) == hostname(&host) { host = authority.split('/').next().unwrap_or(authority).to_owned(); break; }
+        }
     }
     let simple = |provider: Provider, service: &str| mk(provider, service, &host, path.clone(), format!("https://{host}/{path}"));
     match host.as_str() {
@@ -556,5 +586,45 @@ mod tests {
     #[test]
     fn issue_branch_names() {
         assert_eq!(branch_for_issue(42, "Crash when saving: file > 2 GB!"), "issue-42-crash-when-saving-file-2-gb");
+    }
+}
+
+/// Match the configured push destination, including renamed upstream branches.
+pub fn pull_request_destination(dir: &std::path::Path, branch: &str, gitlab_host: &str) -> Result<(RemoteRepo, String), String> {
+    let remotes = crate::git::run(dir, &["remote"]).stdout;
+    let configured = crate::git::run(dir, &["config", "--get", &format!("branch.{branch}.remote")]).stdout.trim().to_owned();
+    let remote = if !configured.is_empty() { configured } else if remotes.lines().any(|r| r == "origin") { "origin".into() } else { remotes.lines().next().unwrap_or_default().into() };
+    if remote.is_empty() || !remotes.lines().any(|r| r == remote) { return Err("Choose a server remote for this branch before starting a pull request.".into()); }
+    let merge = crate::git::run(dir, &["config", "--get", &format!("branch.{branch}.merge")]).stdout.trim().to_owned();
+    let destination = if merge.is_empty() { branch.to_owned() } else { merge.strip_prefix("refs/heads/").ok_or("The upstream must point to a branch.")?.to_owned() };
+    let url = crate::git::run(dir, &["remote", "get-url", "--push", &remote]);
+    if !url.ok { return Err(url.message()); }
+    let repository = parse_remote(url.stdout.trim(), gitlab_host).ok_or("The push remote is not a supported hosting service.")?;
+    Ok((repository, destination))
+}
+
+
+#[cfg(test)]
+mod http_safety_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    #[test]
+    fn credentials_do_not_follow_redirects_or_appear_in_errors() {
+        let destination=TcpListener::bind("127.0.0.1:0").unwrap();destination.set_nonblocking(true).unwrap();
+        let destination_port=destination.local_addr().unwrap().port();
+        for auth in [Auth::Bearer("synthetic-secret".into()),Auth::Header("PRIVATE-TOKEN","synthetic-secret".into()),Auth::Basic("synthetic-user".into(),"synthetic-secret".into()),Auth::Query("synthetic-key".into(),"synthetic-secret".into())] {
+            let server=TcpListener::bind("127.0.0.1:0").unwrap();let address=server.local_addr().unwrap();
+            let worker=std::thread::spawn(move || {let (mut stream,_)=server.accept().unwrap();let mut bytes=[0u8;8192];let _=stream.read(&mut bytes);write!(stream,"HTTP/1.1 302 Found\r\nLocation: http://localhost:{destination_port}/leak\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();});
+            let result=http_page("GET",&format!("http://{address}/cards"),&auth,None);
+            assert!(result.is_err());worker.join().unwrap();assert!(destination.accept().is_err());
+            let unavailable=TcpListener::bind("127.0.0.1:0").unwrap();let address=unavailable.local_addr().unwrap();drop(unavailable);
+            let error=http_page("GET",&format!("http://{address}/cards"),&auth,None).err().unwrap();
+            assert!(!error.contains("synthetic-secret"));assert!(!error.contains("synthetic-key"));
+        }
+        let server=TcpListener::bind("127.0.0.1:0").unwrap();let address=server.local_addr().unwrap();
+        let worker=std::thread::spawn(move || {let(mut stream,_)=server.accept().unwrap();let mut bytes=[0u8;8192];let _=stream.read(&mut bytes);let body=r#"{"message":"synthetic-key synthetic-secret"}"#;write!(stream,"HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();});
+        let error=http_page("GET",&format!("http://{address}/cards"),&Auth::Query("synthetic-key".into(),"synthetic-secret".into()),None).err().unwrap();worker.join().unwrap();
+        assert!(!error.contains("synthetic-"));assert!(error.contains("400"));
     }
 }
