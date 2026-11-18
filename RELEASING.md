@@ -1,16 +1,16 @@
 # Releasing GitCraft
 
-Each push to `main` starts the **Release** workflow. It builds the tip of that push and adds the workflow run number to the patch component of the base version in `tauri.conf.json`. For example, base `0.1.0` plus run 1 yields `0.1.1`. The workflow updates the version in its checkout only. It creates a version tag at the source commit when it publishes, so no version bump commits or manually pushed tags are needed.
+Each push to `main` starts the **Release** workflow unless the push only changes `CHANGELOG.md`. It builds the tip of that push and adds the workflow run number to the patch component of the base version in `tauri.conf.json`. For example, base `0.1.0` plus run 1 yields `0.1.1`. The workflow updates the version in its checkout only. It creates a version tag at the source commit when it publishes, so no version bump commits or manually pushed tags are needed.
 
 The workflow builds Windows x64 (NSIS and MSI), macOS (universal DMG), and Linux x64 (AppImage, DEB, and RPM). It signs the updater bundles, checks that all expected assets are present, and publishes them together to [GitHub Releases](https://github.com/MystifiedSky/GitCraft/releases/latest). Until that succeeds, installed copies continue to see the previous release.
 
-Use **Re-run failed jobs** in Actions to retry a failed release with the same version. Use **Run workflow** on `main` if you need a fresh build. To change the base version, set it with `npm --prefix ui run version:set -- <version>` and commit the changed manifests and lockfiles. Keep the next calculated version higher than the current release.
+Use **Re-run failed jobs** in Actions to retry a failed release with the same version. If a higher version has already published, the retry skips publication. Use **Run workflow** on `main` if you need a fresh build. To change the base version, set it with `npm --prefix ui run version:set -- <version>` and commit the changed manifests and lockfiles. Keep the next calculated version higher than the current release.
 
 ## Changelog
 
 Write new entries under `## [Unreleased]` in `CHANGELOG.md`. At publication, the workflow reads `CHANGELOG.md` from the release commit and the previous published tag. It posts only new entries, followed by a link to the full comparison. When there are no new entries, the release notes show just the comparison link. This also works when several releases queue up before the changelog is archived.
 
-Archive dated sections in a changelog pull request, oldest release first. Save `CHANGELOG.md` from the released tag and its previous published tag as UTF-8 files, then run `node scripts/changelog-release.mjs record <version> MystifiedSky/GitCraft <released-changelog> --previous <previous-changelog> --date <publication-date>`. Entries added after the released commit stay under Unreleased. Leave already published bullets as written until they are archived so the workflow can recognize them in the next release.
+Archive dated sections in a changelog pull request, oldest release first. Save `CHANGELOG.md` from the released tag and its previous published tag as UTF-8 files, then run `node scripts/changelog-release.mjs record <version> MystifiedSky/GitCraft <released-changelog> --previous <previous-changelog> --date <publication-date>`. Entries added after the released commit stay under Unreleased. Leave already published bullets as written until they are archived so the workflow can recognize them in the next release. Describe distinct changes with specific wording so two different changes do not look like duplicate entries.
 
 ## Updating installed copies
 

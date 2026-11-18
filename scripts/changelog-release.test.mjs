@@ -69,13 +69,16 @@ test('queued releases exclude already published bullets even when main still lis
   assert.equal(newNotes, '### Added\n\n- Third feature, added after the release.\n');
   assert.equal(releaseNotes(shipped, baseline), '');
   const archived = recordRelease({ current, shipped: current, previousChangelog: baseline, version: '0.1.7', repo: 'o/r', date: '2026-11-14' });
-  assert.match(archived.split('## [0.1.7]')[1], /Third feature/);
-  assert.doesNotMatch(archived.split('## [0.1.7]')[1], /First feature/);
+  const section = archived.split('## [0.1.7] - 2026-11-14\n\n')[1].split('\n## [0.1.5]')[0];
+  assert.equal(section.trim(), newNotes.trim());
 });
 
 test('release notes include a new bullet only once even if listed in multiple categories', () => {
   const duplicate = shipped.replace('- A fix.', '- A fix.\n- First feature.');
-  assert.equal(releaseNotes(duplicate), releaseNotes(shipped));
+  assert.equal(releaseNotes(duplicate), [
+    '### Added', '', '- First feature.', '', '- Second feature,',
+    '  continued on a second line.', '', '### Fixed', '', '- A fix.', '',
+  ].join('\n'));
 });
 
 test('category headings and trailing whitespace accept long inputs without backtracking', () => {

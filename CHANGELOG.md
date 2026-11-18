@@ -6,7 +6,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
-- GitHub release notes now list only changes since the previous published version, even when several releases are queued before the changelog is archived.
+- Release notes list only changes since the previous published version, even when several releases are queued before the changelog is archived.
 
 ## [0.1.29] - 2026-11-18
 
