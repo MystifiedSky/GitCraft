@@ -8,7 +8,9 @@ Use **Re-run failed jobs** in Actions to retry a failed release with the same ve
 
 ## Changelog
 
-Write changes under `## [Unreleased]` in `CHANGELOG.md`. When a release is published, the **changelog** job moves the entries that shipped into a dated `## [x.y.z]` section on `main` (commit `docs(changelog): record vX.Y.Z [skip ci]`), updates the comparison links, and the same entries are used as the GitHub release notes. Entries added after the released commit stay under Unreleased. If the job cannot push (for example because `main` is protected), it prints a warning and you can run `node scripts/changelog-release.mjs record <version> MystifiedSky/GitCraft <changelog-of-the-released-commit>`.
+Write new entries under `## [Unreleased]` in `CHANGELOG.md`. At publication, the workflow reads `CHANGELOG.md` from the release commit and the previous published tag. It posts only new entries, followed by a link to the full comparison. When there are no new entries, the release notes show just the comparison link. This also works when several releases queue up before the changelog is archived.
+
+Archive dated sections in a changelog pull request, oldest release first. Save `CHANGELOG.md` from the released tag and its previous published tag as UTF-8 files, then run `node scripts/changelog-release.mjs record <version> MystifiedSky/GitCraft <released-changelog> --previous <previous-changelog> --date <publication-date>`. Entries added after the released commit stay under Unreleased. Leave already published bullets as written until they are archived so the workflow can recognize them in the next release.
 
 ## Updating installed copies
 

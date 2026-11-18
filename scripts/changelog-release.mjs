@@ -1,7 +1,7 @@
 // Keeps CHANGELOG.md in step with published releases.
 //
-//   node scripts/changelog-release.mjs notes  <changelog>                          print the Unreleased entries as release notes
-//   node scripts/changelog-release.mjs record <version> <owner/repo> <shipped-changelog> [--date YYYY-MM-DD]
+//   node scripts/changelog-release.mjs notes <changelog> [previous-changelog]      print entries added since the previous release
+//   node scripts/changelog-release.mjs record <version> <owner/repo> <shipped-changelog> [--previous <changelog>] [--date YYYY-MM-DD]
 //                                                                                   move the entries that shipped into a dated section
 //
 // "shipped-changelog" is CHANGELOG.md as it was in the released commit. Only entries found there are moved, so entries added to
@@ -63,20 +63,31 @@ export function renderEntries(entries) {
 export const isEmpty = (entries) => Object.values(entries).every((list) => !list?.length);
 
 /** The shipped entries as GitHub release notes (empty string when there are none). */
-export function releaseNotes(changelogText) {
+export function releaseNotes(changelogText, previousChangelog = '') {
   const entries = parseEntries(splitUnreleased(changelogText).body);
-  return isEmpty(entries) ? '' : renderEntries(entries);
+  const previous = previousChangelog.trim() ? parseEntries(splitUnreleased(previousChangelog).body) : {};
+  const key = (entry) => entry.replace(/\s+/g, ' ');
+  const seen = new Set(Object.values(previous).flat().map(key));
+  for (const category of categoryOrder(Object.keys(entries))) {
+    entries[category] = entries[category].filter((entry) => {
+      const id = key(entry);
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+  }
+  return renderEntries(entries);
 }
 
 /**
  * Returns the new CHANGELOG.md text, or null when nothing needs to change (the version is already recorded, or nothing shipped).
  */
-export function recordRelease({ current, shipped, version, repo, date }) {
+export function recordRelease({ current, shipped, previousChangelog, version, repo, date }) {
   const text = normalize(current);
   if (!/^\d+\.\d+\.\d+$/.test(version ?? '')) throw new Error('Release version must be three numeric components (for example 1.2.3).');
   const releaseHeading = `## [${version}]`;
   if (text.split('\n').some((line) => line.startsWith(releaseHeading))) return null;
-  const shippedEntries = parseEntries(splitUnreleased(shipped).body);
+  const shippedEntries = parseEntries(releaseNotes(shipped, previousChangelog));
   if (isEmpty(shippedEntries)) return null;
 
   const { head, body, tail } = splitUnreleased(text);
@@ -107,21 +118,24 @@ export function recordRelease({ current, shipped, version, repo, date }) {
 function main(argv) {
   const [command, ...args] = argv;
   if (command === 'notes') {
-    process.stdout.write(releaseNotes(readFileSync(args[0], 'utf8')));
+    const [currentPath, previousPath] = args;
+    process.stdout.write(releaseNotes(readFileSync(currentPath, 'utf8'), previousPath ? readFileSync(previousPath, 'utf8') : ''));
   } else if (command === 'record') {
     const [version, repo, shippedPath] = args;
-    const flag = args.indexOf('--date');
-    const date = flag >= 0 ? args[flag + 1] : new Date().toISOString().slice(0, 10);
+    const dateFlag = args.indexOf('--date');
+    const previousFlag = args.indexOf('--previous');
+    const date = dateFlag >= 0 ? args[dateFlag + 1] : new Date().toISOString().slice(0, 10);
     if (!/^\d+\.\d+\.\d+$/.test(version ?? '') || !repo || !shippedPath) throw new Error('Usage: record <version> <owner/repo> <shipped-changelog> [--date YYYY-MM-DD]');
     const current = readFileSync('CHANGELOG.md', 'utf8');
-    const next = recordRelease({ current, shipped: readFileSync(shippedPath, 'utf8'), version, repo, date });
+    const previousChangelog = previousFlag >= 0 ? readFileSync(args[previousFlag + 1], 'utf8') : '';
+    const next = recordRelease({ current, shipped: readFileSync(shippedPath, 'utf8'), previousChangelog, version, repo, date });
     if (next === null) console.log(`CHANGELOG.md already records ${version} or nothing shipped; no change.`);
     else {
       writeFileSync('CHANGELOG.md', next);
       console.log(`Recorded ${version} in CHANGELOG.md.`);
     }
   } else {
-    throw new Error('Usage: changelog-release.mjs notes <changelog> | record <version> <owner/repo> <shipped-changelog> [--date YYYY-MM-DD]');
+    throw new Error('Usage: changelog-release.mjs notes <changelog> [previous-changelog] | record <version> <owner/repo> <shipped-changelog> [--previous <changelog>] [--date YYYY-MM-DD]');
   }
 }
 

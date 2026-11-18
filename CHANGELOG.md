@@ -4,48 +4,119 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Fixed
+
+- GitHub release notes now list only changes since the previous published version, even when several releases are queued before the changelog is archived.
+
+## [0.1.29] - 2026-11-18
+
 ### Security
 
 - Pass desktop verification paths as browser-protocol arguments so they cannot become executable JavaScript.
 
-- Restrict desktop verification to local debug/release builds and safe report names, refuse artifact paths outside the checkout, and use explicit Windows tool paths. Pin the browser setup action to an immutable commit.
-
-- Validate browser-debugging response IDs and registered callback types before dispatch. Review and document the vendored GLib scanning false positives without excluding them from future scans.
+## [0.1.27] - 2026-11-18
 
 ### Added
 
 - An opt-in renderer content-policy configuration and source inventory support packaged security testing before the policy is enabled by default.
+
 - Headless browser regressions now run in CI with downloadable reports and deterministic row, concurrency, and cache budgets.
-
-- Commit-list column dividers can be dragged or adjusted with the keyboard. Widths are remembered, wide layouts scroll horizontally, and individual or all column widths can be reset.
-
-- Add Remote now has URL, GitHub, GitLab, Bitbucket and Azure DevOps tabs. Connected accounts can create a hosted repository and push the current branch, with repository details, access selection, workspace/project selection where needed, and recovery after a partial failure.
-
-- Push now offers to add a remote when a local repository has none, opening the remote setup form directly from a cancellable prompt.
-
-- A maintained bug and optimization checklist tracks priorities, ownership, reproduction evidence, and verification before issues are marked fixed.
-
-- A test workflow runs frontend and native regression suites on Windows, Ubuntu, and macOS for pull requests and pushes to main. Platform setup and desktop validation instructions document how to test all three targets.
-
-- An optional strip of coloured ticks beside the graph's scrollbar (Preferences > UI Customization > Show markers beside the graph scrollbar) can mark branches, tags, remote branches, the checked-out commit and the selection. It is off by default, so the graph looks as before.
-
-- Desktop notifications are off by default, sent only while GitCraft is in the background, several at once become "You have N new notifications", an unclicked one is dismissed after 20 seconds, clicking one brings GitCraft forward and opens the bell menu, reading or removing a notification closes its pop-up, and turning the setting on shows a "Desktop notifications enabled" pop-up.
-
-- The graph draws date lines between commits ("20 hours ago", "yesterday", "a month ago", ...) while the date column is hidden or a search is active. The status bar gains a what's-new gift icon and a Support link.
-
-- Keyboard: Shift+Down / Shift+J follows the first parent and Shift+Up / Shift+K goes to the only child (or the WIP row from the checked-out commit); Ctrl+Shift+Z also redoes. The status bar shows the first pull request's state sentence (for example "owner/repo#9 is in draft") once the repository's service is connected, and opens the Launchpad when clicked.
-
-- The bell in the tab bar is now a notification center: unread badge (50+ from fifty), All / Read / Unread filter, newest first with Today / Yesterday / date labels, mark as read or unread, remove, and Mark all as read / unread. Failed actions and available updates appear there. File > Sign Out removes the saved service sign-ins and shows "Successfully signed out". The status bar says "Connect an integration" until a service is connected, then "Select an integration" for repositories on a service you have not connected. The start screen gains Intro Tutorials and Documentation links.
 
 ### Changed
 
 - Blame previews enforce input/output limits and render measured visible rows, including wrapped lines. Saved agent sessions initially show five recent entries per worktree; expanded archives remain virtualized and searchable.
+
 - Worktree status reads prioritize visible cards and share four IPC slots. Session catalogs use a bounded incremental index with event updates and periodic recovery, and wide commit graphs transfer straight lanes as compact runs.
+
 - Git reads have deadlines, process-tree cancellation and a shared concurrency budget. Long Git jobs keep diagnostic tails with truncation notices and wait for renderer acknowledgements before sending further progress events.
+
 - Hosting requests reuse connections with request-specific credentials and interrupt stalled responses when their reader cancels. Pull requests, issues, comments, clone pickers and Launchpad load more results on demand. Launchpad providers arrive independently; failed continuations preserve displayed results and remain retryable. Azure Boards collections continue beyond fifty items.
+
 - Load fewer editor features while retaining basic language grammars, diff editing, search, folding and clipboard actions. Expensive panels and repository layouts subscribe to the store fields they use, avoiding unrelated draft and preference updates.
 
+### Fixed
+
+- Keep agent session catalogs current when the configured directory uses an aliased path, including macOS temporary directories.
+
+- Restore JSON language validation and detach editor models before disposal to avoid errors during rapid editor switches.
+
+- Cancel auxiliary repository reads and queued read locks; cancelled history loads report failure instead of returning an empty repository.
+
+- Preserve worktree identity and opening/actions when the worktree list is filtered. Restore branch-list row context menus by forwarding their trigger events and refs.
+
+- Report file-history and related collection read failures explicitly, with history retry instead of an empty-history message.
+
+- Retry temporarily unavailable avatars after a delay or reconnection, using normalized bounded caches.
+
+- Retry failed repository watcher registrations and serialize close/reopen operations. Watcher startup and shutdown run outside the shared map lock.
+
+- Publish editor saves from complete same-directory temporary files, retaining the original after write/replacement failure and preserving existing permissions and symlinks.
+
+### Security
+
+- Restrict desktop verification to local debug/release builds and safe report names, refuse artifact paths outside the checkout, and use explicit Windows tool paths. Pin the browser setup action to an immutable commit.
+
+## [0.1.25] - 2026-11-17
+
+### Fixed
+
+- Make the mock AI server's accepted sockets blocking before timed reads, preventing intermittent macOS test failures on fragmented requests.
+
+### Security
+
+- Validate browser-debugging response IDs and registered callback types before dispatch. Review and document the vendored GLib scanning false positives without excluding them from future scans.
+
+## [0.1.23] - 2026-11-17
+
+### Added
+
+- Commit-list column dividers can be dragged or adjusted with the keyboard. Widths are remembered, wide layouts scroll horizontally, and individual or all column widths can be reset.
+
+### Changed
+
 - The main README screenshot shows the current desktop layout and commit history.
+
+### Fixed
+
+- Development builds no longer warn about obsolete file-save helpers; file safety regressions exercise the production save path directly.
+
+## [0.1.21] - 2026-11-15
+
+### Added
+
+- Add Remote now has URL, GitHub, GitLab, Bitbucket and Azure DevOps tabs. Connected accounts can create a hosted repository and push the current branch, with repository details, access selection, workspace/project selection where needed, and recovery after a partial failure.
+
+## [0.1.20] - 2026-11-15
+
+### Added
+
+- Push now offers to add a remote when a local repository has none, opening the remote setup form directly from a cancellable prompt.
+
+## [0.1.19] - 2026-11-15
+
+### Fixed
+
+- Made empty diff spacer rows inert so they stay out of keyboard navigation and assistive technology.
+
+## [0.1.18] - 2026-11-15
+
+### Fixed
+
+- Keep virtual diff spacer rows decorative for assistive technology and wait for the reviewed branch and destination before completing rejected-push handling.
+
+## [0.1.17] - 2026-11-14
+
+### Fixed
+
+- Fixed a garbled character in the loading message for historical blame.
+
+## [0.1.16] - 2026-11-14
+
+### Added
+
+- A maintained bug and optimization checklist tracks priorities, ownership, reproduction evidence, and verification before issues are marked fixed.
+
+### Changed
 
 - Bound structured diff payloads and render visible hunk rows only. Large and densely wrapped comparisons use the virtualized editor with safe full-file actions; oversized partial patches are refused.
 
@@ -54,42 +125,14 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 - Watch working directories selectively so ignored dependency and build trees do not generate unnecessary file events, while preserving tracked files and reacting to changed ignore rules.
 
 - Load independent hosting services and repository summaries with bounded concurrency. Batch configuration and submodule reads, cache ignored-file classifications, and avoid retransmitting unchanged activity logs.
+
 - Keep large file lists, folder counts, file-finder ranking, branch grouping, graph highlighting, and coding-session grouping responsive with bounded rendering and reusable indexes.
+
 - Bound terminal input and output queues, let the renderer acknowledge consumed output, and cancel Git helpers together with their parent process.
+
 - Automatically excerpt large AI contexts, prioritizing manifests and local changes and clearly summarizing omitted contents instead of collecting an unlimited request.
 
 - Branch operations refresh their first history page promptly and restore older pages in the background. Session discovery reuses unchanged logs, Git object and reflog activity no longer triggers unnecessary graph refreshes, and AI context generation omits bulk dependency source before building patches.
-
-- AI helpers summarize bulk vendored dependency imports and removals while retaining manifests, licenses, patch notes, and edits to existing dependency files. Large changes are no longer rejected by a fixed local byte limit; the selected provider enforces its context capacity.
-
-- The repository landing page now showcases the desktop with an updated screenshot, feature highlights, platform downloads, and quality badges. Detailed setup and contributor guidance have their own pages.
-
-- Graph labels combine local branches with their matching tracking refs, count additional grouped labels in a separate badge, and expand into one clean label stack with both local and remote actions available.
-
-- The Windows terminal resolves the shell executable directly, avoiding an extra discovery process and launch failures when inherited environment names differ in casing.
-
-- Startup loads the code editor and terminal only when needed. Repository tabs reuse their first read, append history in bounded pages, preserve graph lanes between pages, and release cached data when closed. Hidden tabs defer refresh work, graph calculations avoid unrelated updates, and checkout/merge watcher events are combined with the final action refresh.
-
-- File and history previews automatically load files up to 2 MB, offer an explicit preview up to 20 MB, and keep larger files out of the in-app editor.
-
-- The commit graph uses softer branch colours, connected labels, author pictures inside lane rings, and a translucent band linking each commit to its message. Message rows no longer have heavy filled backgrounds.
-
-- When a remembered repository tab points at a folder that no longer exists, the error screen shows the folder and offers Try again, Locate folder and Close tab.
-
-- Hovering a tag or branch label no longer tints every commit below it. Only the commit of a tag (or a branch's own stretch of unlabelled commits, down to the next labelled commit) stays bright while the other rows fade, and labels show a tooltip such as "v0.1.3 (Tag)". The selected row uses the selection colour, rows and buttons ease their hover colours, and menus, dialogs and notifications slide in gently. The tag icon now follows the tag name and the graph's column titles use a small monospace style.
-
-- Cloning follows Git's usual order of options and offers more control: Shallow Clone can limit history by commit depth or by a since date (checked for the format and against future dates), clone a single branch, and pass extra flags; Sparse Checkout takes a list of paths (one per line, or only top-level files when empty) and an optional blobless clone.
-- Creating a repository always makes an "Initial commit" (empty if there is nothing to add) and sets up Git LFS afterwards, so an LFS problem no longer stops the repository from being created. The optional README box now starts unticked.
-
-- Initialize a Repository and Clone a Repository are now two-pane dialogs with a source list on the left (Local Only or Clone with URL, then GitHub, GitLab, Bitbucket and Azure DevOps). New repositories can be set up with Git LFS, and clones can use Sparse Checkout. The Profiles page shows a My Profiles card with a "keep .gitconfig updated" option, an Add a Profile button, and a table of profiles; the Add Profile dialog lets you pick a picture, name, author and whether to copy the current settings.
-
-- Preferences now start with an Exit Preferences button at the top of the section list, followed by the current profile and the Preferences and Repo-Specific Preferences headings. A staged file's edit button reads "Edit in Working Directory".
-
-- Update checks now repeat every 10 hours instead of every hour. The File menu shows the update lines that fit the situation: "Checking for updates...", "Restart and Install Update", "Check for Update (Last checked 5 minutes ago)", "Update Errored (2 minutes ago)" and "Downloading Update...". A failed check clears the "Last checked" time, and the wording of times follows the usual "a few seconds ago / an hour ago / 2 days ago" steps.
-
-- After every release is published, GitHub Actions now moves the shipped entries from Unreleased into a dated version section of this changelog, updates the comparison links, and uses those entries as the release notes, so the changelog no longer falls behind. The missing 0.1.6, 0.1.7 and 0.1.8 sections were restored.
-
-- Source comments, documentation and test names describe GitCraft on its own terms and no longer refer to other software.
 
 ### Removed
 
@@ -97,36 +140,24 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
-- Keep agent session catalogs current when the configured directory uses an aliased path, including macOS temporary directories.
-
-- Restore JSON language validation and detach editor models before disposal to avoid errors during rapid editor switches.
-- Cancel auxiliary repository reads and queued read locks; cancelled history loads report failure instead of returning an empty repository.
-
-- Preserve worktree identity and opening/actions when the worktree list is filtered. Restore branch-list row context menus by forwarding their trigger events and refs.
-- Report file-history and related collection read failures explicitly, with history retry instead of an empty-history message.
-- Retry temporarily unavailable avatars after a delay or reconnection, using normalized bounded caches.
-- Retry failed repository watcher registrations and serialize close/reopen operations. Watcher startup and shutdown run outside the shared map lock.
-- Publish editor saves from complete same-directory temporary files, retaining the original after write/replacement failure and preserving existing permissions and symlinks.
-
-- Make the mock AI server's accepted sockets blocking before timed reads, preventing intermittent macOS test failures on fragmented requests.
-
-- Development builds no longer warn about obsolete file-save helpers; file safety regressions exercise the production save path directly.
-
-- Keep empty virtual diff spacer rows out of keyboard navigation and assistive technology, and wait for the reviewed branch and destination before completing rejected-push handling.
-
 - Detect undecodable file and conflict previews, refuse ordinary saves that would replace original bytes, and require a correct encoding or explicit UTF-8 conversion.
 
 - Give shared preference controls accessible captions and help text, with distinct names for path fields and Browse buttons.
+
 - Redact remote-URL credentials, authentication headers and token-bearing query fields before storing or displaying Git diagnostics.
 
 - Preserve unresolved files when taking a conflict side fails, and delete only when that side is genuinely absent.
+
 - Record the exact created branch for Undo when a same-named tag exists.
+
 - Include every requested repository in bulk fetch/pull even while summaries are filtered or loading, and report failures in the final count.
 
 - Preserve existing ignore-file bytes, including non-UTF-8 rules and UTF-8 BOMs, and report read failures before untracking files.
+
 - Use each revision’s historical filename when showing blame across renames.
 
 - Keep topological navigation on visible commits at unloaded or filtered boundaries and explain how to load or reveal the parent.
+
 - Refuse unsupported historical external comparisons instead of opening an unrelated working-tree diff. Named-file history and external-tool paths use literal filenames.
 
 - Keep activity logs bounded across background jobs and hunk operations, and notify the viewer immediately when those entries arrive. Very large command/output entries now show a truncation notice.
@@ -134,6 +165,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 - Restore upstream, push destination and other branch settings when undoing branch deletion, and refuse to overwrite externally changed branch settings.
 
 - Refuse stashing during unresolved operations, and block every Commit All route before it can stage unresolved conflict markers.
+
 - Apply the commit-message comment-cleanup preference to ordinary commits and amendments.
 
 - Bind force-push confirmations to the reviewed branch, commit, destination and remote tip; reject stale confirmations and push an explicit commit with an atomic remote lease.
@@ -141,6 +173,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 - Refuse remote-branch checkout when an existing local branch tracks a different remote, preserving both branch relationships and local work.
 
 - Report failed automatic submodule updates and offer a safe retry while preserving the successful repository action.
+
 - Pass HTTPS credential usernames as literal data so apostrophes and shell characters cannot break authentication.
 
 - Read Git signing booleans consistently and write explicit Off values so included signing defaults can be disabled.
@@ -156,50 +189,160 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 - Clearly use the configured server default for Bitbucket Server merges instead of offering merge strategies that were ignored.
 
 - Prevent read-only filesystem notifications from causing repeated repository refreshes on Linux.
+
 - Detect potential merge conflicts in both SHA-1 and SHA-256 repositories.
+
 - Keep repository creation filesystem checks asynchronous, and share consistent loading and error states across history file lists.
+
 - Correct Unix regression fixtures and keep upstream dependency duplication separate from GitCraft source duplication in quality analysis.
 
 - Protect existing files during repository initialization and submodule removal. Stash actions follow the selected stash, and discard Redo preserves its original file selection and refuses later edits.
+
 - Reject stale hunk selections and history-edit plans. Internal patches use consistent file paths, and partial operations refuse non-UTF-8 patches rather than changing their bytes.
+
 - Preserve complete interactive replay plans through conflicts and allow interrupted Gitflow finishes to resume without recreating release tags. Conflict recovery uses the correct Git operation.
+
 - Keep profile identities, selected SSH keys, signing fingerprints, and case-sensitive repository paths consistent across settings changes.
+
 - Check out the exact pull-request source commit, create pull requests from the configured push destination, and load all result pages. Server-side rebases finish before their merge is sent.
+
 - Preserve new commit drafts while an earlier commit finishes. File editors retain layout and wrapping when switching files, and read or removed notifications dismiss their desktop pop-ups.
+
 - Show untracked stash files with the correct previews and copy actions. Support SHA-256 blame, Unicode file names, spaced remote URLs, custom LFS hooks, file-based sparse clones, and unstaging or exporting changes before the first commit.
+
 - Save pending preferences and tabs before closing or installing an update, and report incomplete LFS initialization while keeping the created repository available. Merge-backup cleanup waits for completion and lets you review new backup files before deletion.
+
 - Keep complete shipped release notes when pending notes are reworded. Commit-message control characters remain message content instead of creating extra history entries.
+
 - Preserve quoted custom arguments and literal repository/file placeholders. Windows file reveal uses the selected item's correct shell identifier.
 
 - Discard preserves existing stashes when there is nothing new to discard. Partially completed composed commits remain undoable, and repository mutations run in order.
+
 - File and conflict-editor saves refuse to overwrite newer disk changes. AI conflict suggestions cannot replace output after its file or edits have changed.
+
 - Renamed files retain their original contents in previews, status errors are reported instead of showing a clean repository, and large ref lists no longer block history recovery.
+
 - Conflict warnings refresh when local target branches move. AI helpers include untracked text files, and release publication waits for all platform test jobs.
-
-- Repository refreshes explicitly sort ref signatures with Unicode-aware comparison and a deterministic tie-breaker, preserving loaded history when refs arrive in a different order.
-
-- Undo and redo refuse to move a different branch or overwrite commits made after the recorded action. Undoing branch creation also preserves branches that have since changed.
-- Applying a single stashed file refuses to overwrite current staged, unstaged, untracked, or ignored contents. Clearing a remote's custom push URL now restores the pull URL as its push destination.
-- Switching repository tabs preserves file-editor drafts, conflict-resolution selections, and commit-panel input. Full refreshes preserve loaded history and older commit selections, and delayed status reads cannot replace a newer repository snapshot.
-- AI commit-message generation preserves drafts edited while it runs and offers the generated result for explicit review instead of replacing newer text.
-- Conflict readers respect the configured repository encoding. Interactive rewording works when a repository path contains apostrophes.
-- Automatic update checks run at startup and hourly while GitCraft remains open.
-- Commit-row selection uses its native button, the agent-session filter focuses only when opened, and changelog/remote-link parsing handles long whitespace or slash runs without excessive backtracking.
-
-- The graph's date lines ("1 hour ago", "yesterday") and the optional scrollbar markers now only appear when the list is long enough to scroll, instead of always. When you hover a label, the other rows' text fades to a dim colour after a short pause rather than turning translucent.
-
-- An outdated test of the AI commit-message request was corrected; the frontend (61) and Rust (63) test suites now run and pass.
 
 ### Security
 
 - Keep AI connection settings isolated per request so concurrent calls use their selected provider and account.
+
 - Block authenticated hosting redirects and redact credentials from service errors. Send GPG passphrases through private input and quote selected SSH key paths literally.
 
+## [0.1.14] - 2026-11-14
+
+### Added
+
+- A test workflow runs frontend and native regression suites on Windows, Ubuntu, and macOS for pull requests and pushes to main. Platform setup and desktop validation instructions document how to test all three targets.
+
+### Changed
+
+- AI helpers summarize bulk vendored dependency imports and removals while retaining manifests, licenses, patch notes, and edits to existing dependency files. Large changes are no longer rejected by a fixed local byte limit; the selected provider enforces its context capacity.
+
+- The repository landing page now showcases the desktop with an updated screenshot, feature highlights, platform downloads, and quality badges. Detailed setup and contributor guidance have their own pages.
+
+### Fixed
+
+- Repository refreshes explicitly sort ref signatures with Unicode-aware comparison and a deterministic tie-breaker, preserving loaded history when refs arrive in a different order.
+
+### Security
+
 - Release recording validates version strings and matches existing release headings literally, removing command-line input from regular-expression construction.
+
 - Updated the embedded browser runtime to Wry 0.57.2, the latest compatible stable patch release.
+
 - Linux builds use the upstream GLib string-iterator soundness fix backported to the released version compatible with stable Tauri. A Linux release check exercises the affected iterator methods; the dependency upgrade is blocked by Tauri's GTK3 version constraint.
 
+## [0.1.13] - 2026-11-14
+
+### Security
+
+- Updated the frontend test runner and its mocking dependency.
+
+## [0.1.12] - 2026-11-14
+
+### Fixed
+
+- Undo and redo refuse to move a different branch or overwrite commits made after the recorded action. Undoing branch creation also preserves branches that have since changed.
+
+- Applying a single stashed file refuses to overwrite current staged, unstaged, untracked, or ignored contents. Clearing a remote's custom push URL now restores the pull URL as its push destination.
+
+- Switching repository tabs preserves file-editor drafts, conflict-resolution selections, and commit-panel input. Full refreshes preserve loaded history and older commit selections, and delayed status reads cannot replace a newer repository snapshot.
+
+- AI commit-message generation preserves drafts edited while it runs and offers the generated result for explicit review instead of replacing newer text.
+
+- Conflict readers respect the configured repository encoding. Interactive rewording works when a repository path contains apostrophes.
+
+- Automatic update checks run at startup and hourly while GitCraft remains open.
+
+- Commit-row selection uses its native button, the agent-session filter focuses only when opened, and changelog/remote-link parsing handles long whitespace or slash runs without excessive backtracking.
+
+### Security
+
 - Windows external-editor launches pass file paths directly to resolved executables or safely escaped launcher scripts, preventing filenames from being interpreted as additional shell commands.
+
+## [0.1.11] - 2026-11-14
+
+### Changed
+
+- Graph labels combine local branches with their matching tracking refs, count additional grouped labels in a separate badge, and expand into one clean label stack with both local and remote actions available.
+
+- The Windows terminal resolves the shell executable directly, avoiding an extra discovery process and launch failures when inherited environment names differ in casing.
+
+- Startup loads the code editor and terminal only when needed. Repository tabs reuse their first read, append history in bounded pages, preserve graph lanes between pages, and release cached data when closed. Hidden tabs defer refresh work, graph calculations avoid unrelated updates, and checkout/merge watcher events are combined with the final action refresh.
+
+- File and history previews automatically load files up to 2 MB, offer an explicit preview up to 20 MB, and keep larger files out of the in-app editor.
+
+- The commit graph uses softer branch colours, connected labels, author pictures inside lane rings, and a translucent band linking each commit to its message. Message rows no longer have heavy filled backgrounds.
+
+## [0.1.10] - 2026-11-14
+
+### Added
+
+- An optional strip of coloured ticks beside the graph's scrollbar (Preferences > UI Customization > Show markers beside the graph scrollbar) can mark branches, tags, remote branches, the checked-out commit and the selection. It is off by default, so the graph looks as before.
+
+### Changed
+
+- When a remembered repository tab points at a folder that no longer exists, the error screen shows the folder and offers Try again, Locate folder and Close tab.
+
+- Hovering a tag or branch label no longer tints every commit below it. Only the commit of a tag (or a branch's own stretch of unlabelled commits, down to the next labelled commit) stays bright while the other rows fade, and labels show a tooltip such as "v0.1.3 (Tag)". The selected row uses the selection colour, rows and buttons ease their hover colours, and menus, dialogs and notifications slide in gently. The tag icon now follows the tag name and the graph's column titles use a small monospace style.
+
+- Cloning follows Git's usual order of options and offers more control: Shallow Clone can limit history by commit depth or by a since date (checked for the format and against future dates), clone a single branch, and pass extra flags; Sparse Checkout takes a list of paths (one per line, or only top-level files when empty) and an optional blobless clone.
+
+- Creating a repository always makes an "Initial commit" (empty if there is nothing to add) and sets up Git LFS afterwards, so an LFS problem no longer stops the repository from being created. The optional README box now starts unticked.
+
+- Initialize a Repository and Clone a Repository are now two-pane dialogs with a source list on the left (Local Only or Clone with URL, then GitHub, GitLab, Bitbucket and Azure DevOps). New repositories can be set up with Git LFS, and clones can use Sparse Checkout. The Profiles page shows a My Profiles card with a "keep .gitconfig updated" option, an Add a Profile button, and a table of profiles; the Add Profile dialog lets you pick a picture, name, author and whether to copy the current settings.
+
+### Fixed
+
+- The graph's date lines ("1 hour ago", "yesterday") and the optional scrollbar markers now only appear when the list is long enough to scroll, instead of always. When you hover a label, the other rows' text fades to a dim colour after a short pause rather than turning translucent.
+
+## [0.1.9] - 2026-11-14
+
+### Added
+
+- Desktop notifications are off by default, sent only while GitCraft is in the background, several at once become "You have N new notifications", an unclicked one is dismissed after 20 seconds, clicking one brings GitCraft forward and opens the bell menu, reading or removing a notification closes its pop-up, and turning the setting on shows a "Desktop notifications enabled" pop-up.
+
+- The graph draws date lines between commits ("20 hours ago", "yesterday", "a month ago", ...) while the date column is hidden or a search is active. The status bar gains a what's-new gift icon and a Support link.
+
+- Keyboard: Shift+Down / Shift+J follows the first parent and Shift+Up / Shift+K goes to the only child (or the WIP row from the checked-out commit); Ctrl+Shift+Z also redoes. The status bar shows the first pull request's state sentence (for example "owner/repo#9 is in draft") once the repository's service is connected, and opens the Launchpad when clicked.
+
+- The bell in the tab bar is now a notification center: unread badge (50+ from fifty), All / Read / Unread filter, newest first with Today / Yesterday / date labels, mark as read or unread, remove, and Mark all as read / unread. Failed actions and available updates appear there. File > Sign Out removes the saved service sign-ins and shows "Successfully signed out". The status bar says "Connect an integration" until a service is connected, then "Select an integration" for repositories on a service you have not connected. The start screen gains Intro Tutorials and Documentation links.
+
+### Changed
+
+- Preferences now start with an Exit Preferences button at the top of the section list, followed by the current profile and the Preferences and Repo-Specific Preferences headings. A staged file's edit button reads "Edit in Working Directory".
+
+- Update checks now repeat every 10 hours instead of every hour. The File menu shows the update lines that fit the situation: "Checking for updates...", "Restart and Install Update", "Check for Update (Last checked 5 minutes ago)", "Update Errored (2 minutes ago)" and "Downloading Update...". A failed check clears the "Last checked" time, and the wording of times follows the usual "a few seconds ago / an hour ago / 2 days ago" steps.
+
+- After every release is published, GitHub Actions now moves the shipped entries from Unreleased into a dated version section of this changelog, updates the comparison links, and uses those entries as the release notes, so the changelog no longer falls behind. The missing 0.1.6, 0.1.7 and 0.1.8 sections were restored.
+
+- Source comments, documentation and test names describe GitCraft on its own terms and no longer refer to other software.
+
+### Fixed
+
+- An outdated test of the AI commit-message request was corrected; the frontend (61) and Rust (63) test suites now run and pass.
 
 ## [0.1.8] - 2026-11-12
 
@@ -317,7 +460,23 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 - First public release of GitCraft, with Windows NSIS and MSI installers, a universal macOS DMG, and Linux AppImage, DEB, and RPM packages.
 - GitHub Actions builds installers for each push to `main` and publishes signed updates for installed copies.
 
-[Unreleased]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.29...HEAD
+[0.1.29]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.27...v0.1.29
+[0.1.27]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.25...v0.1.27
+[0.1.25]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.23...v0.1.25
+[0.1.23]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.21...v0.1.23
+[0.1.21]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.20...v0.1.21
+[0.1.20]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.19...v0.1.20
+[0.1.19]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.18...v0.1.19
+[0.1.18]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.17...v0.1.18
+[0.1.17]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.16...v0.1.17
+[0.1.16]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.14...v0.1.16
+[0.1.14]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.13...v0.1.14
+[0.1.13]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.12...v0.1.13
+[0.1.12]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.11...v0.1.12
+[0.1.11]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.10...v0.1.11
+[0.1.10]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.9...v0.1.10
+[0.1.9]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/MystifiedSky/GitCraft/compare/v0.1.5...v0.1.6
