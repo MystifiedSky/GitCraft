@@ -97,7 +97,8 @@ fn main() {
         return;
     }
     #[cfg(target_os = "macos")]
-    gitcraft_core::external::add_macos_tool_paths();
+    // SAFETY: Startup has not created any threads or initialized the UI or runtime.
+    unsafe { gitcraft_core::external::add_macos_tool_paths() };
     let opts = match parse_args() {
         Ok(o) => o,
         Err(e) => {

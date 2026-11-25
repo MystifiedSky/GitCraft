@@ -94,8 +94,14 @@ pub(crate) fn git_for_windows_program(relative: &str) -> Option<PathBuf> {
     git.parent()?.ancestors().take(4).map(|root| root.join(relative)).find(|path| path.is_file())
 }
 
+/// Add missing package manager directories to PATH for Finder launches.
+///
+/// # Safety
+///
+/// Call during single-threaded startup, before other threads can read or write
+/// the process environment.
 #[cfg(target_os = "macos")]
-pub(crate) fn add_macos_tool_paths() {
+pub unsafe fn add_macos_tool_paths() {
     // Finder uses a system-only PATH. Preserve the user's existing tool order when
     // launched from a shell and place missing package managers before the OS shims.
     let existing = std::env::var_os("PATH").filter(|path| !path.is_empty()).unwrap_or_else(|| "/usr/bin:/bin:/usr/sbin:/sbin".into());
@@ -104,7 +110,10 @@ pub(crate) fn add_macos_tool_paths() {
     let missing = package_managers.into_iter().map(PathBuf::from).filter(|path| path.is_dir() && !folders.contains(path)).collect::<Vec<_>>();
     let system = folders.iter().position(|path| path == Path::new("/usr/bin")).unwrap_or(folders.len());
     folders.splice(system..system, missing);
-    if let Ok(path) = std::env::join_paths(folders) { std::env::set_var("PATH", path); }
+    if let Ok(path) = std::env::join_paths(folders) {
+        // SAFETY: The caller guarantees exclusive access to the process environment.
+        unsafe { std::env::set_var("PATH", path); }
+    }
 }
 
 fn editor_process(program: &std::path::Path, target: &str, repo: &str) -> Command {
