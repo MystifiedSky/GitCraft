@@ -3,13 +3,16 @@ name: Tests
 on:
   workflow_call:
   pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: gitcraft-tests-${{ github.workflow }}-${{ github.ref }}
+  # Each push to main gets its own result, even if another merge lands first.
+  group: gitcraft-tests-${{ github.workflow }}-${{ github.event_name == 'push' && github.run_id || github.ref }}
   cancel-in-progress: true
 
 jobs:

@@ -60,7 +60,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
-- Fix the macOS build so GitCraft can find tools installed by Homebrew when launched from Finder. ([#47](https://github.com/MystifiedSky/GitCraft/pull/47))
+- Fix a macOS build error in the native app's startup code. ([#50](https://github.com/MystifiedSky/GitCraft/pull/50))
 - Stack the Start screen sections in narrow windows and apply the selected language to the Start screen, menus, and toolbar labels. Prevent duplicate sample-project requests. ([#44](https://github.com/MystifiedSky/GitCraft/pull/44))
 - Keep failure messages in the notification center, limit bulk actions to the selected filter, and honor the notification position preference. Dismiss notifications or copy an error directly from its toast. ([#44](https://github.com/MystifiedSky/GitCraft/pull/44))
 - Keep staged and unstaged files in the same scrolling area so an empty staged section leaves more room for changed files. ([#44](https://github.com/MystifiedSky/GitCraft/pull/44))

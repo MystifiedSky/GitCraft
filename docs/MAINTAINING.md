@@ -17,9 +17,12 @@ Use these review practices as responsibilities are shared across more contributo
 - Separate changes required for correctness from optional suggestions. Record blockers in the PR so the author and later reviewers can see what remains.
 - Check the AI disclosure for each PR. If AI was used, look for the tools and how they contributed, plus the author’s verification. For an automated dependency PR, a maintainer can complete the disclosure after confirming which automation authored it.
 - Review changes to CI workflows and their validators directly. A PR can change the code that runs its checks.
+- If a fork PR shows **Awaiting approval**, review its changes and select **Approve workflows to run** in the merge box. Confirm the checks have started for the current revision.
 - Confirm the required CI checks passed for the current revision before merging. Verify changelog entries, compatibility notes, and third-party notices when they apply. Use the [release guide](../RELEASING.md) when a change needs preview testing.
 - Review notable changelog bullets for plain wording and a link to the PR that shipped the change. Keep routine maintenance in the full comparison unless users need to know about it. Before a stable release, preview the notes against the last stable tag and spot-check their PR links.
 - For changes to frequently used paths, ask for a before/after result on a representative repository. For changes to saved data, installers, or updates, agree on recovery steps before merging.
+
+The Tests workflow also runs on pushes to `main`, including merges, to verify the resulting commit on Windows, Linux, and macOS. The Release workflow is started manually.
 
 ## Share responsibility
 

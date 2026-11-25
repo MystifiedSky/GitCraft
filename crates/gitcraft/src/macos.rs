@@ -9,7 +9,25 @@ use objc2::{ClassType, MainThreadMarker, MainThreadOnly, define_class, msg_send,
 use objc2_app_kit::{NSApplication, NSPasteboard};
 use objc2_foundation::{NSAppleEventDescriptor, NSAppleEventManager, NSArray, NSObject, NSString, NSURL};
 use std::cell::OnceCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Finder uses a system-only PATH. Preserve the user's tool order and add missing
+/// package managers before the OS shims.
+///
+/// # Safety
+/// Call before starting any threads or initializing AppKit.
+pub(super) unsafe fn add_tool_paths() {
+    let existing = std::env::var_os("PATH").filter(|path| !path.is_empty()).unwrap_or_else(|| "/usr/bin:/bin:/usr/sbin:/sbin".into());
+    let mut folders: Vec<_> = std::env::split_paths(&existing).filter(|path| path.is_absolute()).collect();
+    let package_managers = if cfg!(target_arch = "aarch64") { ["/opt/homebrew/bin", "/usr/local/bin"] } else { ["/usr/local/bin", "/opt/homebrew/bin"] };
+    let missing = package_managers.into_iter().map(PathBuf::from).filter(|path| path.is_dir() && !folders.contains(path)).collect::<Vec<_>>();
+    let system = folders.iter().position(|path| path == Path::new("/usr/bin")).unwrap_or(folders.len());
+    folders.splice(system..system, missing);
+    if let Ok(path) = std::env::join_paths(folders) {
+        // SAFETY: The caller ensures that no other threads can read the environment.
+        unsafe { std::env::set_var("PATH", path) };
+    }
+}
 
 /// 'GURL': the event class and id of "open this URL".
 const GET_URL: u32 = u32::from_be_bytes(*b"GURL");
