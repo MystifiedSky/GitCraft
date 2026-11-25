@@ -94,19 +94,6 @@ pub(crate) fn git_for_windows_program(relative: &str) -> Option<PathBuf> {
     git.parent()?.ancestors().take(4).map(|root| root.join(relative)).find(|path| path.is_file())
 }
 
-#[cfg(target_os = "macos")]
-pub(crate) fn add_macos_tool_paths() {
-    // Finder uses a system-only PATH. Preserve the user's existing tool order when
-    // launched from a shell and place missing package managers before the OS shims.
-    let existing = std::env::var_os("PATH").filter(|path| !path.is_empty()).unwrap_or_else(|| "/usr/bin:/bin:/usr/sbin:/sbin".into());
-    let mut folders: Vec<_> = std::env::split_paths(&existing).filter(|path| path.is_absolute()).collect();
-    let package_managers = if cfg!(target_arch = "aarch64") { ["/opt/homebrew/bin", "/usr/local/bin"] } else { ["/usr/local/bin", "/opt/homebrew/bin"] };
-    let missing = package_managers.into_iter().map(PathBuf::from).filter(|path| path.is_dir() && !folders.contains(path)).collect::<Vec<_>>();
-    let system = folders.iter().position(|path| path == Path::new("/usr/bin")).unwrap_or(folders.len());
-    folders.splice(system..system, missing);
-    if let Ok(path) = std::env::join_paths(folders) { std::env::set_var("PATH", path); }
-}
-
 fn editor_process(program: &std::path::Path, target: &str, repo: &str) -> Command {
     let mut command = Command::new(program);
     command.arg(target).current_dir(repo);
