@@ -94,8 +94,9 @@ pub(crate) fn git_for_windows_program(relative: &str) -> Option<PathBuf> {
     git.parent()?.ancestors().take(4).map(|root| root.join(relative)).find(|path| path.is_file())
 }
 
+/// Add missing package manager directories to PATH during single-threaded app startup.
 #[cfg(target_os = "macos")]
-pub(crate) fn add_macos_tool_paths() {
+pub fn add_macos_tool_paths() {
     // Finder uses a system-only PATH. Preserve the user's existing tool order when
     // launched from a shell and place missing package managers before the OS shims.
     let existing = std::env::var_os("PATH").filter(|path| !path.is_empty()).unwrap_or_else(|| "/usr/bin:/bin:/usr/sbin:/sbin".into());
