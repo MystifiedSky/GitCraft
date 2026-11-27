@@ -81,8 +81,8 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
-- Keep dialog buttons inside the dialog box: wrap them onto new rows, shorten long labels with a tooltip, and truncate long titles.
-- Drag and drop every branch in the list a commit's +N badge opens, not only the first label.
+- Keep dialog buttons inside the dialog box: wrap them onto new rows, shorten long labels with a tooltip, and truncate long titles. ([#60](https://github.com/MystifiedSky/GitCraft/pull/60))
+- Drag and drop every branch in the list a commit's +N badge opens, not only the first label. ([#60](https://github.com/MystifiedSky/GitCraft/pull/60))
 - Restore the GitCraft icon on Windows taskbar pins, shortcuts, and the executable in Explorer.
 - Keep the Create Repository and Clone forms readable beside their source list, and stack the panels in narrow windows.
 - Open branch cleanup in a larger, resizable dialog with scrollable results and visible Cancel and Delete buttons on smaller screens.
