@@ -95,6 +95,11 @@ pub fn stash_message(message: &str, branch: &str) -> String {
     format!("WIP on {}", if branch.is_empty() || branch == "HEAD" { "(no branch)" } else { branch })
 }
 
+/// A ref name as people write it: `refs/heads/main` becomes `main`.
+fn ref_name(name: &str) -> &str {
+    name.strip_prefix("refs/heads/").or_else(|| name.strip_prefix("refs/remotes/")).or_else(|| name.strip_prefix("refs/tags/")).unwrap_or(name)
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CheckoutChanges {
@@ -1152,7 +1157,7 @@ impl Engine {
                     }
                 }
                 let args = crate::extras::merge_args(dir, "merge", &["--no-edit", &branch]);
-                let mut result = done(self.git(dir, &args.iter().map(String::as_str).collect::<Vec<_>>()), &format!("Merged {branch}"));
+                let mut result = done(self.git(dir, &args.iter().map(String::as_str).collect::<Vec<_>>()), &format!("Merged {}", ref_name(&branch)));
                 if let Some(notice) = notice {
                     result.message = if result.ok { format!("{}. {}", notice.trim_end_matches('.'), result.message) } else { format!("{notice}\n\n{}", result.message) };
                 }
@@ -1172,9 +1177,9 @@ impl Engine {
                 let o = self.git(dir, &["rebase", "--autostash", &onto]);
                 if o.ok {
                     let after = self.rev(dir, "HEAD");
-                    self.push_undo(repo, UndoRec::Rewrite { before, after, branch: self.branch_ref(dir), label: format!("rebase onto {onto}"), protect_index: false });
+                    self.push_undo(repo, UndoRec::Rewrite { before, after, branch: self.branch_ref(dir), label: format!("rebase onto {}", ref_name(&onto)), protect_index: false });
                 }
-                let mut result = done(o, &format!("Rebased onto {onto}"));
+                let mut result = done(o, &format!("Rebased onto {}", ref_name(&onto)));
                 if let Some(notice) = notice {
                     result.message = if result.ok { format!("{}. {}", notice.trim_end_matches('.'), result.message) } else { format!("{notice}\n\n{}", result.message) };
                 }
@@ -1772,7 +1777,7 @@ impl Engine {
                     let after = self.rev(dir, "HEAD");
                     self.push_undo(repo, UndoRec::Rewrite { before, after, branch: self.branch_ref(dir), label: format!("fast-forward {branch}"), protect_index: false });
                 }
-                done(o, &format!("Fast-forwarded {branch} to {to}"))
+                done(o, &format!("Fast-forwarded {} to {}", ref_name(&branch), ref_name(&to)))
             }
             Action::SetUpstream { branch, upstream } => {
                 if upstream.trim().is_empty() {

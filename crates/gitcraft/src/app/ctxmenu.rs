@@ -141,20 +141,20 @@ fn dropped_actions(v: &RepoView, source: &GitRef, target: &GitRef, head: Option<
     let mut choices: Vec<(String, Action)> = Vec::new();
     // The branch behind moves to the one ahead, whichever side of the drop it is on.
     if target.kind == RefKind::Local && target.sha != source.sha && is_loaded_ancestor(v, &target.sha, &source.sha) {
-        choices.push((format!("Fast-forward {t} to {s}"), Action::FastForward { branch: t.clone(), to: s.clone() }));
+        choices.push((format!("Fast-forward {t} to {s}"), Action::FastForward { branch: t.clone(), to: source.full.clone() }));
     }
     if source.kind == RefKind::Local && target.sha != source.sha && is_loaded_ancestor(v, &source.sha, &target.sha) {
-        choices.push((format!("Fast-forward {s} to {t}"), Action::FastForward { branch: s.clone(), to: t.clone() }));
+        choices.push((format!("Fast-forward {s} to {t}"), Action::FastForward { branch: s.clone(), to: target.full.clone() }));
     }
     // Merge and rebase check out the branch they act on; a remote branch can only be merged from or rebased onto.
     if target.kind == RefKind::Local {
-        choices.push((format!("Merge {s} into {t}"), Action::Merge { branch: s.clone(), into: Some(t.clone()), changes: gitcraft_core::actions::CheckoutChanges::Ask }));
+        choices.push((format!("Merge {s} into {t}"), Action::Merge { branch: source.full.clone(), into: Some(t.clone()), changes: gitcraft_core::actions::CheckoutChanges::Ask }));
     }
     if source.kind == RefKind::Local {
-        choices.push((format!("Rebase {s} onto {t}"), Action::Rebase { onto: t.clone(), branch: Some(s.clone()), changes: gitcraft_core::actions::CheckoutChanges::Ask }));
+        choices.push((format!("Rebase {s} onto {t}"), Action::Rebase { onto: target.full.clone(), branch: Some(s.clone()), changes: gitcraft_core::actions::CheckoutChanges::Ask }));
     }
     if is_head(source) && !is_head(target) {
-        choices.push((format!("Merge {t} into {s}"), Action::Merge { branch: t.clone(), into: Some(s.clone()), changes: gitcraft_core::actions::CheckoutChanges::Ask }));
+        choices.push((format!("Merge {t} into {s}"), Action::Merge { branch: target.full.clone(), into: Some(s.clone()), changes: gitcraft_core::actions::CheckoutChanges::Ask }));
     }
     if source.kind == RefKind::Local && target.kind == RefKind::Remote {
         choices.push((format!("Push {s}"), Action::PushBranch { branch: s.clone() }));
@@ -165,14 +165,19 @@ fn dropped_actions(v: &RepoView, source: &GitRef, target: &GitRef, head: Option<
 /// One line under a dropped branch's action saying what it does.
 fn drop_detail(action: &Action) -> String {
     match action {
-        Action::FastForward { branch, to } => format!("Move {branch} to {to} without a merge commit."),
-        Action::Merge { branch, into: Some(into), .. } => format!("Create a merge commit on {into} with {branch}."),
-        Action::Merge { branch, .. } => format!("Merge {branch} with a merge commit."),
-        Action::Rebase { onto, branch: Some(branch), .. } => format!("Replay {branch}'s commits on top of {onto}."),
-        Action::Rebase { onto, .. } => format!("Replay the commits on top of {onto}."),
-        Action::PushBranch { branch } => format!("Send {branch} to its remote."),
+        Action::FastForward { branch, to } => format!("Move {} to {} without a merge commit.", short_ref(branch), short_ref(to)),
+        Action::Merge { branch, into: Some(into), .. } => format!("Create a merge commit on {} with {}.", short_ref(into), short_ref(branch)),
+        Action::Merge { branch, .. } => format!("Merge {} with a merge commit.", short_ref(branch)),
+        Action::Rebase { onto, branch: Some(branch), .. } => format!("Replay {}'s commits on top of {}.", short_ref(branch), short_ref(onto)),
+        Action::Rebase { onto, .. } => format!("Replay the commits on top of {}.", short_ref(onto)),
+        Action::PushBranch { branch } => format!("Send {} to its remote.", short_ref(branch)),
         _ => String::new(),
     }
+}
+
+/// A ref name without its `refs/…` prefix, for messages.
+fn short_ref(name: &str) -> &str {
+    name.strip_prefix("refs/heads/").or_else(|| name.strip_prefix("refs/remotes/")).or_else(|| name.strip_prefix("refs/tags/")).unwrap_or(name)
 }
 
 impl App {
@@ -737,6 +742,8 @@ mod tests {
         let labels: Vec<&str> = choices.iter().map(|(label, _)| label.as_str()).collect();
         assert!(labels.contains(&"Fast-forward ff to dev"), "{labels:?}");
         assert!(!labels.contains(&"Fast-forward dev to ff"), "{labels:?}");
-        assert!(choices.iter().any(|(_, action)| matches!(action, Action::FastForward { branch, to } if branch == "ff" && to == "dev")));
+        assert!(choices.iter().any(|(_, action)| matches!(action, Action::FastForward { branch, to } if branch == "ff" && to == "refs/heads/dev")));
+        assert!(choices.iter().any(|(_, action)| matches!(action, Action::Merge { branch, into: Some(into), .. } if branch == "refs/heads/ff" && into == "dev")));
+        assert!(choices.iter().any(|(_, action)| matches!(action, Action::Rebase { onto, branch: Some(branch), .. } if branch == "ff" && onto == "refs/heads/dev")));
     }
 }
