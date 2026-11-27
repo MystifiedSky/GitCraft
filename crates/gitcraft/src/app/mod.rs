@@ -557,6 +557,18 @@ impl App {
         self.remember_tabs();
     }
 
+    /// The tab for `path`, opened in the background if it isn't open yet.
+    pub(crate) fn repo_tab_id(&mut self, path: &str) -> u64 {
+        if let Some(tab) = self.tabs.iter().find(|t| t.path().is_some_and(|p| same_folder(p, path))) {
+            return tab.id;
+        }
+        let tab = self.repo_tab(path.to_owned());
+        let id = tab.id;
+        self.tabs.push(tab);
+        self.remember_tabs();
+        id
+    }
+
     /// A missing repository was found at `path`: its tab shows that repository in the same place, without being
     /// counted as a closed tab. When the repository is already open in another tab, that tab is used instead.
     fn locate_tab(&mut self, tab: u64, path: &str) {
@@ -966,10 +978,8 @@ impl App {
                     DesktopActionResult::OpenWorktree { path, action } => {
                         self.checkout_opened_worktree(tab, &path);
                         if let Some(action) = action {
-                            let dest = self.tabs.iter().find(|t| t.path().is_some_and(|p| same_folder(p, &path))).map(|t| t.id);
-                            if let Some(dest) = dest {
-                                self.act_quiet(dest, action, quiet);
-                            }
+                            let dest = self.repo_tab_id(&path);
+                            self.act_quiet(dest, action, quiet);
                         }
                         return;
                     }
@@ -1165,5 +1175,19 @@ mod tests {
         assert_eq!(folder_name(r"/home/a\b"), r"a\b");
         assert!(same_folder("/a/b/", "/a/b"));
         assert!(!same_folder("/a/b", "/a/c"));
+    }
+
+    #[test]
+    fn carried_actions_find_a_background_tab_for_the_worktree() {
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx);
+        let mut app = App::new(&cc, StartOptions::default(), crate::settings::Store::in_memory());
+        let before = app.tabs.len();
+        let path = std::env::temp_dir().join(format!("gitcraft-carried-tab-{}", std::process::id()));
+        let path = path.to_string_lossy().to_string();
+        let id = app.repo_tab_id(&path);
+        assert_eq!(app.tabs.len(), before + 1);
+        assert_eq!(app.repo_tab_id(&path), id);
+        assert_eq!(app.tabs.len(), before + 1);
     }
 }
