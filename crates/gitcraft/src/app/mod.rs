@@ -963,8 +963,14 @@ impl App {
                 self.finish_busy_repo(&path);
                 let result = match result {
                     DesktopActionResult::Performed(result) => result,
-                    DesktopActionResult::OpenWorktree(worktree) => {
-                        self.checkout_opened_worktree(tab, &worktree);
+                    DesktopActionResult::OpenWorktree { path, action } => {
+                        self.checkout_opened_worktree(tab, &path);
+                        if let Some(action) = action {
+                            let dest = self.tabs.iter().find(|t| t.path().is_some_and(|p| same_folder(p, &path))).map(|t| t.id);
+                            if let Some(dest) = dest {
+                                self.act_quiet(dest, action, quiet);
+                            }
+                        }
                         return;
                     }
                 };

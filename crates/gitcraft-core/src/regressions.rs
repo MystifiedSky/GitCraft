@@ -236,9 +236,10 @@ fn desktop_checkout_opens_the_existing_worktree_and_can_still_detach() {
         Action::CheckoutRemote { remote_branch: "origin/parity/linked".into(), stash_if_needed: false, changes: CheckoutChanges::Ask },
     ];
     for action in to_worktree {
-        let DesktopActionResult::OpenWorktree(path) = engine.perform_for_desktop(repo, action) else {
+        let DesktopActionResult::OpenWorktree { path, action } = engine.perform_for_desktop(repo, action) else {
             panic!("Checkout should open the existing worktree");
         };
+        assert!(action.is_none(), "ordinary checkout only navigates");
         assert_eq!(Path::new(&path).canonicalize().unwrap(), linked.canonicalize().unwrap());
     }
     assert_eq!(run(&["symbolic-ref", "--short", "HEAD"]).trim(), "main");

@@ -272,7 +272,7 @@ pub struct ActionResult {
 
 pub enum DesktopActionResult {
     Performed(ActionResult),
-    OpenWorktree(String),
+    OpenWorktree { path: String, action: Option<Action> },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -799,7 +799,11 @@ impl Engine {
         let operation = crate::operation::lock_for(dir);
         let _guard = operation.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(path) = self.checkout_worktree(dir, &action) {
-            return DesktopActionResult::OpenWorktree(path);
+            let carry = match &action {
+                Action::Checkout { .. } | Action::CheckoutRemote { .. } => None,
+                _ => Some(action.clone()),
+            };
+            return DesktopActionResult::OpenWorktree { path, action: carry };
         }
         let check_again = matches!(&action,
             Action::Checkout { changes: CheckoutChanges::Ask | CheckoutChanges::Carry, .. }
@@ -809,7 +813,7 @@ impl Engine {
         // A worktree can be added by another process while the checkout is in progress.
         if !result.ok {
             if let Some(path) = retry_target.and_then(|action| self.checkout_worktree(dir, &action)) {
-                return DesktopActionResult::OpenWorktree(path);
+                return DesktopActionResult::OpenWorktree { path, action: None };
             }
         }
         DesktopActionResult::Performed(result)
@@ -2541,7 +2545,7 @@ mod tests {
 
     #[test]
     fn dropped_branch_actions_open_the_worktree_that_owns_the_branch() {
-        let (d, _repo, e) = drop_repo("drop-branch-worktree");
+        let (d, repo, e) = drop_repo("drop-branch-worktree");
         let g = |args: &[&str]| {
             let o = git::run(&d, args);
             assert!(o.ok, "{args:?}: {}", o.message());
@@ -2564,6 +2568,13 @@ mod tests {
             assert_eq!(owned(action), Some(wt.canonicalize().unwrap()));
         }
         assert_eq!(owned(Action::FastForward { branch: "master".into(), to: "refs/heads/side".into() }), None);
+
+        let carried = e.perform_for_desktop(&repo, Action::Merge { branch: "refs/heads/master".into(), into: Some("side".into()), changes: CheckoutChanges::Ask });
+        let DesktopActionResult::OpenWorktree { path, action: Some(Action::Merge { into: Some(into), .. }) } = carried else {
+            panic!("the targeted merge must carry its action to the owning worktree");
+        };
+        assert_eq!(Path::new(&path).canonicalize().unwrap(), wt.canonicalize().unwrap());
+        assert_eq!(into, "side");
 
         g(&["worktree", "remove", "--force", &wt_s]);
         let _ = fs::remove_dir_all(&d);
