@@ -614,7 +614,7 @@ impl Engine {
         if self.head_name(dir) == target {
             return Ok(None);
         }
-        match self.checkout_local(repo, target, changes) {
+        match self.checkout_branch(repo, target, changes) {
             Ok(message) => Ok(Some(message)),
             Err(message) => Err(ActionResult { ok: false, message }),
         }
@@ -648,6 +648,15 @@ impl Engine {
     }
 
     fn checkout_local(&self, repo: &str, target: &str, changes: CheckoutChanges) -> Result<String, String> {
+        self.checkout_target(repo, target, changes, false)
+    }
+
+    /// Check out a local branch, even when its name looks like an object ID.
+    fn checkout_branch(&self, repo: &str, branch: &str, changes: CheckoutChanges) -> Result<String, String> {
+        self.checkout_target(repo, branch, changes, true)
+    }
+
+    fn checkout_target(&self, repo: &str, target: &str, changes: CheckoutChanges, branch: bool) -> Result<String, String> {
         let dir = Path::new(repo);
         let revision = self.rev(dir, &format!("{target}^{{commit}}"));
         if target.starts_with('-') || revision.is_empty() { return Err("The checkout target is unavailable. Refresh the repository and try again.".into()); }
@@ -656,9 +665,8 @@ impl Engine {
         crate::manage::require_lfs_for_checkout(dir, &revision)?;
         let name = format!("Changes before checking out {target}");
         let notice = self.prepare_checkout_changes(repo, dir, &name, changes)?;
-        // A branch can be named like a 40- or 64-character object ID; prefer the branch.
-        let branch_target = !self.rev(dir, &format!("refs/heads/{target}")).is_empty();
-        let out = if valid_undo_oid(target) && !branch_target {
+        // A branch can be named like a 40- or 64-character object ID; a branch action still checks out the branch.
+        let out = if valid_undo_oid(target) && !branch {
             self.git(dir, &["checkout", "-q", "--no-overwrite-ignore", "--detach", &revision, "--"])
         } else {
             self.git(dir, &["checkout", "-q", "--no-overwrite-ignore", target, "--"])
