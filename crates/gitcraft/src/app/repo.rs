@@ -902,7 +902,7 @@ impl App {
         }
         let msg = result.message.as_str();
         match action {
-            Action::Checkout { .. } | Action::CheckoutRemote { .. } if !quiet && self.checkout_changes_dialog(tab, action, msg) => true,
+            Action::Checkout { .. } | Action::CheckoutRemote { .. } | Action::Merge { into: Some(_), .. } | Action::Rebase { branch: Some(_), .. } if !quiet && self.checkout_changes_dialog(tab, action, msg) => true,
             Action::Push { force: false, .. } if msg == "This repository has no remote to push to. Add one first." => {
                 self.dialog = Some(Dialog::confirm(
                     "No remote to push to",
@@ -1154,6 +1154,23 @@ fn headless_superseded_page_cannot_clear_the_active_request() {
     assert_eq!(tab.paging.as_deref(), Some("new request"));
     assert!(tab.finish_page("new request"));
     assert!(!tab.page_loading);
+}
+
+#[cfg(test)]
+#[test]
+fn headless_dropped_actions_offer_checkout_changes_choices() {
+    let ctx = egui::Context::default();
+    let cc = eframe::CreationContext::_new_kittest(ctx);
+    let mut app = App::new(&cc, super::StartOptions::default(), crate::settings::Store::in_memory());
+    let result = ActionResult { ok: false, message: "Choose how to handle your uncommitted changes before checkout.".into() };
+    for action in [
+        Action::Merge { branch: "refs/heads/ff".into(), into: Some("dev".into()), changes: gitcraft_core::actions::CheckoutChanges::Ask },
+        Action::Rebase { onto: "refs/heads/dev".into(), branch: Some("ff".into()), changes: gitcraft_core::actions::CheckoutChanges::Ask },
+    ] {
+        app.dialog = None;
+        assert!(app.after_action(0, &action, &result, false));
+        assert!(app.dialog.is_some());
+    }
 }
 
 #[cfg(test)]
