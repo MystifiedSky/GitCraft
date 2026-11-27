@@ -893,7 +893,7 @@ impl App {
                             later.push(Box::new(move |app| app.ref_dropped(tab, source, target)));
                         }
                         end_x = label_rect.right();
-                        if lresp.hovered() {
+                        if lresp.hovered() || lresp.dnd_hover_payload::<GitRef>().is_some_and(|source| source.full != first.full) {
                             new_hover_ref = Some((i, first.kind == RefKind::Tag));
                             stack = Some((i, clock));
                         }
@@ -921,7 +921,7 @@ impl App {
                             painter.text(mr.center(), Align2::CENTER_CENTER, format!("+{more}"), FontId::proportional(11.0), c.fg);
                             let mresp = ui.interact(mr, ui.scope_id().with(("more_refs", tab, i)), Sense::click());
                             end_x = mr.right();
-                            if mresp.hovered() || mresp.clicked() {
+                            if mresp.hovered() || mresp.clicked() || mresp.dnd_hover_payload::<GitRef>().is_some_and(|source| source.full != first.full) {
                                 new_hover_ref = Some((i, first.kind == RefKind::Tag));
                                 stack = Some((i, clock));
                             }
