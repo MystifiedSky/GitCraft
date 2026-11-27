@@ -225,6 +225,7 @@ impl App {
                 let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 48.0), egui::Sense::click());
                 let accessible = title.clone();
                 response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, accessible.clone()));
+                let response = response.on_hover_text(format!("{title}\n{detail}"));
                 let activated = response.clicked() || (response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Space)));
                 let hovered = response.hovered();
                 if hovered {
