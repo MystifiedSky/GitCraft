@@ -84,6 +84,11 @@ pub enum Kind {
 
 /// A button `height` tall with `text` (and an icon), in one of the app's kinds.
 pub fn button(ui: &mut Ui, kind: Kind, icon: Option<Icon>, text: &str, height: f32, enabled: bool) -> Response {
+    button_labeled(ui, kind, icon, text, text, height, enabled)
+}
+
+/// A button drawn with `text` but named `accessible` for screen readers.
+pub fn button_labeled(ui: &mut Ui, kind: Kind, icon: Option<Icon>, text: &str, accessible: &str, height: f32, enabled: bool) -> Response {
     let c = p();
     let size = if height <= 20.5 { 11.0 } else if height <= 24.5 { 12.0 } else if height >= 40.0 { 14.0 } else { 13.0 };
     let pad = if height <= 24.5 { 8.0 } else { 12.0 };
@@ -97,7 +102,7 @@ pub fn button(ui: &mut Ui, kind: Kind, icon: Option<Icon>, text: &str, height: f
     let width = pad * 2.0 + icon_w + galley.size().x;
     let (rect, response) = ui.allocate_exact_size(vec2(width, height), if enabled { Sense::click() } else { Sense::hover() });
     // Screen readers get what egui's own button tells them: a button, its label, whether it works.
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, text));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, accessible));
     let hover = enabled && response.hovered();
     let (fill, stroke) = match kind {
         Kind::Default => (c.white(if hover { 0.1 } else { 0.05 }), c.white(0.1)),

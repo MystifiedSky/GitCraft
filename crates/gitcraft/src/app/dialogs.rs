@@ -681,7 +681,7 @@ impl App {
                         let full = if running && i == dialog.choices.len() - 1 { dialog.busy.clone().unwrap_or_default() } else { ch.label.clone() };
                         let label = footer_label(&row, &full, width - 32.0);
                         let enabled = !running && (blocked.is_none() || ch.kind != Kind::Primary);
-                        let response = widgets::button(&mut row, ch.kind, None, &label, 28.0, enabled);
+                        let response = widgets::button_labeled(&mut row, ch.kind, None, &label, &full, 28.0, enabled);
                         let response = if label == full { response } else { response.on_hover_text(&full) };
                         if response.clicked() {
                             chosen = Some(i);
@@ -689,7 +689,7 @@ impl App {
                     }
                     if let Some(cancel) = &dialog.cancel {
                         let label = footer_label(&row, cancel, width - 32.0);
-                        let response = widgets::button(&mut row, Kind::Default, None, &label, 28.0, !running);
+                        let response = widgets::button_labeled(&mut row, Kind::Default, None, &label, cancel, 28.0, !running);
                         let response = if label == *cancel { response } else { response.on_hover_text(cancel) };
                         if response.clicked() {
                             close = true;
