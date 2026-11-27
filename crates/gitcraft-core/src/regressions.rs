@@ -232,7 +232,7 @@ fn desktop_checkout_opens_the_existing_worktree_and_can_still_detach() {
     let engine = Engine::default();
     let repo = dir.to_str().unwrap();
     let to_worktree = [
-        Action::Checkout { target: "parity/linked".into(), changes: CheckoutChanges::Ask },
+        Action::Checkout { target: "parity/linked".into(), changes: CheckoutChanges::Ask, branch: true },
         Action::CheckoutRemote { remote_branch: "origin/parity/linked".into(), stash_if_needed: false, changes: CheckoutChanges::Ask },
     ];
     for action in to_worktree {
@@ -250,7 +250,7 @@ fn desktop_checkout_opens_the_existing_worktree_and_can_still_detach() {
 
     run(&["restore", "--source=HEAD", "--staged", "--worktree", "--", "file.txt"]);
     let DesktopActionResult::Performed(result) = engine.perform_for_desktop(repo, Action::Checkout {
-        target: target.clone(), changes: CheckoutChanges::Ask,
+        target: target.clone(), changes: CheckoutChanges::Ask, branch: false,
     }) else { panic!("A commit ID should check out a detached HEAD"); };
     assert!(result.ok, "{}", result.message);
     assert_eq!(head(dir), target);
@@ -1078,7 +1078,7 @@ fn branch_checkout_asks_before_moving_or_stashing_local_changes() {
     std::fs::write(d.join("scratch.txt"), "untracked work\n").unwrap();
     let engine = Engine::default();
     let repo = d.to_string_lossy();
-    let checkout = |target: &str, changes| engine.perform(&repo, Action::Checkout { target: target.into(), changes });
+    let checkout = |target: &str, changes| engine.perform(&repo, Action::Checkout { target: target.into(), changes, branch: true });
     let ask = checkout("newer", CheckoutChanges::Ask);
     assert!(!ask.ok && ask.message.starts_with("Choose how to handle"), "{}", ask.message);
     assert_eq!(current_branch(d), "main");
@@ -1127,7 +1127,7 @@ fn branch_checkout_discards_only_after_validating_the_target_and_can_restore_edi
     let engine = Engine::default();
     let repo = d.to_string_lossy();
     let discard_and_switch = |target: &str| {
-        engine.perform(&repo, Action::Checkout { target: target.into(), changes: CheckoutChanges::Discard })
+        engine.perform(&repo, Action::Checkout { target: target.into(), changes: CheckoutChanges::Discard, branch: true })
     };
 
     let original_status = git::run(d, &["status", "--porcelain"]).stdout;
@@ -1448,7 +1448,7 @@ fn checkout_history_and_branch_creation_preserve_ignored_files() {
 
     let engine = Engine::default();
     let repo = path.to_string_lossy();
-    let switched = engine.perform(&repo, Action::Checkout { target: "personal".into(), changes: Default::default() });
+    let switched = engine.perform(&repo, Action::Checkout { target: "personal".into(), changes: Default::default(), branch: true });
     assert!(switched.ok, "{}", switched.message);
     std::fs::write(&collision, "private settings\n").unwrap();
     assert!(git::run(path, &["check-ignore", "machine.txt"]).ok);
@@ -1478,7 +1478,7 @@ fn checkout_history_and_branch_creation_preserve_ignored_files() {
     assert_eq!(std::fs::read_to_string(&collision).unwrap(), "private settings\n");
 
     std::fs::remove_file(&collision).unwrap();
-    assert!(engine.perform(&repo, Action::Checkout { target: "main".into(), changes: Default::default() }).ok);
+    assert!(engine.perform(&repo, Action::Checkout { target: "main".into(), changes: Default::default(), branch: true }).ok);
     assert!(engine.perform(&repo, Action::Undo).ok);
     std::fs::write(&collision, "private settings\n").unwrap();
     let redo = engine.perform(&repo, Action::Redo);

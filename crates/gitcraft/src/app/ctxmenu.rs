@@ -264,7 +264,7 @@ impl App {
         match r.kind {
             RefKind::Local if !is_head => {
                 let label = if in_worktree.is_some() { format!("Open worktree for {name}") } else { format!("Checkout {name}") };
-                items.push(item(label, act(tab, Action::Checkout { target: name.clone(), changes: gitcraft_core::actions::CheckoutChanges::Ask })));
+                items.push(item(label, act(tab, Action::Checkout { target: name.clone(), changes: gitcraft_core::actions::CheckoutChanges::Ask, branch: true })));
             }
             RefKind::Remote => items.push(item(format!("Checkout {name}"), act(tab, Action::CheckoutRemote { remote_branch: name.clone(), stash_if_needed: false, changes: gitcraft_core::actions::CheckoutChanges::Ask }))),
             _ => {}
@@ -362,7 +362,7 @@ impl App {
     fn tag_menu(&self, tab: u64, repo: &RepoView, r: &GitRef) -> Vec<Entry> {
         let name = r.name.clone();
         // The tag's commit itself: a branch of the same name must not be checked out instead.
-        let mut items = vec![item(format!("Checkout the commit at {name}"), act(tab, Action::Checkout { target: r.sha.clone(), changes: gitcraft_core::actions::CheckoutChanges::Ask }))];
+        let mut items = vec![item(format!("Checkout the commit at {name}"), act(tab, Action::Checkout { target: r.sha.clone(), changes: gitcraft_core::actions::CheckoutChanges::Ask, branch: false }))];
         let sha = r.sha.clone();
         items.push(item("Create branch here", move |app| app.prompt_branch(tab, Some(sha), true)));
         items.push(Entry::Separator);
@@ -460,7 +460,7 @@ impl App {
         let checkout: Vec<Entry> = refs
             .iter()
             .map(|r| {
-                let action = if r.kind == RefKind::Remote { Action::CheckoutRemote { remote_branch: r.name.clone(), stash_if_needed: false, changes: gitcraft_core::actions::CheckoutChanges::Ask } } else { Action::Checkout { target: r.name.clone(), changes: gitcraft_core::actions::CheckoutChanges::Ask } };
+                let action = if r.kind == RefKind::Remote { Action::CheckoutRemote { remote_branch: r.name.clone(), stash_if_needed: false, changes: gitcraft_core::actions::CheckoutChanges::Ask } } else { Action::Checkout { target: r.name.clone(), changes: gitcraft_core::actions::CheckoutChanges::Ask, branch: true } };
                 let label = if r.kind == RefKind::Local && super::repo::other_worktree(repo, &r.name).is_some() { format!("Open worktree for {}", r.name) } else { r.name.clone() };
                 off(item(label, act(tab, action)), !(r.kind == RefKind::Local && Some(&r.name) == repo.data.head_branch.as_ref()))
             })
@@ -468,7 +468,7 @@ impl App {
         if !checkout.is_empty() {
             items.push(sub("Checkout branch", checkout));
         }
-        items.push(item("Checkout this commit (detached HEAD)", act(tab, Action::Checkout { target: sha.clone(), changes: gitcraft_core::actions::CheckoutChanges::Ask })));
+        items.push(item("Checkout this commit (detached HEAD)", act(tab, Action::Checkout { target: sha.clone(), changes: gitcraft_core::actions::CheckoutChanges::Ask, branch: false })));
         let s = sha.clone();
         let mut worktree = vec![item("this commit", move |app| app.add_worktree(tab, Some(s)))];
         for r in &refs {

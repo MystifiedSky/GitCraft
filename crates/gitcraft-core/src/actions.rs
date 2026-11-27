@@ -148,7 +148,7 @@ pub enum Action {
         #[serde(default)]
         sign_off: bool,
     },
-    Checkout { target: String, #[serde(default)] changes: CheckoutChanges },
+    Checkout { target: String, #[serde(default)] changes: CheckoutChanges, #[serde(default)] branch: bool },
     CheckoutRemote { remote_branch: String, #[serde(default)] stash_if_needed: bool, #[serde(default)] changes: CheckoutChanges },
     CheckoutPullRequest { url: String, reference: String, expected: String },
     CreateBranch { name: String, at: Option<String>, checkout: bool },
@@ -661,18 +661,19 @@ impl Engine {
         let revision = self.rev(dir, &format!("{target}^{{commit}}"));
         if target.starts_with('-') || revision.is_empty() { return Err("The checkout target is unavailable. Refresh the repository and try again.".into()); }
         let from = self.head_name(dir);
-        if target == from || self.branch_ref(dir) == target { return Ok(format!("Already checked out {target}")); }
+        if self.branch_ref(dir) == target || (branch && target == from) { return Ok(format!("Already checked out {target}")); }
         crate::manage::require_lfs_for_checkout(dir, &revision)?;
         let name = format!("Changes before checking out {target}");
         let notice = self.prepare_checkout_changes(repo, dir, &name, changes)?;
         // A branch can be named like a 40- or 64-character object ID; a branch action still checks out the branch.
-        let out = if valid_undo_oid(target) && !branch {
-            self.git(dir, &["checkout", "-q", "--no-overwrite-ignore", "--detach", &revision, "--"])
+        let detach = valid_undo_oid(target) && !branch;
+        let out = if detach {
+            self.git(dir, &["checkout", "-q", "--no-overwrite-ignore", "--detach", &format!("{target}^{{commit}}"), "--"])
         } else {
             self.git(dir, &["checkout", "-q", "--no-overwrite-ignore", target, "--"])
         };
         let result = if out.ok {
-            self.push_undo(repo, UndoRec::Checkout { from, to: target.to_string() });
+            self.push_undo(repo, UndoRec::Checkout { from, to: if detach { format!("{target}^{{commit}}") } else { target.to_string() } });
             Ok(format!("Checked out {target}"))
         } else if checkout_would_overwrite(&out) && matches!(changes, CheckoutChanges::Ask | CheckoutChanges::Carry) {
             Err(format!("Local changes block this checkout.\n\n{}", out.message()))
@@ -946,10 +947,13 @@ impl Engine {
                 }
                 done(o, if amend { "Amended previous commit" } else { "Committed" })
             }
-            Action::Checkout { target, changes } => match self.checkout_local(repo, &target, changes) {
-                Ok(message) => ActionResult { ok: true, message },
-                Err(message) => ActionResult { ok: false, message },
-            },
+            Action::Checkout { target, changes, branch } => {
+                let result = if branch { self.checkout_branch(repo, &target, changes) } else { self.checkout_local(repo, &target, changes) };
+                match result {
+                    Ok(message) => ActionResult { ok: true, message },
+                    Err(message) => ActionResult { ok: false, message },
+                }
+            }
             Action::CheckoutPullRequest { url, reference, expected } => {
                 if !matches!(expected.len(), 40 | 64) || !expected.bytes().all(|c| c.is_ascii_hexdigit()) || reference.starts_with('-') {
                     return done(git::GitOut::failed("The pull request has an invalid source commit."), "");
@@ -2482,6 +2486,33 @@ mod tests {
     }
 
     #[test]
+    fn hex_checkout_preserves_branch_and_commit_intent() {
+        let (d, repo, e) = drop_repo("hex-checkout-intent");
+        let g = |args: &[&str]| {
+            let o = git::run(&d, args);
+            assert!(o.ok, "{args:?}: {}", o.message());
+        };
+        let selected = head(&d);
+        g(&["branch", &selected]);
+        g(&["checkout", "-q", &selected]);
+        fs::write(d.join("next.txt"), "next\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-q", "-m", "next"]);
+        let next = head(&d);
+        let r = e.perform(&repo, Action::Checkout { target: selected.clone(), changes: Default::default(), branch: false });
+        assert!(r.ok, "{}", r.message);
+        assert_eq!(head(&d), selected);
+        assert!(!git::run(&d, &["symbolic-ref", "-q", "HEAD"]).ok, "a commit checkout must detach");
+
+        g(&["checkout", "-q", "master"]);
+        let r = e.perform(&repo, Action::Checkout { target: selected.clone(), changes: Default::default(), branch: true });
+        assert!(r.ok, "{}", r.message);
+        assert_eq!(git::run(&d, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim(), selected);
+        assert_eq!(head(&d), next);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn a_hex_named_branch_is_checked_out_as_a_branch() {
         let (d, repo, e) = drop_repo("hex-branch-drop");
         let g = |args: &[&str]| {
@@ -2653,7 +2684,7 @@ mod tests {
         assert!(e.perform(&repo, Action::CreateBranch { name: "feature x".into(), at: None, checkout: true }).ok);
         let data = git::load(&d, 100);
         assert_eq!(data.head_branch.as_deref(), Some("feature-x"));
-        assert!(e.perform(&repo, Action::Checkout { target: "master".into(), changes: Default::default() }).ok);
+        assert!(e.perform(&repo, Action::Checkout { target: "master".into(), changes: Default::default(), branch: true }).ok);
         assert!(e.perform(&repo, Action::DeleteBranch { name: "feature-x".into() }).ok);
         assert!(e.perform(&repo, Action::Undo).ok, "undo delete branch");
         assert!(git::load(&d, 100).refs.iter().any(|r| r.name == "feature-x"));
@@ -2867,7 +2898,7 @@ mod tests {
 
         // Merge conflict: same line changed on both branches.
         commit("a.txt", "side\n", "side change");
-        assert!(e.perform(&repo, Action::Checkout { target: "master".into(), changes: Default::default() }).ok);
+        assert!(e.perform(&repo, Action::Checkout { target: "master".into(), changes: Default::default(), branch: true }).ok);
         commit("a.txt", "master\n", "master change");
         let r = e.perform(&repo, Action::Merge { branch: "side".into(), into: None, changes: Default::default() });
         assert!(!r.ok);

@@ -699,7 +699,7 @@ impl App {
                     }
                 }
                 PaletteAction::Open(path) => self.open_repo(&path),
-                PaletteAction::Checkout(name, remote) => self.act(tab, if remote { Action::CheckoutRemote { remote_branch: name, stash_if_needed: false, changes: gitcraft_core::actions::CheckoutChanges::Ask } } else { Action::Checkout { target: name, changes: gitcraft_core::actions::CheckoutChanges::Ask } }),
+                PaletteAction::Checkout(name, remote) => self.act(tab, if remote { Action::CheckoutRemote { remote_branch: name, stash_if_needed: false, changes: gitcraft_core::actions::CheckoutChanges::Ask } } else { Action::Checkout { target: name, changes: gitcraft_core::actions::CheckoutChanges::Ask, branch: true } }),
                 PaletteAction::History(file, blame) => self.open_history(tab, &file, if blame { super::repo::HistoryMode::Blame } else { super::repo::HistoryMode::History }),
                 PaletteAction::Theme(id) => self.set_theme(id),
                 PaletteAction::Profile(i) => self.switch_profile(i),

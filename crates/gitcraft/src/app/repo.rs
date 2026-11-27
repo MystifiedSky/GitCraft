@@ -752,7 +752,7 @@ impl App {
         use super::widgets::Kind;
         use gitcraft_core::actions::CheckoutChanges;
         let (target, changes, remote_stash) = match action {
-            Action::Checkout { target, changes } => (target.clone(), *changes, false),
+            Action::Checkout { target, changes, .. } => (target.clone(), *changes, false),
             Action::CheckoutRemote { remote_branch, stash_if_needed, changes } => (remote_branch.clone(), *changes, *stash_if_needed),
             Action::Merge { into: Some(target), changes, .. } => (target.clone(), *changes, false),
             Action::MergeSquash { into: Some(target), changes, .. } => (target.clone(), *changes, false),
@@ -765,7 +765,7 @@ impl App {
             return false;
         }
         let with = |changes: CheckoutChanges| match action.clone() {
-            Action::Checkout { target, .. } => Action::Checkout { target, changes },
+            Action::Checkout { target, branch, .. } => Action::Checkout { target, changes, branch },
             Action::CheckoutRemote { remote_branch, stash_if_needed, .. } => Action::CheckoutRemote { remote_branch, stash_if_needed, changes },
             Action::Merge { branch, into, .. } => Action::Merge { branch, into, changes },
             Action::MergeSquash { branch, into, .. } => Action::MergeSquash { branch, into, changes },
