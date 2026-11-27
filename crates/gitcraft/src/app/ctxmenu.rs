@@ -176,7 +176,7 @@ fn drop_detail(action: &Action) -> String {
 }
 
 /// A ref name without its `refs/…` prefix, for messages.
-fn short_ref(name: &str) -> &str {
+pub(crate) fn short_ref(name: &str) -> &str {
     name.strip_prefix("refs/heads/").or_else(|| name.strip_prefix("refs/remotes/")).or_else(|| name.strip_prefix("refs/tags/")).unwrap_or(name)
 }
 

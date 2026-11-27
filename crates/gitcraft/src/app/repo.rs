@@ -1013,14 +1013,14 @@ impl App {
     }
 
     /// A squash merge succeeded: offer its message as the commit draft, unless the user already has a draft.
-    pub(crate) fn squash_done(&mut self, tab: u64, branch: &str) {
+    pub(crate) fn squash_done(&mut self, tab: u64, branch: &str, into: Option<&str>) {
         let Some(r) = self.repo(tab) else { return };
         let path = r.path.clone();
         if self.draft(&path) != Draft::default() {
             return;
         }
-        let head = r.view.as_ref().and_then(|v| v.data.head_branch.clone()).unwrap_or_else(|| "HEAD".into());
-        self.pending_drafts.push((path, Draft { summary: format!("Squash merge {branch} into {head}"), description: String::new(), amend: false }));
+        let head = into.map(super::ctxmenu::short_ref).map(str::to_owned).or_else(|| r.view.as_ref().and_then(|v| v.data.head_branch.clone())).unwrap_or_else(|| "HEAD".into());
+        self.pending_drafts.push((path, Draft { summary: format!("Squash merge {} into {head}", super::ctxmenu::short_ref(branch)), description: String::new(), amend: false }));
     }
 
     pub(crate) fn set_draft(&mut self, path: &str, draft: Draft) {
