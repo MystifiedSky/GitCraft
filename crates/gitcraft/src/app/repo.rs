@@ -725,7 +725,7 @@ impl App {
         {
             action = Action::Pull { mode: mode.clone(), autostash: Some(a) };
         }
-        if let Action::Merge { branch } = &action
+        if let Action::Merge { branch, into: None, .. } = &action
             && self.settings.flag("squashMerge", false)
         {
             // Its commit message draft is filled in once the squash succeeds (see `squash_done`).
@@ -754,6 +754,8 @@ impl App {
         let (target, changes, remote_stash) = match action {
             Action::Checkout { target, changes } => (target.clone(), *changes, false),
             Action::CheckoutRemote { remote_branch, stash_if_needed, changes } => (remote_branch.clone(), *changes, *stash_if_needed),
+            Action::Merge { into: Some(target), changes, .. } => (target.clone(), *changes, false),
+            Action::Rebase { branch: Some(target), changes, .. } => (target.clone(), *changes, false),
             _ => return false,
         };
         let choose = changes == CheckoutChanges::Ask && msg == "Choose how to handle your uncommitted changes before checkout.";
@@ -764,6 +766,8 @@ impl App {
         let with = |changes: CheckoutChanges| match action.clone() {
             Action::Checkout { target, .. } => Action::Checkout { target, changes },
             Action::CheckoutRemote { remote_branch, stash_if_needed, .. } => Action::CheckoutRemote { remote_branch, stash_if_needed, changes },
+            Action::Merge { branch, into, .. } => Action::Merge { branch, into, changes },
+            Action::Rebase { onto, branch, .. } => Action::Rebase { onto, branch, changes },
             other => other,
         };
         let stash = match action {
@@ -842,7 +846,7 @@ impl App {
         let notify = self.settings.flag("notifySuccess", true);
         let handled = self.after_action(tab, &action, &result, quiet);
         // A checkout that stashed or discarded local changes always says so (and where they went).
-        let stashed = matches!(action, Action::Checkout { .. } | Action::CheckoutRemote { .. }) && (result.message.contains("Your local changes are saved in the stash") || result.message.contains("Discarded changes."));
+        let stashed = matches!(action, Action::Checkout { .. } | Action::CheckoutRemote { .. } | Action::Merge { .. } | Action::Rebase { .. }) && (result.message.contains("Your local changes are saved in the stash") || result.message.contains("Discarded changes."));
         if !handled && (!result.ok || (!quiet && (notify || stashed))) {
             self.toast(result.ok, result.message.clone());
         }

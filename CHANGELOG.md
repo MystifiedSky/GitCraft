@@ -9,7 +9,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 - Move the commit details panel below the commit graph or back to the right from the panel header or the View menu, and resize it in either layout. ([#57](https://github.com/MystifiedSky/GitCraft/pull/57))
 - Live agent status: set up Claude Code or Codex in Preferences > External Tools, and the Agents view shows whether each session is running, waiting for you or done. Claude Code's permission requests appear on the worktree card with the command it wants to run, to allow or deny there; an unanswered request is asked in the terminal as before. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
 - The graph marks the commit each other worktree has checked out with a count of its uncommitted changes; click it to open that worktree. Turn it off in Preferences > Agents. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
-- Drag a branch label onto another in the graph to merge, rebase, fast-forward, push, or start a pull request between them. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
+- Drag a branch label onto another in the graph and pick an action from the list: merge, rebase, fast-forward, push, or start a pull request, each with a one-line explanation. Merge and rebase check out the branch they act on, and fast-forward moves the branch that is behind. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
 - Stacked pull requests: starting a pull request from a branch made on another open pull request's branch targets that branch, and the form names the pull request it stacks on. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
 - Pull requests from a repository without its own template use the GitHub organization's default template. Commits made with a GitHub no-reply address show that account's GitHub picture. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
 - Recompose commits with AI: from a commit's menu, or for a run of selected commits that ends at the checked-out commit, the commits are undone and their changes composed again into new commits for you to review. Undo brings the originals back. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
@@ -81,6 +81,8 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
+- Keep dialog buttons inside the dialog box: wrap them onto new rows, shorten long labels with a tooltip, and truncate long titles.
+- Drag and drop every branch in the list a commit's +N badge opens, not only the first label.
 - Restore the GitCraft icon on Windows taskbar pins, shortcuts, and the executable in Explorer.
 - Keep the Create Repository and Clone forms readable beside their source list, and stack the panels in narrow windows.
 - Open branch cleanup in a larger, resizable dialog with scrollable results and visible Cancel and Delete buttons on smaller screens.

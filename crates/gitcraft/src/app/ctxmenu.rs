@@ -134,6 +134,47 @@ fn reset_menu(tab: u64, repo: &RepoView, sha: &str) -> Entry {
     )
 }
 
+/// Actions offered when `source` is dropped on `target`; `head` is the checked-out branch.
+fn dropped_actions(v: &RepoView, source: &GitRef, target: &GitRef, head: Option<&str>) -> Vec<(String, Action)> {
+    let is_head = |r: &GitRef| r.kind == RefKind::Local && head == Some(r.name.as_str());
+    let (s, t) = (&source.name, &target.name);
+    let mut choices: Vec<(String, Action)> = Vec::new();
+    // The branch behind moves to the one ahead, whichever side of the drop it is on.
+    if target.kind == RefKind::Local && target.sha != source.sha && is_loaded_ancestor(v, &target.sha, &source.sha) {
+        choices.push((format!("Fast-forward {t} to {s}"), Action::FastForward { branch: t.clone(), to: s.clone() }));
+    }
+    if source.kind == RefKind::Local && target.sha != source.sha && is_loaded_ancestor(v, &source.sha, &target.sha) {
+        choices.push((format!("Fast-forward {s} to {t}"), Action::FastForward { branch: s.clone(), to: t.clone() }));
+    }
+    // Merge and rebase check out the branch they act on; a remote branch can only be merged from or rebased onto.
+    if target.kind == RefKind::Local {
+        choices.push((format!("Merge {s} into {t}"), Action::Merge { branch: s.clone(), into: Some(t.clone()), changes: gitcraft_core::actions::CheckoutChanges::Ask }));
+    }
+    if source.kind == RefKind::Local {
+        choices.push((format!("Rebase {s} onto {t}"), Action::Rebase { onto: t.clone(), branch: Some(s.clone()), changes: gitcraft_core::actions::CheckoutChanges::Ask }));
+    }
+    if is_head(source) && !is_head(target) {
+        choices.push((format!("Merge {t} into {s}"), Action::Merge { branch: t.clone(), into: Some(s.clone()), changes: gitcraft_core::actions::CheckoutChanges::Ask }));
+    }
+    if source.kind == RefKind::Local && target.kind == RefKind::Remote {
+        choices.push((format!("Push {s}"), Action::PushBranch { branch: s.clone() }));
+    }
+    choices
+}
+
+/// One line under a dropped branch's action saying what it does.
+fn drop_detail(action: &Action) -> String {
+    match action {
+        Action::FastForward { branch, to } => format!("Move {branch} to {to} without a merge commit."),
+        Action::Merge { branch, into: Some(into), .. } => format!("Create a merge commit on {into} with {branch}."),
+        Action::Merge { branch, .. } => format!("Merge {branch} with a merge commit."),
+        Action::Rebase { onto, branch: Some(branch), .. } => format!("Replay {branch}'s commits on top of {onto}."),
+        Action::Rebase { onto, .. } => format!("Replay the commits on top of {onto}."),
+        Action::PushBranch { branch } => format!("Send {branch} to its remote."),
+        _ => String::new(),
+    }
+}
+
 impl App {
     fn per_repo(&self, key: &str, path: &str) -> Vec<String> {
         self.settings.get::<std::collections::HashMap<String, Vec<String>>>(key).and_then(|m| m.get(path).cloned()).unwrap_or_default()
@@ -150,36 +191,54 @@ impl App {
     /// A branch label was dropped on another in the graph: offer what can be done with the two.
     pub(crate) fn ref_dropped(&mut self, tab: u64, source: GitRef, target: GitRef) {
         let Some(v) = self.repo(tab).and_then(|r| r.view.as_ref()) else { return };
-        let head = v.data.head_branch.clone();
-        let is_head = |r: &GitRef| r.kind == RefKind::Local && Some(&r.name) == head.as_ref();
         let (s, t) = (source.name.clone(), target.name.clone());
-        let mut choices: Vec<(String, Action)> = Vec::new();
-        if is_head(&target) {
-            choices.push((format!("Merge {s} into {t}"), Action::Merge { branch: s.clone() }));
-        }
-        if is_head(&source) {
-            choices.push((format!("Rebase {s} onto {t}"), Action::Rebase { onto: t.clone() }));
-            choices.push((format!("Merge {t} into {s}"), Action::Merge { branch: t.clone() }));
-        }
-        if target.kind == RefKind::Local && target.sha != source.sha && is_loaded_ancestor(v, &target.sha, &source.sha) {
-            choices.push((format!("Fast-forward {t} to {s}"), Action::FastForward { branch: t.clone(), to: s.clone() }));
-        }
-        if source.kind == RefKind::Local && target.kind == RefKind::Remote {
-            choices.push((format!("Push {s}"), Action::PushBranch { branch: s.clone() }));
-        }
+        let choices = dropped_actions(v, &source, &target, v.data.head_branch.as_deref());
         let pull_request = source.kind == RefKind::Local && target.kind != RefKind::Tag;
         if choices.is_empty() && !pull_request {
             return self.toast(false, format!("Check out {t} or {s} first to merge or rebase them."));
         }
-        let mut d = super::dialogs::Dialog::new(&format!("{s} → {t}"), super::dialogs::Body::Text(format!("What should GitCraft do with {s} and {t}?"))).cancel_label("Cancel");
+        let mut rows: Vec<(String, String, std::rc::Rc<dyn Fn(&mut App)>)> = Vec::new();
         for (label, action) in choices {
-            d = d.choice(&label, super::widgets::Kind::Default, move |app, _| app.act(tab, action));
+            let detail = drop_detail(&action);
+            rows.push((label, detail, std::rc::Rc::new(move |app: &mut App| app.act(tab, action.clone()))));
         }
         if pull_request {
             // Into the target's own branch name (a remote branch's name without its remote).
             let into = if target.kind == RefKind::Remote { split_remote(v, &t).map_or(t.clone(), |(_, b)| b) } else { t.clone() };
-            d = d.choice(&format!("Start a pull request from {s} into {into}"), super::widgets::Kind::Primary, move |app, _| app.start_pull_request_into(tab, &s, Some(into)));
+            let source = s.clone();
+            let label = format!("Start a pull request from {source} into {into}");
+            let detail = format!("Open a pull request from {source} into {into}.");
+            rows.push((label, detail, std::rc::Rc::new(move |app: &mut App| app.start_pull_request_into(tab, &source, Some(into.clone())))));
         }
+        let title = format!("{s} → {t}");
+        let draw = move |app: &mut App, ui: &mut egui::Ui| -> bool {
+            let c = p();
+            ui.label(egui::RichText::new(format!("What should GitCraft do with {s} and {t}?")).size(13.0).color(c.fg));
+            ui.add_space(6.0);
+            let width = ui.available_width();
+            for (title, detail, run) in &rows {
+                let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 48.0), egui::Sense::click());
+                let accessible = title.clone();
+                response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, accessible.clone()));
+                let activated = response.clicked() || (response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Space)));
+                let hovered = response.hovered();
+                if hovered {
+                    ui.painter().rect_filled(rect, egui::CornerRadius::same(4), c.hoverrow);
+                    super::icons::paint(ui, egui::Rect::from_min_size(egui::pos2(rect.right() - 20.0, rect.center().y - 5.5), egui::Vec2::splat(11.0)), super::icons::Icon::ChevronRight, 11.0, c.fg2);
+                }
+                let title = super::widgets::fit(ui, title, egui::FontId::proportional(13.0), c.fg, width - 36.0);
+                let detail = super::widgets::fit(ui, detail, egui::FontId::proportional(11.5), c.fg3, width - 36.0);
+                ui.painter().galley(egui::pos2(rect.left() + 10.0, rect.top() + 8.0), title, c.fg);
+                ui.painter().galley(egui::pos2(rect.left() + 10.0, rect.top() + 27.0), detail, c.fg3);
+                if activated {
+                    run(app);
+                    return true;
+                }
+                ui.add_space(2.0);
+            }
+            false
+        };
+        let d = super::dialogs::Dialog::new(&title, super::dialogs::Body::Custom(Box::new(draw))).width(520.0).cancel_label("Cancel");
         self.dialog = Some(d);
     }
 
@@ -205,10 +264,10 @@ impl App {
             _ => {}
         }
         if let Some(head) = head.clone().filter(|_| !is_head) {
-            items.push(item(format!("Merge {name} into {head}"), act(tab, Action::Merge { branch: name.clone() })));
+            items.push(item(format!("Merge {name} into {head}"), act(tab, Action::Merge { branch: name.clone(), into: None, changes: Default::default() })));
             let n2 = name.clone();
             items.push(item(format!("Squash merge {name} into {head}"), move |app| app.act(tab, Action::MergeSquash { branch: n2 })));
-            items.push(item(format!("Rebase {head} onto {name}"), act(tab, Action::Rebase { onto: name.clone() })));
+            items.push(item(format!("Rebase {head} onto {name}"), act(tab, Action::Rebase { onto: name.clone(), branch: None, changes: Default::default() })));
             let n3 = name.clone();
             items.push(item(format!("Interactive Rebase {head} onto {name}"), move |app| app.open_rebase(tab, &n3, &n3, false)));
             if r.sha != repo.data.head_sha && is_loaded_ancestor(repo, &repo.data.head_sha, &r.sha) {
@@ -390,7 +449,7 @@ impl App {
             _ => {}
         }
         if repo.data.head_branch.is_some() && !is_head {
-            items.push(item(format!("Rebase {head} onto this commit"), act(tab, Action::Rebase { onto: sha.clone() })));
+            items.push(item(format!("Rebase {head} onto this commit"), act(tab, Action::Rebase { onto: sha.clone(), branch: None, changes: Default::default() })));
         }
         let checkout: Vec<Entry> = refs
             .iter()
@@ -643,5 +702,41 @@ mod tests {
     fn ignore_patterns_are_literal() {
         assert_eq!(literal_ignore_path("src/a*.rs"), "/src/a\\*.rs");
         assert_eq!(literal_ignore_path("#my notes"), "/\\#my\\ notes");
+    }
+
+    #[test]
+    fn a_branch_behind_the_one_it_is_dropped_on_can_fast_forward_to_it() {
+        let commit = |sha: &str, parents: &[&str]| Commit {
+            sha: sha.into(),
+            parents: parents.iter().map(|parent| (*parent).into()).collect(),
+            author: String::new(),
+            email: String::new(),
+            time: 0,
+            summary: String::new(),
+            body: String::new(),
+        };
+        let branch = |name: &str, sha: &str| GitRef {
+            name: name.into(),
+            full: format!("refs/heads/{name}"),
+            sha: sha.into(),
+            kind: RefKind::Local,
+            upstream: String::new(),
+            ahead: 0,
+            behind: 0,
+        };
+        let refs = vec![branch("ff", "a"), branch("dev", "c")];
+        let v = RepoView {
+            path: String::new(),
+            name: String::new(),
+            data: gitcraft_core::git::RepoData { commits: vec![commit("a", &[]), commit("b", &["a"]), commit("c", &["b"])], refs: refs.clone(), head_branch: Some("ff".into()), ..Default::default() },
+            graph: Default::default(),
+            history_cursor: None,
+            undo: Default::default(),
+        };
+        let choices = dropped_actions(&v, &refs[0], &refs[1], Some("ff"));
+        let labels: Vec<&str> = choices.iter().map(|(label, _)| label.as_str()).collect();
+        assert!(labels.contains(&"Fast-forward ff to dev"), "{labels:?}");
+        assert!(!labels.contains(&"Fast-forward dev to ff"), "{labels:?}");
+        assert!(choices.iter().any(|(_, action)| matches!(action, Action::FastForward { branch, to } if branch == "ff" && to == "dev")));
     }
 }

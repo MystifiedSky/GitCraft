@@ -172,8 +172,10 @@ pub enum Action {
     CherryPick { sha: String, #[serde(default)] mainline: Option<usize> },
     Revert { sha: String, #[serde(default)] mainline: Option<usize> },
     Reset { sha: String, mode: String },
-    Merge { branch: String },
-    Rebase { onto: String },
+    /// Merge `branch` into the checked-out branch, or into `into` after checking it out.
+    Merge { branch: String, #[serde(default)] into: Option<String>, #[serde(default)] changes: CheckoutChanges },
+    /// Rebase the checked-out branch, or `branch` after checking it out, onto `onto`.
+    Rebase { onto: String, #[serde(default)] branch: Option<String>, #[serde(default)] changes: CheckoutChanges },
     AbortMerge,
     Sequencer { operation: String, command: String },
     AbortRebase,
@@ -1139,18 +1141,44 @@ impl Engine {
                 }
                 done(o, "Reset branch")
             }
-            Action::Merge { branch } => {
+            Action::Merge { branch, into, changes } => {
+                let mut notice = None;
+                if let Some(target) = into {
+                    if self.head_name(dir) != target {
+                        match self.checkout_local(repo, &target, changes) {
+                            Ok(message) => notice = Some(message),
+                            Err(message) => return ActionResult { ok: false, message },
+                        }
+                    }
+                }
                 let args = crate::extras::merge_args(dir, "merge", &["--no-edit", &branch]);
-                done(self.git(dir, &args.iter().map(String::as_str).collect::<Vec<_>>()), &format!("Merged {branch}"))
+                let mut result = done(self.git(dir, &args.iter().map(String::as_str).collect::<Vec<_>>()), &format!("Merged {branch}"));
+                if let Some(notice) = notice {
+                    result.message = if result.ok { format!("{}. {}", notice.trim_end_matches('.'), result.message) } else { format!("{notice}\n\n{}", result.message) };
+                }
+                result
             }
-            Action::Rebase { onto } => {
+            Action::Rebase { onto, branch, changes } => {
+                let mut notice = None;
+                if let Some(branch) = branch {
+                    if self.head_name(dir) != branch {
+                        match self.checkout_local(repo, &branch, changes) {
+                            Ok(message) => notice = Some(message),
+                            Err(message) => return ActionResult { ok: false, message },
+                        }
+                    }
+                }
                 let before = self.rev(dir, "HEAD");
                 let o = self.git(dir, &["rebase", "--autostash", &onto]);
                 if o.ok {
                     let after = self.rev(dir, "HEAD");
                     self.push_undo(repo, UndoRec::Rewrite { before, after, branch: self.branch_ref(dir), label: format!("rebase onto {onto}"), protect_index: false });
                 }
-                done(o, &format!("Rebased onto {onto}"))
+                let mut result = done(o, &format!("Rebased onto {onto}"));
+                if let Some(notice) = notice {
+                    result.message = if result.ok { format!("{}. {}", notice.trim_end_matches('.'), result.message) } else { format!("{notice}\n\n{}", result.message) };
+                }
+                result
             }
             Action::AbortMerge => done(self.git(dir, &["merge", "--abort"]), "Merge aborted"),
             Action::Sequencer { operation, command } => {
@@ -2322,7 +2350,7 @@ mod tests {
             let action = if squash {
                 Action::MergeSquash { branch: "side".into() }
             } else {
-                Action::Merge { branch: "side".into() }
+                Action::Merge { branch: "side".into(), into: None, changes: Default::default() }
             };
             let result = e.perform(&repo, action);
             assert!(result.ok, "{}", result.message);
@@ -2333,6 +2361,58 @@ mod tests {
         }
         assert_eq!(git::run(&d, &["config", "--get", "merge.renames"]).stdout.trim(), "false");
         assert_eq!(git::run(&d, &["config", "--get", "merge.renamelimit"]).stdout.trim(), "-1");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn merge_and_rebase_check_out_a_branch_other_than_the_current_one() {
+        let d = temp_repo("drop-branch-actions");
+        let repo = d.to_string_lossy().to_string();
+        let e = Engine::default();
+        let g = |args: &[&str]| {
+            let o = git::run(&d, args);
+            assert!(o.ok, "{args:?}: {}", o.message());
+        };
+        let current = || git::run(&d, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim().to_string();
+        fs::write(d.join("base.txt"), "base\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-q", "-m", "base"]);
+        g(&["checkout", "-q", "-b", "side"]);
+        fs::write(d.join("side.txt"), "side\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-q", "-m", "side"]);
+        g(&["checkout", "-q", "master"]);
+        fs::write(d.join("main.txt"), "main\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-q", "-m", "main"]);
+
+        // Rebase checks out "side" first.
+        let r = e.perform(&repo, Action::Rebase { onto: "master".into(), branch: Some("side".into()), changes: Default::default() });
+        assert!(r.ok, "{}", r.message);
+        assert_eq!(current(), "side");
+        let log = git::run(&d, &["log", "--reverse", "--format=%s", "master..HEAD"]).stdout;
+        assert_eq!(log.lines().collect::<Vec<_>>(), vec!["side"]);
+
+        // A new master commit makes the merge a true merge.
+        g(&["checkout", "-q", "master"]);
+        fs::write(d.join("more.txt"), "more\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-q", "-m", "more"]);
+        g(&["checkout", "-q", "side"]);
+        let r = e.perform(&repo, Action::Merge { branch: "side".into(), into: Some("master".into()), changes: Default::default() });
+        assert!(r.ok, "{}", r.message);
+        assert_eq!(current(), "master");
+        assert_eq!(git::run(&d, &["rev-list", "--parents", "-n1", "HEAD"]).stdout.split_whitespace().count(), 3);
+        assert!(d.join("base.txt").exists() && d.join("side.txt").exists() && d.join("main.txt").exists() && d.join("more.txt").exists());
+
+        // Uncommitted work is reported before the checkout.
+        g(&["checkout", "-q", "side"]);
+        fs::write(d.join("base.txt"), "dirty\n").unwrap();
+        let r = e.perform(&repo, Action::Merge { branch: "side".into(), into: Some("master".into()), changes: CheckoutChanges::Ask });
+        assert!(!r.ok);
+        assert_eq!(r.message, "Choose how to handle your uncommitted changes before checkout.");
+        assert_eq!(current(), "side");
+        assert_eq!(fs::read_to_string(d.join("base.txt")).unwrap(), "dirty\n");
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -2625,7 +2705,7 @@ mod tests {
         commit("a.txt", "side\n", "side change");
         assert!(e.perform(&repo, Action::Checkout { target: "master".into(), changes: Default::default() }).ok);
         commit("a.txt", "master\n", "master change");
-        let r = e.perform(&repo, Action::Merge { branch: "side".into() });
+        let r = e.perform(&repo, Action::Merge { branch: "side".into(), into: None, changes: Default::default() });
         assert!(!r.ok);
         let data = git::load(&d, 50);
         assert_eq!(data.state_note.as_deref(), Some("merging"));
