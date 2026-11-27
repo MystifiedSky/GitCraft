@@ -618,7 +618,9 @@ impl Engine {
         crate::manage::require_lfs_for_checkout(dir, &revision)?;
         let name = format!("Changes before checking out {target}");
         let notice = self.prepare_checkout_changes(repo, dir, &name, changes)?;
-        let out = if valid_undo_oid(target) {
+        // A branch can be named like a 40- or 64-character object ID; prefer the branch.
+        let branch_target = !self.rev(dir, &format!("refs/heads/{target}")).is_empty();
+        let out = if valid_undo_oid(target) && !branch_target {
             self.git(dir, &["checkout", "-q", "--no-overwrite-ignore", "--detach", &revision, "--"])
         } else {
             self.git(dir, &["checkout", "-q", "--no-overwrite-ignore", target, "--"])
@@ -2461,6 +2463,26 @@ mod tests {
             assert!(result.message.contains("no longer available"), "{}", result.message);
             assert_eq!(current(), "master");
         }
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_hex_named_branch_is_checked_out_as_a_branch() {
+        let d = temp_repo("hex-branch-drop");
+        let repo = d.to_string_lossy().to_string();
+        let e = Engine::default();
+        let g = |args: &[&str]| {
+            let o = git::run(&d, args);
+            assert!(o.ok, "{args:?}: {}", o.message());
+        };
+        fs::write(d.join("base.txt"), "base\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-q", "-m", "base"]);
+        let branch = head(&d);
+        g(&["branch", &branch]);
+        let r = e.perform(&repo, Action::Merge { branch: "refs/heads/master".into(), into: Some(branch.clone()), changes: Default::default() });
+        assert!(r.ok, "{}", r.message);
+        assert_eq!(git::run(&d, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim(), branch);
         let _ = fs::remove_dir_all(&d);
     }
 
