@@ -1797,22 +1797,32 @@ impl Engine {
             }
             Action::FastForward { branch, to } => {
                 let head = git::run(dir, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim().to_string();
-                let before = self.rev(dir, &format!("refs/heads/{branch}"));
-                let o = if head == branch {
-                    self.git(dir, &["merge", "--ff-only", &to])
-                } else {
-                    // Moves a branch that isn't checked out; git refuses anything but a fast-forward.
-                    self.git(dir, &["fetch", ".", &format!("{to}:{branch}")])
-                };
-                if o.ok {
-                    let after = if head == branch { self.rev(dir, "HEAD") } else { self.rev(dir, &format!("refs/heads/{branch}")) };
-                    if head == branch {
-                        self.push_undo(repo, UndoRec::Rewrite { before, after, branch: self.branch_ref(dir), label: format!("fast-forward {branch}"), protect_index: false });
-                    } else if before != after {
-                        self.push_undo(repo, UndoRec::UpdateRef { name: format!("refs/heads/{branch}"), before, after, label: format!("fast-forward {branch}") });
-                    }
+                let name = format!("refs/heads/{branch}");
+                let before = self.rev(dir, &name);
+                let after = self.rev(dir, &format!("{to}^{{commit}}"));
+                if before.is_empty() || after.is_empty() {
+                    return done(git::GitOut::failed("The branch or target no longer exists. Refresh the repository and try again."), "");
                 }
-                done(o, &format!("Fast-forwarded {} to {}", ref_name(&branch), ref_name(&to)))
+                if head == branch {
+                    let o = self.git(dir, &["merge", "--ff-only", &after]);
+                    if o.ok {
+                        self.push_undo(repo, UndoRec::Rewrite { before, after, branch: self.branch_ref(dir), label: format!("fast-forward {branch}"), protect_index: false });
+                    }
+                    done(o, &format!("Fast-forwarded {} to {}", ref_name(&branch), ref_name(&to)))
+                } else {
+                    let checked_out = git::try_worktrees(dir).ok().is_some_and(|worktrees| worktrees.iter().any(|worktree| worktree.branch == branch));
+                    if checked_out {
+                        return done(git::GitOut::failed(&format!("Open the worktree that has {} checked out before fast-forwarding it.", ref_name(&branch))), "");
+                    }
+                    if !git::run(dir, &["merge-base", "--is-ancestor", &before, &after]).ok {
+                        return done(git::GitOut::failed(&format!("{} cannot be fast-forwarded to {}.", ref_name(&branch), ref_name(&to))), "");
+                    }
+                    let o = self.git(dir, &["update-ref", &name, &after, &before]);
+                    if o.ok && before != after {
+                        self.push_undo(repo, UndoRec::UpdateRef { name, before, after, label: format!("fast-forward {branch}") });
+                    }
+                    done(o, &format!("Fast-forwarded {} to {}", ref_name(&branch), ref_name(&to)))
+                }
             }
             Action::SetUpstream { branch, upstream } => {
                 if upstream.trim().is_empty() {
