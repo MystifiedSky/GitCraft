@@ -627,6 +627,26 @@ impl Engine {
         result
     }
 
+    fn merge_branch(&self, repo: &str, dir: &Path, branch: &str, into: Option<&str>, changes: CheckoutChanges, squash: bool) -> ActionResult {
+        if self.rev(dir, &format!("{branch}^{{commit}}")).is_empty() {
+            return ActionResult { ok: false, message: format!("{} is no longer available. Refresh the repository and try again.", ref_name(branch)) };
+        }
+        let notice = match self.checkout_drop_target(repo, dir, into, changes) {
+            Ok(notice) => notice,
+            Err(result) => return result,
+        };
+        let flag = if squash { "--squash" } else { "--no-edit" };
+        let args = crate::extras::merge_args(dir, "merge", &[flag, branch]);
+        let out = self.git(dir, &args.iter().map(String::as_str).collect::<Vec<_>>());
+        let message = if squash {
+            format!("Squashed {}; review and commit the staged changes", ref_name(branch))
+        } else {
+            format!("Merged {}", ref_name(branch))
+        };
+        let result = if out.ok { ActionResult { ok: true, message } } else { ActionResult { ok: false, message: out.message() } };
+        Self::with_checkout_notice(result, notice)
+    }
+
     fn checkout_local(&self, repo: &str, target: &str, changes: CheckoutChanges) -> Result<String, String> {
         let dir = Path::new(repo);
         let revision = self.rev(dir, &format!("{target}^{{commit}}"));
@@ -1173,18 +1193,7 @@ impl Engine {
                 }
                 done(o, "Reset branch")
             }
-            Action::Merge { branch, into, changes } => {
-                if self.rev(dir, &format!("{branch}^{{commit}}")).is_empty() {
-                    return ActionResult { ok: false, message: format!("{} is no longer available. Refresh the repository and try again.", ref_name(&branch)) };
-                }
-                let notice = match self.checkout_drop_target(repo, dir, into.as_deref(), changes) {
-                    Ok(notice) => notice,
-                    Err(result) => return result,
-                };
-                let args = crate::extras::merge_args(dir, "merge", &["--no-edit", &branch]);
-                let result = done(self.git(dir, &args.iter().map(String::as_str).collect::<Vec<_>>()), &format!("Merged {}", ref_name(&branch)));
-                Self::with_checkout_notice(result, notice)
-            }
+            Action::Merge { branch, into, changes } => self.merge_branch(repo, dir, &branch, into.as_deref(), changes, false),
             Action::Rebase { onto, branch, changes } => {
                 if self.rev(dir, &format!("{onto}^{{commit}}")).is_empty() {
                     return ActionResult { ok: false, message: format!("{} is no longer available. Refresh the repository and try again.", ref_name(&onto)) };
@@ -1579,18 +1588,7 @@ impl Engine {
                     Err(e) => ActionResult { ok: false, message: format!("The hunk could not be reverted because {file} has changed since: {e}") },
                 }
             }
-            Action::MergeSquash { branch, into, changes } => {
-                if self.rev(dir, &format!("{branch}^{{commit}}")).is_empty() {
-                    return ActionResult { ok: false, message: format!("{} is no longer available. Refresh the repository and try again.", ref_name(&branch)) };
-                }
-                let notice = match self.checkout_drop_target(repo, dir, into.as_deref(), changes) {
-                    Ok(notice) => notice,
-                    Err(result) => return result,
-                };
-                let args = crate::extras::merge_args(dir, "merge", &["--squash", &branch]);
-                let result = done(self.git(dir, &args.iter().map(String::as_str).collect::<Vec<_>>()), &format!("Squashed {}; review and commit the staged changes", ref_name(&branch)));
-                Self::with_checkout_notice(result, notice)
-            }
+            Action::MergeSquash { branch, into, changes } => self.merge_branch(repo, dir, &branch, into.as_deref(), changes, true),
             Action::ApplyPatchFile { file } => {
                 let o = crate::extras::apply_patch_file(dir, Path::new(&file), &|a: &[&str]| self.git(dir, a));
                 done(o, "Patch applied")
