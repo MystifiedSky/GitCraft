@@ -985,15 +985,15 @@ impl App {
                 if matches!(*action, Action::Reset { .. }) {
                     self.recompose_reset_done(tab, result.ok);
                 }
-                // A checkout, merge, rebase or fast-forward shows the working changes they leave behind.
+                // A checkout, merge, rebase or squash merge shows the working changes they leave behind.
                 if result.ok
-                    && matches!(*action, Action::Checkout { .. } | Action::CheckoutRemote { .. } | Action::Merge { .. } | Action::MergeSquash { .. } | Action::Rebase { .. } | Action::FastForward { .. })
+                    && matches!(*action, Action::Checkout { .. } | Action::CheckoutRemote { .. } | Action::Merge { .. } | Action::MergeSquash { .. } | Action::Rebase { .. })
                     && let Some(r) = self.repo_mut(tab)
                 {
                     r.ui.select(repo::Selection::Wip);
                 }
-                // Keep submodules up to date: after a pull or a checkout, by the repository's choice or the global one.
-                if result.ok && matches!(*action, Action::Pull { .. } | Action::Checkout { .. } | Action::CheckoutRemote { .. } | Action::Merge { .. } | Action::Rebase { .. }) {
+                // Keep submodules up to date: after a pull, checkout or squash merge, by the repository's choice or the global one.
+                if result.ok && matches!(*action, Action::Pull { .. } | Action::Checkout { .. } | Action::CheckoutRemote { .. } | Action::Merge { .. } | Action::MergeSquash { .. } | Action::Rebase { .. }) {
                     self.update_submodules_after(tab);
                 }
                 if let Action::Stash { message } = &*action
