@@ -153,7 +153,7 @@ fn dropped_actions(v: &RepoView, source: &GitRef, target: &GitRef, head: Option<
     if source.kind == RefKind::Local {
         choices.push((format!("Rebase {s} onto {t}"), Action::Rebase { onto: target.full.clone(), branch: Some(s.clone()), changes: gitcraft_core::actions::CheckoutChanges::Ask }));
     }
-    if is_head(source) && !is_head(target) {
+    if source.kind == RefKind::Local && !is_head(target) {
         choices.push((format!("Merge {t} into {s}"), Action::Merge { branch: target.full.clone(), into: Some(s.clone()), changes: gitcraft_core::actions::CheckoutChanges::Ask }));
     }
     if source.kind == RefKind::Local && target.kind == RefKind::Remote {
@@ -774,6 +774,8 @@ mod tests {
         let labels: Vec<&str> = choices.iter().map(|(label, _)| label.as_str()).collect();
         assert!(labels.contains(&"Fast-forward ff to dev"), "{labels:?}");
         assert!(!labels.contains(&"Fast-forward dev to ff"), "{labels:?}");
+        let other_head = dropped_actions(&v, &refs[0], &refs[1], Some("scratch"));
+        assert!(other_head.iter().any(|(label, _)| label == "Merge dev into ff"));
         assert!(choices.iter().any(|(_, action)| matches!(action, Action::FastForward { branch, to } if branch == "ff" && to == "refs/heads/dev")));
         assert!(choices.iter().any(|(_, action)| matches!(action, Action::Merge { branch, into: Some(into), .. } if branch == "refs/heads/ff" && into == "dev")));
         assert!(choices.iter().any(|(_, action)| matches!(action, Action::Rebase { onto, branch: Some(branch), .. } if branch == "ff" && onto == "refs/heads/dev")));
