@@ -774,6 +774,9 @@ impl Engine {
                 let (_, branch) = remote_branch.split_once('/')?;
                 (branch, Some(remote_branch))
             }
+            Action::Merge { into: Some(target), .. } => (target.strip_prefix("refs/heads/").unwrap_or(target.as_str()), None),
+            Action::Rebase { branch: Some(branch), .. } => (branch.strip_prefix("refs/heads/").unwrap_or(branch.as_str()), None),
+            Action::FastForward { branch, .. } => (branch.strip_prefix("refs/heads/").unwrap_or(branch.as_str()), None),
             _ => return None,
         };
         let worktrees = git::try_worktrees(dir).ok()?;
@@ -2418,6 +2421,40 @@ mod tests {
         assert_eq!(r.message, "Choose how to handle your uncommitted changes before checkout.");
         assert_eq!(current(), "side");
         assert_eq!(fs::read_to_string(d.join("base.txt")).unwrap(), "dirty\n");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn dropped_branch_actions_open_the_worktree_that_owns_the_branch() {
+        let d = temp_repo("drop-branch-worktree");
+        let e = Engine::default();
+        let g = |args: &[&str]| {
+            let o = git::run(&d, args);
+            assert!(o.ok, "{args:?}: {}", o.message());
+        };
+        fs::write(d.join("base.txt"), "base\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-q", "-m", "base"]);
+        g(&["branch", "side"]);
+        let wt = std::env::temp_dir().join(format!("gitcraft-test-drop-wt-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&wt);
+        let wt_s = wt.to_string_lossy().to_string();
+        g(&["worktree", "add", "-q", &wt_s, "side"]);
+
+        let owned = |action: Action| {
+            let found = e.checkout_worktree(&d, &action);
+            found.map(|path| Path::new(&path).canonicalize().unwrap())
+        };
+        for action in [
+            Action::Merge { branch: "refs/heads/master".into(), into: Some("side".into()), changes: CheckoutChanges::Ask },
+            Action::Rebase { onto: "refs/heads/master".into(), branch: Some("side".into()), changes: CheckoutChanges::Ask },
+            Action::FastForward { branch: "side".into(), to: "refs/heads/master".into() },
+        ] {
+            assert_eq!(owned(action), Some(wt.canonicalize().unwrap()));
+        }
+        assert_eq!(owned(Action::FastForward { branch: "master".into(), to: "refs/heads/side".into() }), None);
+
+        g(&["worktree", "remove", "--force", &wt_s]);
         let _ = fs::remove_dir_all(&d);
     }
 
