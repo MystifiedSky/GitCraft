@@ -822,8 +822,8 @@ impl Engine {
 
     fn checkout_worktree(&self, dir: &Path, action: &Action) -> Option<String> {
         let (branch, remote) = match action {
-            Action::Checkout { target, .. } => {
-                if valid_undo_oid(target) { return None; }
+            Action::Checkout { target, branch, .. } => {
+                if !branch && valid_undo_oid(target) { return None; }
                 (target.strip_prefix("refs/heads/").unwrap_or(target.as_str()), None)
             }
             Action::CheckoutRemote { remote_branch, .. } => {
@@ -2482,6 +2482,28 @@ mod tests {
             assert!(result.message.contains("no longer available"), "{}", result.message);
             assert_eq!(current(), "master");
         }
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn hex_branch_owned_by_another_worktree_is_opened() {
+        let (d, _repo, e) = drop_repo("hex-worktree");
+        let g = |args: &[&str]| {
+            let o = git::run(&d, args);
+            assert!(o.ok, "{args:?}: {}", o.message());
+        };
+        let hex = head(&d);
+        g(&["branch", &hex]);
+        let wt = std::env::temp_dir().join(format!("gitcraft-test-hex-wt-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&wt);
+        let wt_s = wt.to_string_lossy().to_string();
+        g(&["worktree", "add", "-q", &wt_s, &hex]);
+
+        let found = e.checkout_worktree(&d, &Action::Checkout { target: hex.clone(), changes: Default::default(), branch: true });
+        assert_eq!(found.map(|path| Path::new(&path).canonicalize().unwrap()), Some(wt.canonicalize().unwrap()));
+        assert_eq!(e.checkout_worktree(&d, &Action::Checkout { target: hex, changes: Default::default(), branch: false }), None);
+
+        g(&["worktree", "remove", "--force", &wt_s]);
         let _ = fs::remove_dir_all(&d);
     }
 
