@@ -1190,4 +1190,26 @@ mod tests {
         assert_eq!(app.repo_tab_id(&path), id);
         assert_eq!(app.tabs.len(), before + 1);
     }
+
+    #[test]
+    fn carried_action_reaches_an_inactive_destination_tab() {
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx);
+        let mut app = App::new(&cc, StartOptions::default(), crate::settings::Store::in_memory());
+        let source = app.take_id();
+        app.active = app.take_id();
+        let dest = std::env::temp_dir().join(format!("gitcraft-carried-action-{}", std::process::id()));
+        let dest = dest.to_string_lossy().to_string();
+        let action = Action::Merge { branch: "refs/heads/source".into(), into: Some("target".into()), changes: gitcraft_core::actions::CheckoutChanges::Ask };
+        app.handle(Msg::Acted {
+            tab: source,
+            path: "/source".into(),
+            action: Box::new(action.clone()),
+            quiet: false,
+            result: DesktopActionResult::OpenWorktree { path: dest.clone(), action: Some(action) },
+        });
+        let tab = app.tabs.iter().find(|t| t.path().is_some_and(|p| same_folder(p, &dest))).expect("destination tab");
+        let repo = app.repos.get(&tab.id).expect("destination repository");
+        assert!(repo.running.is_some(), "the carried action must start in the destination");
+    }
 }
