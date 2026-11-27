@@ -673,6 +673,8 @@ impl App {
                 if has_footer {
                     ui.add_space(0.0);
                     let (foot, _) = ui.allocate_exact_size(vec2(width, footer_height), Sense::hover());
+                    #[cfg(test)]
+                    ui.data_mut(|d| d.insert_temp(egui::Id::NULL.with("dialog_footer"), foot));
                     let mut row = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(foot.left() + 16.0, foot.top() + 8.0), pos2(foot.right() - 16.0, foot.bottom() - 8.0))).layout(egui::Layout::right_to_left(egui::Align::Min).with_main_wrap(true)));
                     row.spacing_mut().item_spacing = vec2(8.0, 8.0);
                     let running = dialog.busy.is_some();
@@ -1055,7 +1057,9 @@ fn headless_long_choices_wrap_inside_the_dialog() {
     }
     let left = screen.center().x - width / 2.0 + 1.0;
     let right = screen.center().x + width / 2.0 - 1.0;
-    let mut seen = 0;
+    let footer: Rect = ctx.data(|d| d.get_temp(egui::Id::NULL.with("dialog_footer"))).expect("footer rect");
+    let mut found = vec![false; labels.len()];
+    let mut cancel_seen = false;
     let mut title_seen = false;
     let mut rows = std::collections::BTreeSet::new();
     for shape in &shapes {
@@ -1069,16 +1073,21 @@ fn headless_long_choices_wrap_inside_the_dialog() {
             continue;
         }
         let shown = text.trim_end_matches('…');
-        if text == "Cancel" || labels.iter().any(|label| label.starts_with(shown)) {
+        let choice = if text == "Cancel" { Some(labels.len()) } else { labels.iter().position(|label| label.starts_with(shown)) };
+        if let Some(i) = choice {
+            assert!(!found.get(i).copied().unwrap_or(cancel_seen), "{text} matched more than once");
+            if i == labels.len() { cancel_seen = true } else { found[i] = true }
             let rect = t.visual_bounding_rect();
-            assert!(rect.left() >= left && rect.right() <= right, "{text} is outside the dialog: {rect:?}");
-            assert!(rect.top() >= screen.top() && rect.bottom() <= screen.bottom(), "{text} is outside the screen: {rect:?}");
-            rows.insert(rect.top().round() as i32);
-            seen += 1;
+            let button = Rect::from_min_max(pos2(rect.left() - 12.0, rect.center().y - 14.0), pos2(rect.right() + 12.0, rect.center().y + 14.0));
+            assert!(button.left() >= left && button.right() <= right, "{text} button is outside the dialog: {button:?}");
+            assert!(button.top() >= screen.top() && button.bottom() <= screen.bottom(), "{text} button is outside the screen: {button:?}");
+            assert!(footer.contains_rect(button), "{text} button {button:?} is outside the footer {footer:?}");
+            rows.insert(button.top().round() as i32);
         }
     }
     assert!(title_seen, "the title must be drawn");
-    assert_eq!(seen, labels.len() + 1, "every choice and Cancel must be drawn");
+    assert!(found.iter().all(|seen| *seen), "every choice must be drawn");
+    assert!(cancel_seen, "Cancel must be drawn");
     assert!(rows.len() > 1, "mixed short and long choices must wrap onto more than one row");
 }
 
