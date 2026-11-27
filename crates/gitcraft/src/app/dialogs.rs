@@ -1040,6 +1040,7 @@ fn headless_long_choices_wrap_inside_the_dialog() {
         "Merge main into feature/a-very-long-branch-name",
         "Fast-forward main to feature/a-very-long-branch-name",
         "Start a pull request from feature/a-very-long-branch-name into main",
+        "Push",
     ];
     let mut d = Dialog::new("Choose what to do with feature/a-very-long-branch-name and main", Body::Text("Choose an action.".into())).width(width);
     for label in labels {
@@ -1056,12 +1057,14 @@ fn headless_long_choices_wrap_inside_the_dialog() {
     let right = screen.center().x + width / 2.0 - 1.0;
     let mut seen = 0;
     let mut title_seen = false;
+    let mut rows = std::collections::BTreeSet::new();
     for shape in &shapes {
         let egui::Shape::Text(t) = &shape.shape else { continue };
         let text = t.galley.text();
         if text.starts_with("Choose what to do") {
             let rect = t.visual_bounding_rect();
             assert!(rect.left() >= left && rect.right() <= right, "the title is outside the dialog: {rect:?}");
+            assert!(rect.top() >= screen.top() && rect.bottom() <= screen.bottom(), "the title is outside the screen: {rect:?}");
             title_seen = true;
             continue;
         }
@@ -1069,11 +1072,14 @@ fn headless_long_choices_wrap_inside_the_dialog() {
         if text == "Cancel" || labels.iter().any(|label| label.starts_with(shown)) {
             let rect = t.visual_bounding_rect();
             assert!(rect.left() >= left && rect.right() <= right, "{text} is outside the dialog: {rect:?}");
+            assert!(rect.top() >= screen.top() && rect.bottom() <= screen.bottom(), "{text} is outside the screen: {rect:?}");
+            rows.insert(rect.top().round() as i32);
             seen += 1;
         }
     }
     assert!(title_seen, "the title must be drawn");
     assert_eq!(seen, labels.len() + 1, "every choice and Cancel must be drawn");
+    assert!(rows.len() > 1, "mixed short and long choices must wrap onto more than one row");
 }
 
 /// Where a repository can come from: the left list of the Clone and Init dialogs.
