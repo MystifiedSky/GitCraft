@@ -271,7 +271,7 @@ impl App {
         if let Some(head) = head.clone().filter(|_| !is_head) {
             items.push(item(format!("Merge {name} into {head}"), act(tab, Action::Merge { branch: name.clone(), into: None, changes: Default::default() })));
             let n2 = name.clone();
-            items.push(item(format!("Squash merge {name} into {head}"), move |app| app.act(tab, Action::MergeSquash { branch: n2 })));
+            items.push(item(format!("Squash merge {name} into {head}"), move |app| app.act(tab, Action::MergeSquash { branch: n2, into: None, changes: Default::default() })));
             items.push(item(format!("Rebase {head} onto {name}"), act(tab, Action::Rebase { onto: name.clone(), branch: None, changes: Default::default() })));
             let n3 = name.clone();
             items.push(item(format!("Interactive Rebase {head} onto {name}"), move |app| app.open_rebase(tab, &n3, &n3, false)));

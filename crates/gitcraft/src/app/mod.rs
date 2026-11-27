@@ -1004,7 +1004,7 @@ impl App {
                     // Newer text typed while the stash ran is kept.
                     r.work.stash_message.clear();
                 }
-                if let Action::MergeSquash { branch } = &*action
+                if let Action::MergeSquash { branch, .. } = &*action
                     && result.ok
                 {
                     self.squash_done(tab, branch);

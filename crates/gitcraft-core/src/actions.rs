@@ -234,7 +234,7 @@ pub enum Action {
     /// "Revert this hunk": undo one hunk (or chosen lines) of a commit in the working folder.
     RevertHunk { sha: String, parent: Option<String>, file: String, hunk: usize, lines: Option<Vec<usize>> },
     /// Squash merge: bring a branch's changes in as staged changes, to commit as one commit.
-    MergeSquash { branch: String },
+    MergeSquash { branch: String, #[serde(default)] into: Option<String>, #[serde(default)] changes: CheckoutChanges },
     /// Open a file in the external diff tool (git difftool), or a conflict in the merge tool.
     ExternalDiff { file: String, staged: bool, tool: String },
     ExternalMerge { file: String, tool: String },
@@ -778,6 +778,7 @@ impl Engine {
                 (branch, Some(remote_branch))
             }
             Action::Merge { into: Some(target), .. } => (target.strip_prefix("refs/heads/").unwrap_or(target.as_str()), None),
+            Action::MergeSquash { into: Some(target), .. } => (target.strip_prefix("refs/heads/").unwrap_or(target.as_str()), None),
             Action::Rebase { branch: Some(branch), .. } => (branch.strip_prefix("refs/heads/").unwrap_or(branch.as_str()), None),
             Action::FastForward { branch, .. } => (branch.strip_prefix("refs/heads/").unwrap_or(branch.as_str()), None),
             _ => return None,
@@ -1568,9 +1569,22 @@ impl Engine {
                     Err(e) => ActionResult { ok: false, message: format!("The hunk could not be reverted because {file} has changed since: {e}") },
                 }
             }
-            Action::MergeSquash { branch } => {
+            Action::MergeSquash { branch, into, changes } => {
+                let mut notice = None;
+                if let Some(target) = into {
+                    if self.head_name(dir) != target {
+                        match self.checkout_local(repo, &target, changes) {
+                            Ok(message) => notice = Some(message),
+                            Err(message) => return ActionResult { ok: false, message },
+                        }
+                    }
+                }
                 let args = crate::extras::merge_args(dir, "merge", &["--squash", &branch]);
-                done(self.git(dir, &args.iter().map(String::as_str).collect::<Vec<_>>()), &format!("Squashed {branch}; review and commit the staged changes"))
+                let mut result = done(self.git(dir, &args.iter().map(String::as_str).collect::<Vec<_>>()), &format!("Squashed {}; review and commit the staged changes", ref_name(&branch)));
+                if let Some(notice) = notice {
+                    result.message = if result.ok { format!("{}. {}", notice.trim_end_matches('.'), result.message) } else { format!("{notice}\n\n{}", result.message) };
+                }
+                result
             }
             Action::ApplyPatchFile { file } => {
                 let o = crate::extras::apply_patch_file(dir, Path::new(&file), &|a: &[&str]| self.git(dir, a));
@@ -2375,7 +2389,7 @@ mod tests {
         assert!(preview.files.is_empty(), "{:?}", preview.files);
         for squash in [false, true] {
             let action = if squash {
-                Action::MergeSquash { branch: "side".into() }
+                Action::MergeSquash { branch: "side".into(), into: None, changes: Default::default() }
             } else {
                 Action::Merge { branch: "side".into(), into: None, changes: Default::default() }
             };
@@ -2388,6 +2402,29 @@ mod tests {
         }
         assert_eq!(git::run(&d, &["config", "--get", "merge.renames"]).stdout.trim(), "false");
         assert_eq!(git::run(&d, &["config", "--get", "merge.renamelimit"]).stdout.trim(), "-1");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn squash_merge_checks_out_its_target() {
+        let d = temp_repo("drop-squash-target");
+        let repo = d.to_string_lossy().to_string();
+        let e = Engine::default();
+        let g = |args: &[&str]| {
+            let o = git::run(&d, args);
+            assert!(o.ok, "{args:?}: {}", o.message());
+        };
+        fs::write(d.join("base.txt"), "base\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-q", "-m", "base"]);
+        g(&["checkout", "-q", "-b", "side"]);
+        fs::write(d.join("side.txt"), "side\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-q", "-m", "side"]);
+        let r = e.perform(&repo, Action::MergeSquash { branch: "side".into(), into: Some("master".into()), changes: Default::default() });
+        assert!(r.ok, "{}", r.message);
+        assert_eq!(git::run(&d, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim(), "master");
+        assert_eq!(git::run(&d, &["diff", "--cached", "--name-only"]).stdout.trim(), "side.txt");
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -2927,7 +2964,7 @@ mod tests {
         commit("side 1");
         assert!(git::run(&d, &["checkout", "-q", "master"]).ok);
         let before = head(&d);
-        assert!(e.perform(&repo, Action::MergeSquash { branch: "side".into() }).ok);
+        assert!(e.perform(&repo, Action::MergeSquash { branch: "side".into(), into: None, changes: Default::default() }).ok);
         assert_eq!(head(&d), before);
         assert!(git::status(&d).staged.iter().any(|f| f.path == "c.txt"));
         let _ = fs::remove_dir_all(&d);
