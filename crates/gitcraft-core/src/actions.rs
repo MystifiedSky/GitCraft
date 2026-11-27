@@ -609,6 +609,24 @@ impl Engine {
         result.map(|message| format!("{}. {notice}", message.trim_end_matches('.'))).map_err(|error| format!("{notice}\n\n{error}"))
     }
 
+    fn checkout_drop_target(&self, repo: &str, dir: &Path, target: Option<&str>, changes: CheckoutChanges) -> Result<Option<String>, ActionResult> {
+        let Some(target) = target else { return Ok(None) };
+        if self.head_name(dir) == target {
+            return Ok(None);
+        }
+        match self.checkout_local(repo, target, changes) {
+            Ok(message) => Ok(Some(message)),
+            Err(message) => Err(ActionResult { ok: false, message }),
+        }
+    }
+
+    fn with_checkout_notice(mut result: ActionResult, notice: Option<String>) -> ActionResult {
+        if let Some(notice) = notice {
+            result.message = if result.ok { format!("{}. {}", notice.trim_end_matches('.'), result.message) } else { format!("{notice}\n\n{}", result.message) };
+        }
+        result
+    }
+
     fn checkout_local(&self, repo: &str, target: &str, changes: CheckoutChanges) -> Result<String, String> {
         let dir = Path::new(repo);
         let revision = self.rev(dir, &format!("{target}^{{commit}}"));
@@ -1159,46 +1177,30 @@ impl Engine {
                 if self.rev(dir, &format!("{branch}^{{commit}}")).is_empty() {
                     return ActionResult { ok: false, message: format!("{} is no longer available. Refresh the repository and try again.", ref_name(&branch)) };
                 }
-                let mut notice = None;
-                if let Some(target) = into {
-                    if self.head_name(dir) != target {
-                        match self.checkout_local(repo, &target, changes) {
-                            Ok(message) => notice = Some(message),
-                            Err(message) => return ActionResult { ok: false, message },
-                        }
-                    }
-                }
+                let notice = match self.checkout_drop_target(repo, dir, into.as_deref(), changes) {
+                    Ok(notice) => notice,
+                    Err(result) => return result,
+                };
                 let args = crate::extras::merge_args(dir, "merge", &["--no-edit", &branch]);
-                let mut result = done(self.git(dir, &args.iter().map(String::as_str).collect::<Vec<_>>()), &format!("Merged {}", ref_name(&branch)));
-                if let Some(notice) = notice {
-                    result.message = if result.ok { format!("{}. {}", notice.trim_end_matches('.'), result.message) } else { format!("{notice}\n\n{}", result.message) };
-                }
-                result
+                let result = done(self.git(dir, &args.iter().map(String::as_str).collect::<Vec<_>>()), &format!("Merged {}", ref_name(&branch)));
+                Self::with_checkout_notice(result, notice)
             }
             Action::Rebase { onto, branch, changes } => {
                 if self.rev(dir, &format!("{onto}^{{commit}}")).is_empty() {
                     return ActionResult { ok: false, message: format!("{} is no longer available. Refresh the repository and try again.", ref_name(&onto)) };
                 }
-                let mut notice = None;
-                if let Some(branch) = branch {
-                    if self.head_name(dir) != branch {
-                        match self.checkout_local(repo, &branch, changes) {
-                            Ok(message) => notice = Some(message),
-                            Err(message) => return ActionResult { ok: false, message },
-                        }
-                    }
-                }
+                let notice = match self.checkout_drop_target(repo, dir, branch.as_deref(), changes) {
+                    Ok(notice) => notice,
+                    Err(result) => return result,
+                };
                 let before = self.rev(dir, "HEAD");
                 let o = self.git(dir, &["rebase", "--autostash", &onto]);
                 if o.ok {
                     let after = self.rev(dir, "HEAD");
                     self.push_undo(repo, UndoRec::Rewrite { before, after, branch: self.branch_ref(dir), label: format!("rebase onto {}", ref_name(&onto)), protect_index: false });
                 }
-                let mut result = done(o, &format!("Rebased onto {}", ref_name(&onto)));
-                if let Some(notice) = notice {
-                    result.message = if result.ok { format!("{}. {}", notice.trim_end_matches('.'), result.message) } else { format!("{notice}\n\n{}", result.message) };
-                }
-                result
+                let result = done(o, &format!("Rebased onto {}", ref_name(&onto)));
+                Self::with_checkout_notice(result, notice)
             }
             Action::AbortMerge => done(self.git(dir, &["merge", "--abort"]), "Merge aborted"),
             Action::Sequencer { operation, command } => {
@@ -1581,21 +1583,13 @@ impl Engine {
                 if self.rev(dir, &format!("{branch}^{{commit}}")).is_empty() {
                     return ActionResult { ok: false, message: format!("{} is no longer available. Refresh the repository and try again.", ref_name(&branch)) };
                 }
-                let mut notice = None;
-                if let Some(target) = into {
-                    if self.head_name(dir) != target {
-                        match self.checkout_local(repo, &target, changes) {
-                            Ok(message) => notice = Some(message),
-                            Err(message) => return ActionResult { ok: false, message },
-                        }
-                    }
-                }
+                let notice = match self.checkout_drop_target(repo, dir, into.as_deref(), changes) {
+                    Ok(notice) => notice,
+                    Err(result) => return result,
+                };
                 let args = crate::extras::merge_args(dir, "merge", &["--squash", &branch]);
-                let mut result = done(self.git(dir, &args.iter().map(String::as_str).collect::<Vec<_>>()), &format!("Squashed {}; review and commit the staged changes", ref_name(&branch)));
-                if let Some(notice) = notice {
-                    result.message = if result.ok { format!("{}. {}", notice.trim_end_matches('.'), result.message) } else { format!("{notice}\n\n{}", result.message) };
-                }
-                result
+                let result = done(self.git(dir, &args.iter().map(String::as_str).collect::<Vec<_>>()), &format!("Squashed {}; review and commit the staged changes", ref_name(&branch)));
+                Self::with_checkout_notice(result, notice)
             }
             Action::ApplyPatchFile { file } => {
                 let o = crate::extras::apply_patch_file(dir, Path::new(&file), &|a: &[&str]| self.git(dir, a));
@@ -2337,6 +2331,17 @@ mod tests {
         git::run(d, &["rev-parse", "HEAD"]).stdout.trim().to_string()
     }
 
+    /// A repository with one commit and an `Engine`, for branch-action tests.
+    fn drop_repo(name: &str) -> (std::path::PathBuf, String, Engine) {
+        let d = temp_repo(name);
+        let repo = d.to_string_lossy().to_string();
+        let e = Engine::default();
+        fs::write(d.join("base.txt"), "base\n").unwrap();
+        assert!(git::run(&d, &["add", "-A"]).ok);
+        assert!(git::run(&d, &["commit", "-q", "-m", "base"]).ok);
+        (d, repo, e)
+    }
+
     /// A person's repository showed no history: its refs/remotes/origin/HEAD file was blank, so
     /// `git log --remotes` stopped with "fatal: bad object origin/HEAD".
     #[test]
@@ -2418,16 +2423,11 @@ mod tests {
 
     #[test]
     fn squash_merge_checks_out_its_target() {
-        let d = temp_repo("drop-squash-target");
-        let repo = d.to_string_lossy().to_string();
-        let e = Engine::default();
+        let (d, repo, e) = drop_repo("drop-squash-target");
         let g = |args: &[&str]| {
             let o = git::run(&d, args);
             assert!(o.ok, "{args:?}: {}", o.message());
         };
-        fs::write(d.join("base.txt"), "base\n").unwrap();
-        g(&["add", "-A"]);
-        g(&["commit", "-q", "-m", "base"]);
         g(&["checkout", "-q", "-b", "side"]);
         fs::write(d.join("side.txt"), "side\n").unwrap();
         g(&["add", "-A"]);
@@ -2441,16 +2441,11 @@ mod tests {
 
     #[test]
     fn missing_drop_refs_do_not_check_out_the_target() {
-        let d = temp_repo("drop-missing-ref");
-        let repo = d.to_string_lossy().to_string();
-        let e = Engine::default();
+        let (d, repo, e) = drop_repo("drop-missing-ref");
         let g = |args: &[&str]| {
             let o = git::run(&d, args);
             assert!(o.ok, "{args:?}: {}", o.message());
         };
-        fs::write(d.join("base.txt"), "base\n").unwrap();
-        g(&["add", "-A"]);
-        g(&["commit", "-q", "-m", "base"]);
         g(&["branch", "other"]);
         let current = || git::run(&d, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim().to_string();
         for action in [
@@ -2468,16 +2463,11 @@ mod tests {
 
     #[test]
     fn a_hex_named_branch_is_checked_out_as_a_branch() {
-        let d = temp_repo("hex-branch-drop");
-        let repo = d.to_string_lossy().to_string();
-        let e = Engine::default();
+        let (d, repo, e) = drop_repo("hex-branch-drop");
         let g = |args: &[&str]| {
             let o = git::run(&d, args);
             assert!(o.ok, "{args:?}: {}", o.message());
         };
-        fs::write(d.join("base.txt"), "base\n").unwrap();
-        g(&["add", "-A"]);
-        g(&["commit", "-q", "-m", "base"]);
         let branch = head(&d);
         g(&["branch", &branch]);
         let r = e.perform(&repo, Action::Merge { branch: "refs/heads/master".into(), into: Some(branch.clone()), changes: Default::default() });
@@ -2488,17 +2478,12 @@ mod tests {
 
     #[test]
     fn merge_and_rebase_check_out_a_branch_other_than_the_current_one() {
-        let d = temp_repo("drop-branch-actions");
-        let repo = d.to_string_lossy().to_string();
-        let e = Engine::default();
+        let (d, repo, e) = drop_repo("drop-branch-actions");
         let g = |args: &[&str]| {
             let o = git::run(&d, args);
             assert!(o.ok, "{args:?}: {}", o.message());
         };
         let current = || git::run(&d, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim().to_string();
-        fs::write(d.join("base.txt"), "base\n").unwrap();
-        g(&["add", "-A"]);
-        g(&["commit", "-q", "-m", "base"]);
         g(&["checkout", "-q", "-b", "side"]);
         fs::write(d.join("side.txt"), "side\n").unwrap();
         g(&["add", "-A"]);
@@ -2540,15 +2525,11 @@ mod tests {
 
     #[test]
     fn dropped_branch_actions_open_the_worktree_that_owns_the_branch() {
-        let d = temp_repo("drop-branch-worktree");
-        let e = Engine::default();
+        let (d, _repo, e) = drop_repo("drop-branch-worktree");
         let g = |args: &[&str]| {
             let o = git::run(&d, args);
             assert!(o.ok, "{args:?}: {}", o.message());
         };
-        fs::write(d.join("base.txt"), "base\n").unwrap();
-        g(&["add", "-A"]);
-        g(&["commit", "-q", "-m", "base"]);
         g(&["branch", "side"]);
         let wt = std::env::temp_dir().join(format!("gitcraft-test-drop-wt-{}", std::process::id()));
         let _ = fs::remove_dir_all(&wt);
