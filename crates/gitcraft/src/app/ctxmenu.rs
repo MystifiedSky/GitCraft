@@ -93,7 +93,7 @@ pub fn split_remote(repo: &RepoView, name: &str) -> Option<(String, String)> {
     Some((remote.clone(), name[remote.len() + 1..].to_owned()))
 }
 
-/// Whether `ancestor` is reachable from `tip` through loaded parents.
+/// Whether `ancestor` is reachable from `tip` through the loaded parents, or Git's full graph.
 pub fn is_loaded_ancestor(repo: &RepoView, ancestor: &str, tip: &str) -> bool {
     let parents: std::collections::HashMap<&str, &Vec<String>> = repo.data.commits.iter().map(|c| (c.sha.as_str(), &c.parents)).collect();
     let mut pending = vec![tip.to_owned()];
@@ -109,7 +109,7 @@ pub fn is_loaded_ancestor(repo: &RepoView, ancestor: &str, tip: &str) -> bool {
             pending.extend(ps.iter().cloned());
         }
     }
-    false
+    !repo.path.is_empty() && gitcraft_core::git::run(std::path::Path::new(&repo.path), &["merge-base", "--is-ancestor", ancestor, tip]).ok
 }
 
 fn reset_menu(tab: u64, repo: &RepoView, sha: &str) -> Entry {
@@ -707,6 +707,32 @@ mod tests {
     fn ignore_patterns_are_literal() {
         assert_eq!(literal_ignore_path("src/a*.rs"), "/src/a\\*.rs");
         assert_eq!(literal_ignore_path("#my notes"), "/\\#my\\ notes");
+    }
+
+    #[test]
+    fn ancestry_falls_back_to_git_when_history_is_not_loaded() {
+        let d = std::env::temp_dir().join(format!("gitcraft-test-ancestry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let g = |args: &[&str]| {
+            let o = gitcraft_core::git::run(&d, args);
+            assert!(o.ok, "{args:?}: {}", o.message());
+        };
+        g(&["init", "-q", "-b", "master"]);
+        g(&["config", "user.name", "Test"]);
+        g(&["config", "user.email", "t@example.com"]);
+        std::fs::write(d.join("a.txt"), "a\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-q", "-m", "a"]);
+        let parent = gitcraft_core::git::run(&d, &["rev-parse", "HEAD"]).stdout.trim().to_string();
+        std::fs::write(d.join("b.txt"), "b\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-q", "-m", "b"]);
+        let tip = gitcraft_core::git::run(&d, &["rev-parse", "HEAD"]).stdout.trim().to_string();
+        let v = RepoView { path: d.to_string_lossy().to_string(), name: String::new(), data: gitcraft_core::git::RepoData::default(), graph: Default::default(), history_cursor: None, undo: Default::default() };
+        assert!(is_loaded_ancestor(&v, &parent, &tip));
+        assert!(!is_loaded_ancestor(&v, &tip, &parent));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
