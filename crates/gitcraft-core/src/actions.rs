@@ -1154,6 +1154,9 @@ impl Engine {
                 done(o, "Reset branch")
             }
             Action::Merge { branch, into, changes } => {
+                if self.rev(dir, &format!("{branch}^{{commit}}")).is_empty() {
+                    return ActionResult { ok: false, message: format!("{} is no longer available. Refresh the repository and try again.", ref_name(&branch)) };
+                }
                 let mut notice = None;
                 if let Some(target) = into {
                     if self.head_name(dir) != target {
@@ -1171,6 +1174,9 @@ impl Engine {
                 result
             }
             Action::Rebase { onto, branch, changes } => {
+                if self.rev(dir, &format!("{onto}^{{commit}}")).is_empty() {
+                    return ActionResult { ok: false, message: format!("{} is no longer available. Refresh the repository and try again.", ref_name(&onto)) };
+                }
                 let mut notice = None;
                 if let Some(branch) = branch {
                     if self.head_name(dir) != branch {
@@ -1570,6 +1576,9 @@ impl Engine {
                 }
             }
             Action::MergeSquash { branch, into, changes } => {
+                if self.rev(dir, &format!("{branch}^{{commit}}")).is_empty() {
+                    return ActionResult { ok: false, message: format!("{} is no longer available. Refresh the repository and try again.", ref_name(&branch)) };
+                }
                 let mut notice = None;
                 if let Some(target) = into {
                     if self.head_name(dir) != target {
@@ -2425,6 +2434,33 @@ mod tests {
         assert!(r.ok, "{}", r.message);
         assert_eq!(git::run(&d, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim(), "master");
         assert_eq!(git::run(&d, &["diff", "--cached", "--name-only"]).stdout.trim(), "side.txt");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn missing_drop_refs_do_not_check_out_the_target() {
+        let d = temp_repo("drop-missing-ref");
+        let repo = d.to_string_lossy().to_string();
+        let e = Engine::default();
+        let g = |args: &[&str]| {
+            let o = git::run(&d, args);
+            assert!(o.ok, "{args:?}: {}", o.message());
+        };
+        fs::write(d.join("base.txt"), "base\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-q", "-m", "base"]);
+        g(&["branch", "other"]);
+        let current = || git::run(&d, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim().to_string();
+        for action in [
+            Action::Merge { branch: "refs/heads/missing".into(), into: Some("other".into()), changes: Default::default() },
+            Action::Rebase { onto: "refs/heads/missing".into(), branch: Some("other".into()), changes: Default::default() },
+            Action::MergeSquash { branch: "refs/heads/missing".into(), into: Some("other".into()), changes: Default::default() },
+        ] {
+            let result = e.perform(&repo, action);
+            assert!(!result.ok);
+            assert!(result.message.contains("no longer available"), "{}", result.message);
+            assert_eq!(current(), "master");
+        }
         let _ = fs::remove_dir_all(&d);
     }
 
