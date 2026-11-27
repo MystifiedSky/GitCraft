@@ -166,8 +166,8 @@ fn dropped_actions(v: &RepoView, source: &GitRef, target: &GitRef, head: Option<
 fn drop_detail(action: &Action) -> String {
     match action {
         Action::FastForward { branch, to } => format!("Move {} to {} without a merge commit.", short_ref(branch), short_ref(to)),
-        Action::Merge { branch, into: Some(into), .. } => format!("Create a merge commit on {} with {}.", short_ref(into), short_ref(branch)),
-        Action::Merge { branch, .. } => format!("Merge {} with a merge commit.", short_ref(branch)),
+        Action::Merge { branch, into: Some(into), .. } => format!("Merge {} into {}; fast-forwards when possible.", short_ref(branch), short_ref(into)),
+        Action::Merge { branch, .. } => format!("Merge {}; fast-forwards when possible.", short_ref(branch)),
         Action::Rebase { onto, branch: Some(branch), .. } => format!("Replay {}'s commits on top of {}.", short_ref(branch), short_ref(onto)),
         Action::Rebase { onto, .. } => format!("Replay the commits on top of {}.", short_ref(onto)),
         Action::PushBranch { branch } => format!("Send {} to its remote.", short_ref(branch)),
@@ -707,6 +707,12 @@ mod tests {
     fn ignore_patterns_are_literal() {
         assert_eq!(literal_ignore_path("src/a*.rs"), "/src/a\\*.rs");
         assert_eq!(literal_ignore_path("#my notes"), "/\\#my\\ notes");
+    }
+
+    #[test]
+    fn merge_descriptions_do_not_promise_a_merge_commit() {
+        let action = Action::Merge { branch: "refs/heads/ff".into(), into: Some("dev".into()), changes: gitcraft_core::actions::CheckoutChanges::Ask };
+        assert_eq!(drop_detail(&action), "Merge ff into dev; fast-forwards when possible.");
     }
 
     #[test]
