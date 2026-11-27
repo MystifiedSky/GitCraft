@@ -985,9 +985,9 @@ impl App {
                 if matches!(*action, Action::Reset { .. }) {
                     self.recompose_reset_done(tab, result.ok);
                 }
-                // A checkout shows the working changes of the branch (or commit) now checked out.
+                // A checkout, merge, rebase or fast-forward shows the working changes they leave behind.
                 if result.ok
-                    && matches!(*action, Action::Checkout { .. } | Action::CheckoutRemote { .. })
+                    && matches!(*action, Action::Checkout { .. } | Action::CheckoutRemote { .. } | Action::Merge { .. } | Action::MergeSquash { .. } | Action::Rebase { .. } | Action::FastForward { .. })
                     && let Some(r) = self.repo_mut(tab)
                 {
                     r.ui.select(repo::Selection::Wip);
