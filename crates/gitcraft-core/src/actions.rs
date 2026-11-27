@@ -290,6 +290,8 @@ enum UndoRec {
     Patch { patch: String, cached: bool, reverse: bool, label: String },
     /// History rewritten (rebase, cherry pick, fast-forward): move the branch back with reset --keep.
     Rewrite { before: String, after: String, label: String, branch: String, #[serde(default)] protect_index: bool },
+    /// A branch that isn't checked out moved (fast-forward): update its ref.
+    UpdateRef { name: String, before: String, after: String, label: String },
 }
 
 impl UndoRec {
@@ -306,6 +308,7 @@ impl UndoRec {
             UndoRec::Discard { .. } => "discard changes".into(),
             UndoRec::Patch { label, .. } => label.clone(),
             UndoRec::Rewrite { label, .. } => label.clone(),
+            UndoRec::UpdateRef { label, .. } => label.clone(),
         }
     }
 }
@@ -389,7 +392,7 @@ fn valid_undo_oid(oid: &str) -> bool {
 impl UndoRec {
     fn objects(&self) -> [Option<&str>; 2] {
         match self {
-            Self::Commit { before, after, .. } | Self::Reset { before, after, .. } | Self::Rewrite { before, after, .. } => [Some(before), Some(after)],
+            Self::Commit { before, after, .. } | Self::Reset { before, after, .. } | Self::Rewrite { before, after, .. } | Self::UpdateRef { before, after, .. } => [Some(before), Some(after)],
             Self::Checkout { from, to } => [Some(from), Some(to)],
             Self::InitialCommit { after, .. } => [Some(after), None],
             Self::CreateBranch { sha, .. } | Self::RenameBranch { sha, .. } | Self::DeleteBranch { sha, .. }
@@ -1776,9 +1779,13 @@ impl Engine {
                     // Moves a branch that isn't checked out; git refuses anything but a fast-forward.
                     self.git(dir, &["fetch", ".", &format!("{to}:{branch}")])
                 };
-                if o.ok && head == branch {
-                    let after = self.rev(dir, "HEAD");
-                    self.push_undo(repo, UndoRec::Rewrite { before, after, branch: self.branch_ref(dir), label: format!("fast-forward {branch}"), protect_index: false });
+                if o.ok {
+                    let after = if head == branch { self.rev(dir, "HEAD") } else { self.rev(dir, &format!("refs/heads/{branch}")) };
+                    if head == branch {
+                        self.push_undo(repo, UndoRec::Rewrite { before, after, branch: self.branch_ref(dir), label: format!("fast-forward {branch}"), protect_index: false });
+                    } else if before != after {
+                        self.push_undo(repo, UndoRec::UpdateRef { name: format!("refs/heads/{branch}"), before, after, label: format!("fast-forward {branch}") });
+                    }
                 }
                 done(o, &format!("Fast-forwarded {} to {}", ref_name(&branch), ref_name(&to)))
             }
@@ -1974,6 +1981,18 @@ impl Engine {
             },
             (UndoRec::Rewrite { before, .. }, true) => self.git(dir, &["reset", "-q", "--keep", before]),
             (UndoRec::Rewrite { after, .. }, false) => self.git(dir, &["reset", "-q", "--keep", after]),
+            (UndoRec::UpdateRef { name, before, after, .. }, undo) => {
+                let (expected, target) = if undo { (after, before) } else { (before, after) };
+                let checked_out = self.branch_ref(dir) == *name
+                    || git::try_worktrees(dir).ok().is_some_and(|worktrees| worktrees.iter().any(|worktree| format!("refs/heads/{}", worktree.branch) == *name));
+                if checked_out {
+                    return git::GitOut::failed("Check out another branch before undoing or redoing this fast-forward.");
+                }
+                if self.rev(dir, name) != *expected {
+                    return git::GitOut::failed("The branch moved after this fast-forward; refusing to undo or redo it.");
+                }
+                self.git(dir, &["update-ref", name, target, expected])
+            }
             (UndoRec::Patch { patch, cached, reverse, .. }, undo) => {
                 // Undo applies the patch the other way round; redo applies it again.
                 let rev = if undo { !*reverse } else { *reverse };
@@ -2769,8 +2788,12 @@ mod tests {
 
         // Fast-forward a branch that isn't checked out, set an upstream, rename a stash.
         assert!(e.perform(&repo, Action::CreateBranch { name: "old".into(), at: Some(base.clone()), checkout: false }).ok);
+        let old_before = git::run(&d, &["rev-parse", "old"]).stdout;
         assert!(e.perform(&repo, Action::FastForward { branch: "old".into(), to: "master".into() }).ok);
         assert_eq!(git::run(&d, &["rev-parse", "old"]).stdout, git::run(&d, &["rev-parse", "master"]).stdout);
+        assert!(e.perform(&repo, Action::Undo).ok);
+        assert_eq!(git::run(&d, &["rev-parse", "old"]).stdout, old_before);
+        assert_eq!(git::run(&d, &["rev-parse", "--abbrev-ref", "HEAD"]).stdout.trim(), "master");
         assert!(e.perform(&repo, Action::SetUpstream { branch: "old".into(), upstream: "master".into() }).ok);
         assert_eq!(git::run(&d, &["rev-parse", "--abbrev-ref", "old@{u}"]).stdout.trim(), "master");
         fs::write(d.join("e.txt"), "x").unwrap();
