@@ -1196,14 +1196,18 @@ mod tests {
         let ctx = egui::Context::default();
         let cc = eframe::CreationContext::_new_kittest(ctx);
         let mut app = App::new(&cc, StartOptions::default(), crate::settings::Store::in_memory());
-        let source = app.take_id();
-        app.active = app.take_id();
+        let source_path = std::env::temp_dir().join(format!("gitcraft-carried-source-{}", std::process::id()));
+        std::fs::create_dir_all(&source_path).unwrap();
+        let source_path = source_path.to_string_lossy().to_string();
+        let source = app.repo_tab_id(&source_path);
+        app.new_tab();
+        assert_ne!(app.active, source, "the source tab must be inactive");
         let dest = std::env::temp_dir().join(format!("gitcraft-carried-action-{}", std::process::id()));
         let dest = dest.to_string_lossy().to_string();
         let action = Action::Merge { branch: "refs/heads/source".into(), into: Some("target".into()), changes: gitcraft_core::actions::CheckoutChanges::Ask };
         app.handle(Msg::Acted {
             tab: source,
-            path: "/source".into(),
+            path: source_path,
             action: Box::new(action.clone()),
             quiet: false,
             result: DesktopActionResult::OpenWorktree { path: dest.clone(), action: Some(action) },
