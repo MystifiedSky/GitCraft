@@ -6,6 +6,8 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Added
 
+- Force-remove a worktree with local changes after a separate confirmation explains which files and branches will be deleted.
+- Create a repository on a linked hosting service, choose its destination and visibility, and open the new local copy. Connect an account from the Create Repository dialog and return to the same form.
 - Use your GitHub Copilot subscription for GitCraft’s AI helpers. Sign in with GitHub from Preferences → AI or reuse your Copilot CLI sign-in.
 - Move the commit details panel below the commit graph or back to the right from the panel header or the View menu, and resize it in either layout. ([#57](https://github.com/MystifiedSky/GitCraft/pull/57))
 - Live agent status: set up Claude Code or Codex in Preferences > External Tools, and the Agents view shows whether each session is running, waiting for you or done. Claude Code's permission requests appear on the worktree card with the command it wants to run, to allow or deny there; an unanswered request is asked in the terminal as before. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
@@ -64,6 +66,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Changed
 
+- Auto-fetch now defaults to one minute for profiles without a saved interval.
 - Repository tabs now widen to fit their name and only shorten it with an ellipsis when the strip is full, sharing the space with the other tabs. Dragging a tab's edge still sets a fixed width, and double-clicking it fits the name again. Dragging a tab to reorder it lifts it under the pointer, leaving a gap where it will land. ([#61](https://github.com/MystifiedSky/GitCraft/pull/61))
 - Use consistent buttons in the branch drag-and-drop dialog, with a scrollable action list for smaller windows.
 - The collapsed left panel lists Patches instead of Cloud Patches, matching the expanded panel. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
@@ -84,6 +87,11 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
+- Generate an overall commit message for large change sets using a file summary and selected excerpts.
+- Keep AI commit-message errors visible beside the commit draft, and report an empty AI answer without replacing the draft.
+- Refresh remote branches in the graph when repositories open and on their own fetch schedules, even when another branch is checked out.
+- Wait for GitCraft to close before running Windows updates, and prompt to close other GitCraft windows without forcing them to quit during the update.
+- Remove stale worktrees whose Git link is missing while preserving their files. Delete selected branches only after the worktree has been removed.
 - If a file is locked on Windows, Discard All names it and stops before stashing or removing changes.
 - Open repositories and reveal files in Windows Explorer when Git reports paths with forward slashes.
 - Keep dialog buttons inside the dialog box: wrap them onto new rows, shorten long labels with a tooltip, and truncate long titles. ([#60](https://github.com/MystifiedSky/GitCraft/pull/60))
