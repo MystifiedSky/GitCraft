@@ -6,6 +6,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Added
 
+- The File, Edit, View and Help menus share the window title bar, as in VS Code, saving a row of space. Turn it off in Preferences → UI Customization. ([#65](https://github.com/MystifiedSky/GitCraft/pull/65))
 - Force-remove a worktree with local changes after a separate confirmation explains which files and branches will be deleted.
 - Create a repository on a linked hosting service, choose its destination and visibility, and open the new local copy. Connect an account from the Create Repository dialog and return to the same form.
 - Use your GitHub Copilot subscription for GitCraft’s AI helpers. Sign in with GitHub from Preferences → AI or reuse your Copilot CLI sign-in.

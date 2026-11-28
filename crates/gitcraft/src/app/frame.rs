@@ -7,6 +7,9 @@
 //!
 //! The `systemTitleBar` preference gives the frame to the system everywhere (after a restart).
 //! `GITCRAFT_TITLEBAR=app` or `=system` (or `CRAFT_TITLEBAR`) wins over that preference.
+//!
+//! With the `menusInTitleBar` preference (on by default), the File, Edit, View and Help menus
+//! share the app's title bar instead of taking a row of their own, as in VS Code.
 
 use super::widgets::Tip;
 use super::theme::{BAD, p};
@@ -21,6 +24,9 @@ pub const RADIUS: u8 = 10;
 const EDGE: f32 = 9.0;
 
 static FRAME: OnceLock<Frame> = OnceLock::new();
+
+/// Draws the menus in a room of the title bar and returns the room they took.
+type MenuRow<'a> = &'a mut dyn FnMut(&mut Ui, Rect) -> Rect;
 
 /// Decide the frame once, before the window is created.
 pub fn decide(system_title_bar: bool) -> Frame {
@@ -213,17 +219,48 @@ fn window_button(ui: &mut Ui, bar: Rect, x: f32, family: CaptionFamily, kind: Bu
     }
 }
 
+/// The room the menus take when they share the title `bar`: after the icon or the traffic
+/// lights and any left-hand buttons, and before the buttons on the right.
+fn menu_area(bar: Rect) -> Rect {
+    let (left, right) = match current() {
+        Frame::Integrated(c) => {
+            let w = slot(c.family);
+            let pad = if c.family == CaptionFamily::Windows { 0.0 } else { 7.0 };
+            let icon = if cfg!(windows) { 32.0 } else { 0.0 };
+            (pad + icon + c.layout.left.len() as f32 * w, pad + c.layout.right.len() as f32 * w)
+        }
+        Frame::Inset(inset) => (inset.leading, 8.0),
+        Frame::Native => (0.0, 0.0),
+    };
+    let x = bar.left() + left + 4.0;
+    Rect::from_min_max(Pos2::new(x, bar.top()), Pos2::new((bar.right() - right - 4.0).max(x), bar.bottom()))
+}
+
+fn menus_id() -> Id {
+    Id::NULL.with("title_bar_menus")
+}
+
+/// The menus' room in this frame's title bar, when they share it: the resize handles step aside
+/// there, so a click at the top of a menu is not a resize.
+fn menus_this_pass(ctx: &egui::Context) -> Option<Rect> {
+    ctx.data(|d| d.get_temp::<(u64, Rect)>(menus_id())).filter(|(pass, _)| *pass == ctx.cumulative_pass_nr()).map(|(_, rect)| rect)
+}
+
 /// Draw the title and controls in the desktop's usual positions. Dragging the empty part moves
 /// the window. A double click does what the system does.
-pub fn title_bar(ui: &mut Ui, title: &str) {
+///
+/// `menus` draws the menu row in the room [`menu_area`] leaves, after the empty area so the
+/// menus take their own clicks; the title text gives way to them. Returns whether the bar was
+/// drawn: not in full screen, nor when the system draws the frame.
+pub fn title_bar(ui: &mut Ui, title: &str, menus: Option<MenuRow<'_>>) -> bool {
     let height = match current() {
-        Frame::Native => return,
+        Frame::Native => return false,
         // Tall enough that the traffic lights sit centred in it.
         Frame::Inset(inset) => (inset.centre_from_top * 2.0).max(28.0),
         Frame::Integrated(_) => HEIGHT,
     };
     if fullscreen(ui.ctx()) {
-        return;
+        return false;
     }
     let is_max = maximized(ui.ctx());
     let corner = if round_now(ui.ctx()) { RADIUS } else { 0 };
@@ -235,13 +272,21 @@ pub fn title_bar(ui: &mut Ui, title: &str) {
             let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
             ui.painter().rect_filled(rect, CornerRadius { nw: corner, ne: corner, sw: 0, se: 0 }, p().titlebar);
             ui.painter().line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, p().black(0.3)));
-            // Before the buttons, so they sit on top and take their own clicks.
+            // Before the controls, so they sit on top and take their own clicks.
             craft_window::title_bar::empty_area(ui, rect);
             let font = egui::FontId::proportional(13.5);
             if cfg!(windows) {
                 let icon = Rect::from_center_size(egui::pos2(rect.left() + 16.0, rect.center().y), vec2(16.0, 16.0));
                 egui::Image::from_bytes("bytes://gitcraft-caption.png", &include_bytes!("../../../../icons/128x128.png")[..])
                     .paint_at(ui, icon);
+            }
+            if let Some(draw) = menus {
+                let area = menu_area(rect);
+                let mut menu_ui = ui.new_child(egui::UiBuilder::new().max_rect(area));
+                let used = draw(&mut menu_ui, area);
+                let pass = ui.ctx().cumulative_pass_nr();
+                ui.ctx().data_mut(|d| d.insert_temp(menus_id(), (pass, used)));
+            } else if cfg!(windows) {
                 let caption_width = captions().map_or(0.0, |c| c.layout.right.len() as f32 * slot(c.family));
                 let width = (rect.width() - caption_width - 40.0).max(0.0);
                 let title = super::widgets::fit(ui, title, font, p().fg, width);
@@ -256,6 +301,7 @@ pub fn title_bar(ui: &mut Ui, title: &str) {
                 }
             }
         });
+    true
 }
 
 /// Once per frame after the UI: on macOS, keeps AppKit from moving the window when a drag
@@ -292,10 +338,11 @@ pub fn window_edges(ctx: &egui::Context) {
         (at(0.0, h - c, c, c), D::SouthWest, C::ResizeSouthWest),
         (at(w - c, h - c, c, c), D::SouthEast, C::ResizeSouthEast),
     ];
-    // Over a window button, the button takes the click: the handles that reach over it
-    // (a top corner, the top edge) step aside while the pointer is there.
+    // Over a window button or the menus, they take the click: the handles that reach over
+    // them (a top corner, the top edge) step aside while the pointer is there.
     let bar = Rect::from_min_size(full.min, vec2(w, HEIGHT));
     let over_button = ctx.pointer_hover_pos().and_then(|at| button_xs(captions, bar).into_iter().map(|(x, _)| button_rect(bar, x, captions.family)).find(|b| b.contains(at)));
+    let menus = menus_this_pass(ctx).filter(|m| ctx.pointer_hover_pos().is_some_and(|p| m.contains(p)));
     let corners = window_corners(ctx);
     // Above everything, Preferences, dialogs and menus included: clicking into another layer
     // raises it over the others of its order, which would otherwise cover the edges.
@@ -306,7 +353,7 @@ pub fn window_edges(ctx: &egui::Context) {
         .fixed_pos(full.min)
         .show(ctx, |ui| {
             for (i, (rect, dir, cursor)) in zones.into_iter().enumerate() {
-                if over_button.is_some_and(|b| b.intersects(rect)) {
+                if over_button.is_some_and(|b| b.intersects(rect)) || menus.is_some_and(|m| m.intersects(rect)) {
                     continue;
                 }
                 let r = ui.interact(rect, Id::NULL.with(("window_edge", i)), Sense::drag());

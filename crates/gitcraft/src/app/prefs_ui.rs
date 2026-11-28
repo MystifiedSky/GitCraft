@@ -155,7 +155,7 @@ pub fn token_url(id: &str, i: &Value) -> String {
 fn default_of(key: &str) -> Value {
     match key {
         "autoFetchMin" => json!(super::DEFAULT_AUTO_FETCH_MINUTES),
-        "autoPrune" | "autoUpdateSubmodules" | "rememberTabs" | "lazyLoad" | "conflictDetection" | "autoUpdate" | "ghostRefs" | "highlightRowsOnHover" | "toolbarLabels" | "showAgentsView" | "autogroupWorktreeTabs" | "spellcheck" | "notifySuccess" | "monospaceOnly" | "editorLineNumbers" | "editorSyntax" | "termDim" | "useCommitTemplate" | "sshUseAgent" | "keepGitconfigUpdated" | "worktreeWipInGraph" => json!(true),
+        "autoPrune" | "autoUpdateSubmodules" | "rememberTabs" | "lazyLoad" | "conflictDetection" | "autoUpdate" | "ghostRefs" | "highlightRowsOnHover" | "toolbarLabels" | "menusInTitleBar" | "showAgentsView" | "autogroupWorktreeTabs" | "spellcheck" | "notifySuccess" | "monospaceOnly" | "editorLineNumbers" | "editorSyntax" | "termDim" | "useCommitTemplate" | "sshUseAgent" | "keepGitconfigUpdated" | "worktreeWipInGraph" => json!(true),
         "defaultBranch" => json!("main"),
         "initialCommits" => json!(2000),
         "pullMode" => json!("ff"),
@@ -924,6 +924,7 @@ impl App {
                 row(ui, "Highlight associated rows when hovering over a branch", "", None, None, false, |ui| self.toggle(ui, s("highlightRowsOnHover"), true));
                 row(ui, "Show markers beside the graph scrollbar", "Coloured ticks for branches, tags, the checked-out commit and the selection. Off by default.", None, None, false, |ui| self.toggle(ui, s("scrollMarkers"), true));
                 sub(ui, "Panels");
+                row(ui, "Show menus in the title bar", "As in VS Code: the title bar also holds the File, Edit, View and Help menus, saving a row of space. Needs the app's own title bar.", None, None, false, |ui| self.toggle(ui, s("menusInTitleBar"), true));
                 row(ui, "Show toolbar icon labels", "", None, None, false, |ui| self.toggle(ui, s("toolbarLabels"), true));
                 row(ui, "Show Agents view in left panel", "", None, None, false, |ui| {
                     self.toggle(ui, s("showAgentsView"), true);

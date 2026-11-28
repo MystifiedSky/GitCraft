@@ -921,8 +921,17 @@ impl eframe::App for App {
             self.dispatch_keys(&ctx);
         }
 
-        frame::title_bar(ui, "GitCraft");
-        self.menu_bar(ui);
+        // The menus share the title bar (as in VS Code) unless the preference says otherwise; a
+        // system-drawn frame or full screen has no title bar, so they keep their own row there.
+        let merged = self.settings.flag("menusInTitleBar", true);
+        let drawn = if merged {
+            frame::title_bar(ui, "GitCraft", Some(&mut |ui, _| self.menu_row(ui)))
+        } else {
+            frame::title_bar(ui, "GitCraft", None)
+        };
+        if !merged || !drawn {
+            self.menu_bar(ui);
+        }
         self.tabs_bar(ui);
         // Preferences cover everything below the tabs: what they hide isn't drawn, so it can't
         // take focus or be reached by screen readers.
