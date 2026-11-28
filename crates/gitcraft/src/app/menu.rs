@@ -57,6 +57,7 @@ impl App {
             self.item("ui:detailPanel", locale.text("Show Commit Details Panel")).check(s.flag("showRight", true)).into(),
             self.item("ui:detailPanelBottom", locale.text("Commit Details Below Graph")).check(s.flag("rightPanelBottom", false)).into(),
             self.item("ui:toolbarLabels", locale.text("Show Toolbar Labels")).check(s.flag("toolbarLabels", true)).into(),
+            self.item("ui:menusInTitleBar", locale.text("Show Menus in Title Bar")).check(s.flag("menusInTitleBar", true)).into(),
             self.item("ui:terminalPanel", locale.text("Show Terminal Panel")).check(s.flag("showTerminal", false)).into(),
             Node::Separator,
             i("ui:zoomIn", "Increase Zoom"),
@@ -88,27 +89,34 @@ impl App {
         }
     }
 
-    /// The 26 px menu row under the title bar.
+    /// The 26 px menu row under the title bar, when the menus are not in it.
     pub(super) fn menu_bar(&mut self, ui: &mut egui::Ui) {
         let c = super::theme::p();
-        let ctx = ui.ctx().clone();
-        let shown = egui::Panel::top("menu_bar")
+        egui::Panel::top("menu_bar")
             .exact_size(26.0)
             .frame(egui::Frame::new().fill(c.menubar).inner_margin(egui::Margin::symmetric(2, 0)))
             .show_separator_line(false)
-            .show(ui, |ui| {
-                ui.horizontal_centered(|ui| {
-                    // The menus stay in the window on every system, laid out as on Windows and Linux.
-                    let target = if cfg!(windows) { Target::Windows } else { Target::Linux };
-                    let bar = craft_menu::desktop_layout(&self.menus(), target, &LayoutOptions::new("GitCraft")).bar;
-                    let gate = Gate { modal: self.dialog.is_some(), recording_shortcut: self.recording.is_some(), text_editing: ctx.egui_wants_keyboard_input() };
-                    MenuBarUi::new(&bar).style(craft_menu::BarStyle::from_style(ui.style())).gate(gate).shrink_to_fit(f32::INFINITY).show(ui)
-                })
-                .inner
-            });
-        for command in shown.inner {
+            .show(ui, |ui| self.menu_row(ui));
+    }
+
+    /// The File, Edit, View and Help menus, on one row of the title bar (`menusInTitleBar`).
+    /// Returns the room the titles took.
+    pub(super) fn menu_row(&mut self, ui: &mut egui::Ui) -> egui::Rect {
+        let ctx = ui.ctx().clone();
+        let (shown, used) = ui
+            .horizontal_centered(|ui| {
+                // The menus stay in the window on every system, laid out as on Windows and Linux.
+                let target = if cfg!(windows) { Target::Windows } else { Target::Linux };
+                let bar = craft_menu::desktop_layout(&self.menus(), target, &LayoutOptions::new("GitCraft")).bar;
+                let gate = Gate { modal: self.dialog.is_some(), recording_shortcut: self.recording.is_some(), text_editing: ctx.egui_wants_keyboard_input() };
+                let shown = MenuBarUi::new(&bar).style(craft_menu::BarStyle::from_style(ui.style())).gate(gate).shrink_to_fit(f32::INFINITY).show(ui);
+                (shown, ui.min_rect())
+            })
+            .inner;
+        for command in shown {
             self.run(&ctx, &command.id);
         }
+        used
     }
 
     /// Run a menu item: commands of the command list, and the items only the menus have.

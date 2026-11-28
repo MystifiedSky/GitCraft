@@ -51,6 +51,7 @@ impl Locale {
             "Move to bottom" => "Mover abajo",
             "Move to right" => "Mover a la derecha",
             "Show Toolbar Labels" => "Mostrar etiquetas de la barra",
+            "Show Menus in Title Bar" => "Mostrar menús en la barra de título",
             "Show Terminal Panel" => "Mostrar terminal",
             "Increase Zoom" => "Acercar",
             "Decrease Zoom" => "Alejar",
