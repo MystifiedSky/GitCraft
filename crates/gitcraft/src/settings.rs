@@ -169,9 +169,32 @@ impl Store {
     }
 
     pub fn set_tab_width(&mut self, path: &str, width: f32) {
-        let mut widths: Map<String, Value> = self.get("tabWidths").unwrap_or_default();
-        widths.insert(path.to_owned(), Value::from(width.round()));
-        self.set("tabWidths", widths);
+        self.set_entry("tabWidths", path, Some(Value::from(width.round())));
+    }
+
+    /// Forget a dragged width, so the tab fits its title again.
+    pub fn clear_tab_width(&mut self, path: &str) {
+        self.set_entry("tabWidths", path, None);
+    }
+
+    /// Change one entry of a map preference, merged with other windows' entries when saved.
+    fn set_entry(&mut self, key: &str, entry: &str, value: Option<Value>) {
+        let root = object(&mut self.doc);
+        let settings = object(root.entry("settings").or_insert_with(|| Value::Object(Map::new())));
+        let map = object(settings.entry(key).or_insert_with(|| Value::Object(Map::new())));
+        if map.get(entry) == value.as_ref() {
+            return;
+        }
+        match &value {
+            Some(value) => {
+                map.insert(entry.to_owned(), value.clone());
+            }
+            None => {
+                map.remove(entry);
+            }
+        }
+        self.changes.entries.entry(key.to_owned()).or_default().insert(entry.to_owned(), value);
+        self.touch();
     }
 
     fn profiles(&self) -> &[Value] {
@@ -232,6 +255,7 @@ impl Store {
     pub fn replace_settings(&mut self, value: Value) {
         object(&mut self.doc).insert("settings".into(), value.clone());
         self.changes.settings.clear();
+        self.changes.entries.clear();
         self.changes.sections.insert("settings".into(), Some(value));
         self.touch();
     }
@@ -407,15 +431,24 @@ mod tests {
         repo.shares_tabs = false;
         main.set("zoom", 1.5);
         main.set_tabs(vec!["/a".into()], 0);
+        main.set_tab_width("/a", 120.0);
         repo.set("theme", "light");
         repo.set_tabs(vec!["/b".into()], 0);
+        repo.set_tab_width("/b", 140.0);
         main.flush().unwrap();
         repo.flush().unwrap();
-        // The repository window wrote last and kept the main window's zoom and tabs.
+        // The repository window wrote last and kept the main window's zoom, tabs and tab width.
         let disk: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(disk["settings"]["zoom"], 1.5);
         assert_eq!(disk["settings"]["theme"], "light");
         assert_eq!(disk["tabs"], serde_json::json!(["/a"]));
+        assert_eq!(disk["settings"]["tabWidths"], serde_json::json!({"/a": 120.0, "/b": 140.0}));
+        main.clear_tab_width("/a");
+        repo.set_tab_width("/b", 150.0);
+        main.flush().unwrap();
+        repo.flush().unwrap();
+        let disk: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(disk["settings"]["tabWidths"], serde_json::json!({"/b": 150.0}));
         assert_eq!(repo.zoom(), 1.5);
         // The main window reads the theme in when it next looks.
         main.checked = None;

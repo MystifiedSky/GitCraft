@@ -63,6 +63,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Changed
 
+- Repository tabs now widen to fit their name and only shorten it with an ellipsis when the strip is full, sharing the space with the other tabs. Dragging a tab's edge still sets a fixed width, and double-clicking it fits the name again. Dragging a tab to reorder it lifts it under the pointer, leaving a gap where it will land. ([#61](https://github.com/MystifiedSky/GitCraft/pull/61))
 - The collapsed left panel lists Patches instead of Cloud Patches, matching the expanded panel. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
 - Speed up release builds by reusing passing tests for the release commit and compiling macOS architectures in parallel. Verify update signatures before publishing. ([#55](https://github.com/MystifiedSky/GitCraft/pull/55))
 
