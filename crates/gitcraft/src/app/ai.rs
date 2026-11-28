@@ -12,7 +12,7 @@ use std::path::Path;
 
 /// What an AI request produced, and where it goes.
 pub enum AiOutput {
-    CommitMessage { path: String, before: super::repo::Draft, summary: String, description: String },
+    CommitMessage { path: String, before: super::repo::Draft, message: ai::GeneratedCommitMessage },
     StashTitle { tab: u64, before: String, text: String },
     /// `key` names what was explained (a commit, or a branch at its tip) for the recent explanations kept.
     Explain { key: Option<String>, title: String, text: String },
@@ -43,6 +43,10 @@ impl App {
 
     /// Run one AI request away from the window, with a busy note and Stop AI.
     fn ai_run(&mut self, label: &str, job: impl FnOnce() -> Result<AiOutput, String> + Send + 'static) {
+        self.ai_run_for(label, None, job);
+    }
+
+    fn ai_run_for(&mut self, label: &str, commit_tab: Option<u64>, job: impl FnOnce() -> Result<AiOutput, String> + Send + 'static) {
         self.ai_requests += 1;
         let id = format!("ai-{}", self.ai_requests);
         self.ai_reads.push(id.clone());
@@ -51,7 +55,7 @@ impl App {
         let read = id.clone();
         self.spawn(move || {
             let result = gitcraft_core::read_jobs::scope_for(Some(read), std::time::Duration::from_secs(300), || ai::with_config(config, job));
-            super::Msg::Ai { id, result: Box::new(result) }
+            super::Msg::Ai { id, commit_tab, result: Box::new(result) }
         });
     }
 
@@ -66,7 +70,7 @@ impl App {
         }
     }
 
-    pub(crate) fn ai_done(&mut self, id: String, result: Result<AiOutput, String>) {
+    pub(crate) fn ai_done(&mut self, id: String, commit_tab: Option<u64>, result: Result<AiOutput, String>) {
         // A request stopped with Stop AI changes nothing, whatever it brings back.
         if !self.ai_reads.contains(&id) {
             return;
@@ -78,6 +82,9 @@ impl App {
         let out = match result {
             Ok(out) => out,
             Err(e) => {
+                if let Some(tab) = commit_tab {
+                    return self.commit_ai_failed(tab, e);
+                }
                 if e.contains("Preferences > AI") {
                     self.open_prefs(Some("ai"));
                 }
@@ -85,7 +92,11 @@ impl App {
             }
         };
         match out {
-            AiOutput::CommitMessage { path, before, summary, description } => {
+            AiOutput::CommitMessage { path, before, message } => {
+                let ai::GeneratedCommitMessage { summary, description, local_fallback } = message;
+                if local_fallback {
+                    self.toast(true, "The AI size limit was reached. GitCraft prepared a summary from the changed files.");
+                }
                 let now = self.draft(&path);
                 if now != before {
                     let text = format!("{summary}\n\n{description}\n\nYour draft changed while this was generated.");
@@ -139,6 +150,18 @@ impl App {
         }
     }
 
+    fn commit_ai_failed(&mut self, tab: u64, error: String) {
+        let error = if error.trim().is_empty() {
+            "The request returned no error details. Try again or test the connection in Preferences > AI.".into()
+        } else {
+            gitcraft_core::git::redact_diagnostic(&error)
+        };
+        if let Some(repo) = self.repo_mut(tab) {
+            repo.work.commit_ai_error = Some(error.clone());
+        }
+        self.toast(false, format!("Could not generate a commit message. {error}"));
+    }
+
     /// List the untracked files a request would send, ask, then send.
     fn with_reviewed(&mut self, tab: u64, kind: Reviewed) {
         let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };
@@ -165,6 +188,7 @@ impl App {
         };
         let (id, files) = match result {
             Ok(r) => r,
+            Err(e) if matches!(kind, Reviewed::Commit) => return self.commit_ai_failed(tab, e),
             Err(e) => return self.toast(false, e),
         };
         if id.is_none() {
@@ -179,11 +203,11 @@ impl App {
         match kind {
             Reviewed::Commit => {
                 let before = self.draft(&path);
-                self.ai_run("Writing a commit message…", move || {
+                self.ai_run_for("Writing a commit message…", Some(tab), move || {
                     let dir = Path::new(&path);
                     let files = ai_context::take_preview(dir, PreviewKind::Commit, preview)?;
-                    let (summary, description) = ai::commit_message(dir, None, &files.text)?;
-                    Ok(AiOutput::CommitMessage { path, before, summary, description })
+                    let message = ai::commit_message(dir, None, &files)?;
+                    Ok(AiOutput::CommitMessage { path, before, message })
                 });
             }
             Reviewed::Stash => {
@@ -203,6 +227,9 @@ impl App {
     }
 
     pub(crate) fn ai_commit_message(&mut self, tab: u64) {
+        if let Some(repo) = self.repo_mut(tab) {
+            repo.work.commit_ai_error = None;
+        }
         self.with_reviewed(tab, Reviewed::Commit);
     }
 

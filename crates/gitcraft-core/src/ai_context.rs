@@ -48,7 +48,11 @@ const DETAIL_PER_FILE: usize = 32 * 1024;
 const CONTENT_BUDGET: usize = CONTEXT_BUDGET - 1024;
 
 fn append_context(output: &mut String, text: &str) -> bool {
-    let available = CONTENT_BUDGET.saturating_sub(output.len());
+    append_limited(output, text, CONTENT_BUDGET)
+}
+
+pub(crate) fn append_limited(output: &mut String, text: &str, budget: usize) -> bool {
+    let available = budget.saturating_sub(output.len());
     let mut end = text.len().min(available);
     while !text.is_char_boundary(end) { end -= 1; }
     output.push_str(&text[..end]);
@@ -74,27 +78,37 @@ fn bounded_patch(dir: &std::path::Path, args: &[&str], limit: usize) -> Result<(
 /// Classify changes before asking Git for any patch text. Bulk dependency files
 /// never enter the patch output buffer. Literal pathspecs preserve unusual names.
 pub(crate) fn diff(dir: &std::path::Path, args: &[&str]) -> Result<String, String> {
+    diff_limited(dir, args, CONTENT_BUDGET)
+}
+
+fn change_paths(dir: &std::path::Path, args: &[&str]) -> Result<Vec<(char, String, Option<String>)>, String> {
     let mut names = args.to_vec();
     names.extend(["--name-status", "-z", "--no-color", "--no-ext-diff", "--no-textconv"]);
     let listed = crate::git::run(dir, &names);
     if !listed.ok { return Err(listed.message()); }
     let mut records = listed.stdout.split('\0').filter(|r| !r.is_empty());
-    let mut retained = Vec::new();
-    let mut omitted = BTreeMap::new();
+    let mut paths = Vec::new();
     while let Some(status) = records.next() {
         let Some(path) = records.next() else { break };
-        let status = status.trim();
-        if status.starts_with('R') || status.starts_with('C') {
-            let new = records.next();
-            if !sensitive_path(path) && new.is_some_and(|new| !sensitive_path(new)) {
-                retained.push(path.to_owned());
-                if let Some(new) = new { retained.push(new.to_owned()); }
-            }
-        } else if sensitive_path(path) {
+        let Some(kind) = status.trim().chars().next() else { continue };
+        let new = if matches!(kind, 'R' | 'C') { records.next() } else { None };
+        if sensitive_path(path) || new.is_some_and(sensitive_path) || matches!(kind, 'R' | 'C') && new.is_none() {
             continue;
-        } else if matches!(status, "A" | "D") && dependency(path).is_some() && !retain_import(path) {
-            omitted.insert(path.to_owned(), if status == "A" { "added" } else { "removed" });
-        } else { retained.push(path.to_owned()); }
+        }
+        paths.push((kind, path.to_owned(), new.map(str::to_owned)));
+    }
+    Ok(paths)
+}
+
+pub(crate) fn diff_limited(dir: &std::path::Path, args: &[&str], budget: usize) -> Result<String, String> {
+    let mut retained = Vec::new();
+    let mut omitted = BTreeMap::new();
+    for (kind, path, new) in change_paths(dir, args)? {
+        if let Some(new) = new {
+            retained.extend([path, new]);
+        } else if matches!(kind, 'A' | 'D') && dependency(&path).is_some() && !retain_import(&path) {
+            omitted.insert(path, if kind == 'A' { "added" } else { "removed" });
+        } else { retained.push(path); }
     }
     let mut output = String::new();
     // Keep each Windows command line bounded even in repositories with many files.
@@ -105,11 +119,11 @@ pub(crate) fn diff(dir: &std::path::Path, args: &[&str]) -> Result<String, Strin
         let mut command = args.to_vec();
         command.extend(["--patch", "--no-color", "--no-ext-diff", "--no-textconv", "--"]);
         command.extend(batch.iter().map(String::as_str));
-        let available = CONTENT_BUDGET.saturating_sub(output.len());
+        let available = budget.saturating_sub(output.len());
         if available > 0 {
             let (text, truncated) = bounded_patch(dir, &command, available)?;
-            append_context(output, &text);
-            if truncated { append_context(output, "\n[Detailed patch excerpt ends here.]\n"); }
+            append_limited(output, &text, budget);
+            if truncated { append_limited(output, "\n[Detailed patch excerpt ends here.]\n", budget); }
         }
         batch.clear();
         Ok(())
@@ -127,25 +141,59 @@ pub(crate) fn diff(dir: &std::path::Path, args: &[&str]) -> Result<String, Strin
         batch.push(spec);
     }
     flush(&mut batch, &mut output)?;
-    if !omitted.is_empty() {
+    if !omitted.is_empty() && output.len() < budget.saturating_sub(4) {
         let mut counts = args.to_vec();
         counts.extend(["--numstat", "-z", "--no-color", "--no-ext-diff", "--no-textconv"]);
         let stats = crate::git::run(dir, &counts);
         if !stats.ok { return Err(stats.message()); }
-        append_context(&mut output, "\nVendored dependency summary (bulk source omitted; retained details may be excerpted). Do not infer omitted implementation details:\n");
+        append_limited(&mut output, "\nVendored dependency summary (bulk source omitted; retained details may be excerpted). Do not infer omitted implementation details:\n", budget);
         for record in stats.stdout.split('\0') {
             let mut fields = record.trim_start_matches('\n').splitn(3, '\t');
             if let (Some(add), Some(remove), Some(path)) = (fields.next(), fields.next(), fields.next()) {
                 if let Some(status) = omitted.get(path) {
-                    append_context(&mut output, &format!("- {}: {status}, +{add}/-{remove} lines\n", serde_json::to_string(path).unwrap()));
+                    append_limited(&mut output, &format!("- {}: {status}, +{add}/-{remove} lines\n", serde_json::to_string(path).unwrap()), budget);
                 }
             }
         }
     }
-    if output.len() >= CONTENT_BUDGET {
+    if output.len() >= budget.saturating_sub(4) {
         output.push_str(&format!("\n[AI context budget reached across {retained_count} detailed paths and {} bulk dependency paths. Patch details above are incomplete excerpts; do not infer omitted code.]\n", omitted.len()));
     }
     Ok(output)
+}
+
+/// Count all selected files and highlight representative paths without reading their contents.
+pub(crate) fn summarize_changes(dir: &std::path::Path, args: &[&str], approved_files: &[String]) -> Result<(usize, String), String> {
+    let mut paths = if args.is_empty() { Vec::new() } else { change_paths(dir, args)? };
+    paths.extend(approved_files.iter().filter(|path| !sensitive_path(path)).map(|path| ('A', path.clone(), None)));
+    let mut groups = BTreeMap::<&str, usize>::new();
+    let mut kinds = BTreeMap::<&str, usize>::new();
+    let action = |kind| match kind { 'A' => "added", 'D' => "deleted", 'R' => "renamed", 'C' => "copied", _ => "modified" };
+    for (kind, old, new) in &paths {
+        let path = new.as_ref().unwrap_or(old);
+        let group = path.split_once('/').map_or("(repository root)", |(group, _)| group);
+        *groups.entry(group).or_default() += 1;
+        *kinds.entry(action(*kind)).or_default() += 1;
+    }
+    let mut groups: Vec<_> = groups.into_iter().collect();
+    groups.sort_by_key(|(group, count)| (std::cmp::Reverse(*count), *group));
+    let counts = kinds.into_iter().map(|(kind, count)| format!("{count} {kind}")).collect::<Vec<_>>().join(", ");
+    let mut summary = format!("{} changed files ({counts}).\n", paths.len());
+    for (group, count) in groups.iter().take(12) {
+        append_limited(&mut summary, &format!("- {}: {count} files\n", serde_json::to_string(group).unwrap()), 1024);
+    }
+    if groups.len() > 12 {
+        append_limited(&mut summary, &format!("- {} additional directories\n", groups.len() - 12), 1200);
+    }
+    paths.sort_by_key(|(_, old, new)| context_priority(new.as_deref().unwrap_or(old)));
+    summary.push_str("\nRepresentative paths:\n");
+    for (kind, old, new) in paths.iter().take(24) {
+        let path = new.as_ref().unwrap_or(old);
+        if append_limited(&mut summary, &format!("- {} {}\n", action(*kind), serde_json::to_string(path).unwrap()), 3000) {
+            break;
+        }
+    }
+    Ok((paths.len(), summary))
 }
 
 #[derive(Default)]
@@ -214,7 +262,7 @@ static PREVIEWS: std::sync::Mutex<Vec<Pending>> = std::sync::Mutex::new(Vec::new
 const PREVIEW_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
 pub fn preview(dir: &std::path::Path, kind: PreviewKind) -> Result<Preview, String> {
-    if kind != PreviewKind::Compose && !diff(dir, &["diff", "--cached"])?.trim().is_empty() {
+    if kind != PreviewKind::Compose && !diff_limited(dir, &["diff", "--cached"], 1024)?.trim().is_empty() {
         return Ok(Preview { id: None, files: vec![] });
     }
     let context = collect_untracked(dir)?;

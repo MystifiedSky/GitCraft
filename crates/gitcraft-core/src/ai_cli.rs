@@ -778,6 +778,8 @@ fn cli_error(agent: Agent, out: &Output) -> String {
         .any(|word| message.contains(word))
     {
         agent.sign_in_error()
+    } else if crate::ai::size_limited(&message) {
+        format!("{} rejected the size of the request.", agent.name())
     } else if [
         "429",
         "rate limit",

@@ -268,6 +268,7 @@ fn checked_response(status: u16, value: Value, provider: &str, key: Option<&str>
     let label = provider_label(provider);
     match status {
         200..=299 => Ok(value),
+        413 => Err(format!("{label} rejected the size of the request.")),
         401 | 403 => Err(format!("{label} rejected access. Check the API key and endpoint in Preferences > AI.")),
         429 => Err(format!("{label} is busy or its rate limit was reached. Try again shortly.")),
         _ => {
@@ -342,9 +343,28 @@ fn staged_or_all(dir: &Path, untracked: &str) -> Result<String, String> {
 const COMMIT_SYSTEM: &str = "You write git commit messages. Read the diff and describe what changed and why it matters, \
 following the repository's existing message style shown in the recent commits. The summary is one line, imperative mood, \
 at most 72 characters, no trailing period. The description explains the change in a few short lines, or is empty for trivial changes.";
+const COMMIT_DETAIL_BUDGET: usize = 24 * 1024;
+
+pub(crate) fn size_limited(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    ["context_length_exceeded", "context length", "context window", "context limit", "input is too long",
+        "prompt is too long", "too many tokens", "request too large", "payload too large",
+        "rejected the size of the request", "answer was cut off", "returned too much output"]
+        .iter().any(|limit| error.contains(limit))
+}
+
+struct CommitContext {
+    detail: String,
+    history: String,
+    changes: Vec<String>,
+    include_untracked: bool,
+    large: bool,
+}
+
 /// Select the saved commit's changes when renaming; never include work in progress.
-fn commit_prompt(dir: &Path, sha: Option<&str>, untracked: &str) -> Result<String, String> {
-    let (diff, recent, original) = if let Some(sha) = sha {
+fn commit_context(dir: &Path, sha: Option<&str>, untracked: &str) -> Result<CommitContext, String> {
+    use crate::ai_context::{append_limited, diff_limited};
+    let (mut detail, recent, original, changes, include_untracked) = if let Some(sha) = sha {
         let revision = format!("{sha}^{{commit}}");
         let resolved = git::run(dir, &["rev-parse", "--verify", "--end-of-options", &revision]);
         if !resolved.ok {
@@ -352,30 +372,103 @@ fn commit_prompt(dir: &Path, sha: Option<&str>, untracked: &str) -> Result<Strin
         }
         let oid = resolved.stdout.trim();
         // --root includes the initial commit; merges are compared with their first parent.
-        let shown = crate::ai_context::diff(dir, &["show", "--root", "--format=", "--diff-merges=first-parent", oid])?;
+        let args = ["show", "--root", "--format=", "--diff-merges=first-parent", oid];
+        let shown = diff_limited(dir, &args, COMMIT_DETAIL_BUDGET)?;
         let original = git::run(dir, &["log", "-1", "--format=%B", oid, "--"]).stdout;
         let recent = git::run(dir, &["log", "-15", "--format=%s", oid, "--"]).stdout;
-        (shown, recent, format!("Existing message (context only; describe the diff accurately):\n{original}\n\n"))
+        (shown, recent, original, args.map(str::to_owned).to_vec(), false)
     } else {
-        (staged_or_all(dir, untracked)?, git::run(dir, &["log", "-15", "--format=%s"]).stdout, String::new())
+        let staged_args = ["diff", "--cached"];
+        let staged = diff_limited(dir, &staged_args, COMMIT_DETAIL_BUDGET)?;
+        let recent = git::run(dir, &["log", "-15", "--format=%s"]).stdout;
+        if !staged.trim().is_empty() {
+            (staged, recent, String::new(), staged_args.map(str::to_owned).to_vec(), false)
+        } else if git::run(dir, &["rev-parse", "--verify", "HEAD"]).ok {
+            let args = ["diff", "HEAD"];
+            (diff_limited(dir, &args, COMMIT_DETAIL_BUDGET)?, recent, String::new(), args.map(str::to_owned).to_vec(), true)
+        } else {
+            (String::new(), recent, String::new(), Vec::new(), true)
+        }
     };
-    if diff.trim().is_empty() {
+    let mut large = detail.len() >= COMMIT_DETAIL_BUDGET.saturating_sub(4);
+    if include_untracked {
+        large |= append_limited(&mut detail, untracked, COMMIT_DETAIL_BUDGET);
+    }
+    if detail.trim().is_empty() {
         return Err("There are no changes to describe.".into());
     }
-    let prompt = format!("Recent commit summaries in this repository:\n{recent}\n\n{original}Diff to describe:\n{diff}");
-    Ok(prompt)
+    let mut history = String::from("Recent commit summaries in this repository:\n");
+    append_limited(&mut history, &recent, 1200);
+    if !original.is_empty() {
+        history.push_str("\n\nExisting message (context only; describe the diff accurately):\n");
+        append_limited(&mut history, &original, 2000);
+    }
+    Ok(CommitContext { detail, history, changes, include_untracked, large })
 }
 
-pub fn commit_message(dir: &Path, sha: Option<&str>, untracked: &str) -> Result<(String, String), String> {
-    let prompt = commit_prompt(dir, sha, untracked)?;
+#[cfg(test)]
+fn commit_prompt(dir: &Path, sha: Option<&str>, untracked: &str) -> Result<String, String> {
+    let context = commit_context(dir, sha, untracked)?;
+    Ok(format!("{}\n\nDiff to describe:\n{}", context.history, context.detail))
+}
+
+#[derive(Debug)]
+pub struct GeneratedCommitMessage {
+    pub summary: String,
+    pub description: String,
+    pub local_fallback: bool,
+}
+
+pub fn commit_message(dir: &Path, sha: Option<&str>, untracked: &crate::ai_context::Untracked) -> Result<GeneratedCommitMessage, String> {
+    let context = commit_context(dir, sha, &untracked.text)?;
     let schema = json!({
         "type": "object",
         "properties": { "summary": { "type": "string" }, "description": { "type": "string" } },
         "required": ["summary", "description"],
         "additionalProperties": false
     });
-    let v = ask("commit", COMMIT_SYSTEM, prompt, "low", schema)?;
-    Ok((v["summary"].as_str().unwrap_or_default().to_string(), v["description"].as_str().unwrap_or_default().to_string()))
+    let generate = |prompt| -> Result<GeneratedCommitMessage, String> {
+        let v = ask("commit", COMMIT_SYSTEM, prompt, "low", schema.clone())?;
+        let summary = v["summary"].as_str().unwrap_or_default().trim();
+        if summary.is_empty() {
+            return Err("The AI returned an empty commit summary. Try again or choose a different model in Preferences > AI.".into());
+        }
+        Ok(GeneratedCommitMessage {
+            summary: summary.to_owned(),
+            description: v["description"].as_str().unwrap_or_default().to_string(),
+            local_fallback: false,
+        })
+    };
+    if !context.large {
+        match generate(format!("{}\n\nDiff to describe:\n{}", context.history, context.detail)) {
+            Err(error) if size_limited(&error) => {}
+            result => return result,
+        }
+    }
+    let args: Vec<_> = context.changes.iter().map(String::as_str).collect();
+    let approved = if context.include_untracked { untracked.files.as_slice() } else { &[] };
+    let (count, overview) = crate::ai_context::summarize_changes(dir, &args, approved)?;
+    let mut prompt = format!("Summarize the main themes of this change set. This is a partial view of the changes. Do not infer omitted implementation details.\n\n{overview}");
+    if context.large {
+        prompt.push_str("\nSelected patch excerpt:\n");
+        crate::ai_context::append_limited(&mut prompt, &context.detail, 8 * 1024);
+        match generate(prompt) {
+            Err(error) if size_limited(&error) => {}
+            result => return result,
+        }
+        prompt = format!("Write a short commit message based on this file summary. Avoid implementation details.\n\n{overview}");
+    }
+    match generate(prompt) {
+        Err(error) if size_limited(&error) && count > 0 => {
+            let files = if count == 1 { "file" } else { "files" };
+            Ok(GeneratedCommitMessage {
+                summary: format!("Update {count} {files}"),
+                description: crate::ai_context::redact(&overview).into_owned(),
+                local_fallback: true,
+            })
+        }
+        result => result,
+    }
 }
 
 pub fn stash_message(dir: &Path, untracked: &str) -> Result<String, String> {
@@ -661,7 +754,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         assert!(git::run(&d, &["init", "-q"]).ok);
-        assert!(commit_message(&d, None, "").unwrap_err().contains("no changes"));
+        assert!(commit_message(&d, None, &Default::default()).unwrap_err().contains("no changes"));
         assert!(compose(&d, Default::default()).unwrap_err().contains("no changes"));
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -812,6 +905,76 @@ mod connection_tests {
             assert!(body["messages"][0]["content"].as_str().unwrap().contains("instructions"));
             assert!(body["messages"][0]["content"].as_str().unwrap().contains("\"ok\""));
         }
+    }
+
+    #[test]
+    fn generating_a_commit_message_rejects_a_blank_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(git::run(dir.path(), &["init", "-q"]).ok);
+        std::fs::write(dir.path().join("example.txt"), "fixture change\n").unwrap();
+        assert!(git::run(dir.path(), &["add", "example.txt"]).ok);
+        let reply = json!({"choices":[{"message":{"content":json!({"summary":"  ","description":"Example"}).to_string()},"finish_reason":"stop"}]});
+        let (url, server) = server(vec![(200, reply)]);
+        let config = AiConfig { enabled: true, endpoint: url, response_format: "text".into(), ..local_config() };
+        let result = with_config(config, || commit_message(dir.path(), None, &Default::default()));
+        assert!(result.unwrap_err().contains("empty commit summary"));
+        assert_eq!(server.join().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_large_commit_uses_an_overview_and_retries_without_patch_text() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(git::run(dir.path(), &["init", "-q"]).ok);
+        std::fs::write(dir.path().join("early.txt"), "bulk change\n".repeat(6000)).unwrap();
+        std::fs::write(dir.path().join("z-later.txt"), "important follow-up\n").unwrap();
+        std::fs::write(dir.path().join(".env"), "fixture secret\n").unwrap();
+        assert!(git::run(dir.path(), &["add", "."]).ok);
+        let reply = json!({"choices":[{"message":{"content":json!({"summary":"Update project files","description":"Review both changed files."}).to_string()},"finish_reason":"stop"}]});
+        let (url, worker) = server(vec![(413, json!({})), (200, reply)]);
+        let config = AiConfig { enabled: true, endpoint: url, response_format: "text".into(), ..local_config() };
+        let untracked = crate::ai_context::Untracked {
+            files: vec!["outside-the-index.txt".into()],
+            text: "outside-the-index contents".into(),
+        };
+        let result = with_config(config, || commit_message(dir.path(), None, &untracked)).unwrap();
+        assert_eq!(result.summary, "Update project files");
+        assert!(!result.local_fallback);
+        let requests = worker.join().unwrap();
+        let first = requests[0].1["messages"][1]["content"].as_str().unwrap();
+        let second = requests[1].1["messages"][1]["content"].as_str().unwrap();
+        assert!(first.len() <= 8 * 1024 && second.len() < first.len());
+        assert!(first.contains("2 changed files") && first.contains("z-later.txt") && first.contains("Selected patch excerpt"));
+        assert!(second.contains("z-later.txt") && !second.contains("bulk change"));
+        assert!(!first.contains(".env") && !second.contains("fixture secret"));
+        assert!(!first.contains("outside-the-index") && !second.contains("outside-the-index"));
+    }
+
+    #[test]
+    fn a_persistent_size_limit_returns_a_local_file_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(git::run(dir.path(), &["init", "-q"]).ok);
+        std::fs::write(dir.path().join("example.txt"), "fixture change\n").unwrap();
+        assert!(git::run(dir.path(), &["add", "example.txt"]).ok);
+        let (url, worker) = server(vec![(413, json!({})), (413, json!({}))]);
+        let config = AiConfig { enabled: true, endpoint: url, response_format: "text".into(), ..local_config() };
+        let result = with_config(config, || commit_message(dir.path(), None, &Default::default())).unwrap();
+        assert_eq!(result.summary, "Update 1 file");
+        assert!(result.description.contains("example.txt"));
+        assert!(result.local_fallback);
+        assert_eq!(worker.join().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn commit_message_access_errors_still_report_the_provider_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(git::run(dir.path(), &["init", "-q"]).ok);
+        std::fs::write(dir.path().join("example.txt"), "fixture change\n").unwrap();
+        assert!(git::run(dir.path(), &["add", "example.txt"]).ok);
+        let (url, worker) = server(vec![(401, json!({}))]);
+        let config = AiConfig { enabled: true, endpoint: url, response_format: "text".into(), ..local_config() };
+        let result = with_config(config, || commit_message(dir.path(), None, &Default::default()));
+        assert!(result.unwrap_err().contains("rejected access"));
+        assert_eq!(worker.join().unwrap().len(), 1);
     }
 
     #[test]

@@ -106,6 +106,7 @@ pub struct RepoTab {
     pub index: HashMap<String, usize>,
     pub error: Option<String>,
     pub loading: bool,
+    pub last_fetch: Option<std::time::Instant>,
     /// Bumped by every change that makes running reads stale.
     pub generation: u64,
     /// What the running full read asks for, and what the history shown was read with: loaded
@@ -166,6 +167,7 @@ impl RepoTab {
             index: HashMap::new(),
             error: None,
             loading: false,
+            last_fetch: None,
             generation: 0,
             requested: None,
             shown_query: None,
@@ -865,6 +867,9 @@ impl App {
     /// Returns whether it showed something instead of the plain message.
     fn after_action(&mut self, tab: u64, action: &Action, result: &ActionResult, quiet: bool) -> bool {
         use super::dialogs::Dialog;
+        if self.offer_force_worktree_removal(tab, action, result) {
+            return true;
+        }
         // What the commit was made from: only that is cleared, so edits made while it ran stay.
         let submitted = if let Action::Commit { .. } = action { self.repo_mut(tab).and_then(|r| r.work.submitted.take()) } else { None };
         if !result.ok && matches!(action, Action::SaveResolved { .. }) {

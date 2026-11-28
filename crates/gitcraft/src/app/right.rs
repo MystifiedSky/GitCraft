@@ -33,6 +33,7 @@ pub struct WorkUi {
     /// Folders closed in the tree view.
     pub closed: std::collections::HashSet<String>,
     pub template_applied: bool,
+    pub commit_ai_error: Option<String>,
     summary_spelling: spelling::State,
     description_spelling: spelling::State,
 }
@@ -670,6 +671,24 @@ impl App {
                                 commit_now = Some(ui.input(|i| i.modifiers.shift));
                             }
                         });
+                        if let Some(error) = wu.commit_ai_error.as_ref() {
+                            ui.add(egui::Label::new(egui::RichText::new(format!("Could not generate a commit message. {error}")).size(12.5).color(REMOVED)).wrap());
+                            let mut dismiss = false;
+                            ui.horizontal_wrapped(|ui| {
+                                if widgets::button(ui, Kind::Default, Some(Icon::Copy), "Copy error", 22.0, true).clicked() {
+                                    ui.ctx().copy_text(error.clone());
+                                }
+                                if error.contains("Preferences > AI")
+                                    && widgets::button(ui, Kind::Default, None, "AI Settings", 22.0, true).clicked()
+                                {
+                                    later.push(Box::new(|app| app.open_prefs(Some("ai"))));
+                                }
+                                dismiss = widgets::button(ui, Kind::Default, None, "Dismiss", 22.0, true).clicked();
+                            });
+                            if dismiss {
+                                wu.commit_ai_error = None;
+                            }
+                        }
                         ui.horizontal(|ui| {
                             let (cr, cresp) = ui.allocate_exact_size(vec2(14.0, 20.0), Sense::click());
                             widgets::chevron(ui, cr, wu.options_open, 14.0, c.white(0.7));

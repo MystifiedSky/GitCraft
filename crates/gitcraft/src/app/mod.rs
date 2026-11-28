@@ -132,7 +132,7 @@ pub enum Msg {
     FileHistory { tab: u64, file: String, request: u64, result: Result<gitcraft_core::files::FileHistoryPage, String> },
     ConflictInfo { tab: u64, file: String, request: u64, info: Box<gitcraft_core::rewrite::ConflictInfo> },
     ConflictSaved { tab: u64, result: Result<String, String> },
-    Ai { id: String, result: Box<Result<ai::AiOutput, String>> },
+    Ai { id: String, commit_tab: Option<u64>, result: Box<Result<ai::AiOutput, String>> },
     AiPreview { tab: u64, kind: u8, result: Result<(Option<u32>, Vec<String>), String> },
     Blame { tab: u64, key: (String, Option<String>, bool), request: u64, result: Result<Vec<gitcraft_core::files::BlameLine>, String> },
 }
@@ -267,7 +267,6 @@ pub struct App {
     /// A Start a Pull Request dialog waiting for AI text: tab, branch, target.
     /// The pull request form waiting for its AI text: the tab, branch, target, draft choice and the request's id.
     pub(crate) pr_waiting: Option<(u64, String, String, bool, u64)>,
-    fetched_at: Option<std::time::Instant>,
     primary: Option<Box<crate::instance::Primary>>,
     /// Clone links waiting for the dialog in front to close.
     pending_clones: Vec<String>,
@@ -277,6 +276,7 @@ pub struct App {
 }
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+const DEFAULT_AUTO_FETCH_MINUTES: f64 = 1.0;
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, opts: StartOptions, settings: Store) -> App {
@@ -354,7 +354,6 @@ impl App {
             launchpad: Default::default(),
             launchpad_generation: 0,
             pr_waiting: None,
-            fetched_at: None,
             primary: None,
             pending_clones: Vec::new(),
             update: Default::default(),
@@ -426,57 +425,123 @@ impl App {
         }
     }
 
-    /// Auto-fetch every open repository every few minutes (0 turns it off), pruning when set.
-    /// A failure is reported once per repository until it fetches again.
-    fn auto_fetch(&mut self, ctx: &egui::Context) {
-        let minutes = self.settings.num("autoFetchMin", 5.0).clamp(0.0, 60.0) as u64;
-        if minutes == 0 || self.screenshot.is_some() {
-            return;
-        }
-        let every = std::time::Duration::from_secs(minutes * 60);
-        let due = self.fetched_at.get_or_insert_with(std::time::Instant::now).elapsed() >= every;
-        ctx.request_repaint_after(every.saturating_sub(self.fetched_at.map_or(every, |t| t.elapsed())).max(std::time::Duration::from_secs(1)));
-        if !due || self.fetching || self.busy.is_some() || self.job.is_some() {
-            return;
-        }
-        self.fetched_at = Some(std::time::Instant::now());
+    fn due_fetches(&self, now: std::time::Instant, every: std::time::Duration) -> (Vec<(u64, String)>, Option<std::time::Duration>) {
+        let mut next = None;
         let mut paths: Vec<(u64, String)> = Vec::new();
         for t in &self.tabs {
             if let (TabKind::Repo(p), Some(r)) = (&t.kind, self.repos.get(&t.id))
-                && r.view.as_ref().is_some_and(|v| !v.data.remotes.is_empty())
-                && !self.repo_pull_busy(p)
-                && !paths.iter().any(|(_, q)| same_folder(q, p))
+                && r.view.as_ref().is_some_and(|v| !v.data.remotes.is_empty()) && r.error.is_none()
             {
-                paths.push((t.id, p.clone()));
+                let wait = r.last_fetch.map_or(std::time::Duration::ZERO, |last| every.saturating_sub(now.saturating_duration_since(last)));
+                if !wait.is_zero() || self.repo_pull_busy(p) || self.busy.is_some() || self.job.is_some() {
+                    let retry = wait.max(std::time::Duration::from_secs(1));
+                    next = Some(next.map_or(retry, |delay: std::time::Duration| delay.min(retry)));
+                } else if !paths.iter().any(|(_, other)| same_folder(other, p)) {
+                    paths.push((t.id, p.clone()));
+                }
             }
+        }
+        paths.sort_by_key(|(tab, _)| *tab != self.active);
+        (paths, next)
+    }
+
+    fn group_fetches(&self, paths: &[(u64, String)]) -> Vec<Vec<String>> {
+        let mut groups: Vec<Vec<String>> = Vec::new();
+        let mut by_repository = HashMap::new();
+        for (tab, path) in paths {
+            let key = self.repo(*tab).and_then(|repo| repo.view.as_ref())
+                .and_then(|view| view.data.worktrees.first()).map_or(path, |worktree| &worktree.path);
+            let index = *by_repository.entry(key.as_str()).or_insert_with(|| {
+                groups.push(Vec::new());
+                groups.len() - 1
+            });
+            groups[index].push(path.clone());
+        }
+        groups
+    }
+
+    /// Fetch each open repository when it first loads and later at its configured interval.
+    /// Only one batch runs at a time, and busy repositories keep their original due time.
+    fn auto_fetch(&mut self, ctx: &egui::Context) {
+        let minutes = self.settings.num("autoFetchMin", DEFAULT_AUTO_FETCH_MINUTES).clamp(0.0, 60.0) as u64;
+        if minutes == 0 || self.screenshot.is_some() || self.fetching {
+            return;
+        }
+        let every = std::time::Duration::from_secs(minutes * 60);
+        let (paths, next) = self.due_fetches(std::time::Instant::now(), every);
+        if let Some(next) = next {
+            ctx.request_repaint_after(next);
         }
         if paths.is_empty() {
             return;
         }
         self.fetching = true;
         self.busy_repos.extend(paths.iter().map(|(_, p)| p.clone()));
+        let groups = self.group_fetches(&paths);
         let prune = self.settings.flag("autoPrune", false);
         let engine = self.engine.clone();
         let inbox = self.inbox.clone();
         let repaint = ctx.clone();
         self.spawn(move || {
-            for (tab, path) in paths {
-                let r = engine.perform(&path, Action::AutoFetch { prune });
-                inbox.post(Msg::Apply(Box::new(move |app: &mut App| {
-                    app.finish_busy_repo(&path);
-                    if r.ok {
-                        app.fetch_warned.remove(&path);
-                        if !r.message.is_empty() && app.repos.contains_key(&tab) {
-                            app.load_repo(tab);
-                        }
-                    } else if app.fetch_warned.insert(path) {
-                        app.toast(false, r.message);
-                    }
-                })));
-                repaint.request_repaint();
+            for group in groups {
+                // Linked worktrees normally share remote config and refs. Keep separate
+                // fetches when Git enables worktree-specific config.
+                let batches = if group.len() > 1 && {
+                    let config = gitcraft_core::git::run(std::path::Path::new(&group[0]), &[
+                        "config", "--bool", "--default", "false", "--get", "extensions.worktreeConfig",
+                    ]);
+                    !config.ok || config.stdout.trim() != "false"
+                } {
+                    group.into_iter().map(|path| vec![path]).collect()
+                } else {
+                    vec![group]
+                };
+                for paths in batches {
+                    let result = engine.auto_fetch(std::path::Path::new(&paths[0]), prune);
+                    let finished = std::time::Instant::now();
+                    inbox.post(Msg::Apply(Box::new(move |app: &mut App| app.auto_fetch_done(paths, finished, result))));
+                    repaint.request_repaint();
+                }
             }
             Msg::Apply(Box::new(|app: &mut App| app.fetching = false))
         });
+    }
+
+    fn auto_fetch_done(&mut self, paths: Vec<String>, finished: std::time::Instant, result: gitcraft_core::actions::AutoFetchResult) {
+        let mut refresh = Vec::new();
+        let mut found_worktrees = false;
+        let mut warn = false;
+        for path in paths {
+            self.finish_busy_repo(&path);
+            if let Some(tab) = self.tab_of(&path)
+                && let Some(repo) = self.repo_mut(tab)
+            {
+                repo.last_fetch = Some(finished);
+                if result.refs_changed {
+                    if !found_worktrees && let Some(view) = &repo.view {
+                        refresh.extend(view.data.worktrees.iter().map(|worktree| worktree.path.clone()));
+                        found_worktrees = !view.data.worktrees.is_empty();
+                    }
+                    refresh.push(path.clone());
+                }
+            }
+            if result.error.is_some() {
+                warn |= self.fetch_warned.insert(path);
+            } else {
+                self.fetch_warned.remove(&path);
+            }
+        }
+        // Every linked tab reads the shared refs. Background tabs defer their graph read
+        // until activated. Unchanged fetches never request a history reload here.
+        let tabs: std::collections::HashSet<_> = refresh.iter().filter_map(|path| self.tab_of(path)).collect();
+        for tab in tabs {
+            if let Some(path) = self.repo(tab).map(|repo| repo.path.clone()) {
+                self.changed(&path, true);
+            }
+        }
+        if warn && let Some(error) = result.error {
+            self.toast(false, error);
+        }
     }
 
     fn repo_pull_busy(&self, path: &str) -> bool {
@@ -973,8 +1038,9 @@ impl App {
             Msg::Watching { tab, result } => self.watching(tab, result),
             Msg::Acted { tab, path, action, quiet, result } => {
                 self.finish_busy_repo(&path);
-                let result = match result {
-                    DesktopActionResult::Performed(result) => result,
+                let (result, removed_worktree) = match result {
+                    DesktopActionResult::Performed(result) => (result, false),
+                    DesktopActionResult::WorktreeRemoved(result) => (result, true),
                     DesktopActionResult::OpenWorktree { path, action } => {
                         self.checkout_opened_worktree(tab, &path);
                         if let Some(action) = action {
@@ -1020,6 +1086,9 @@ impl App {
                     // Newer text typed while the stash ran is kept.
                     r.work.stash_message.clear();
                 }
+                if result.ok && matches!(*action, Action::Fetch) && let Some(repo) = self.repo_mut(tab) {
+                    repo.last_fetch = Some(std::time::Instant::now());
+                }
                 if let Action::MergeSquash { branch, into, .. } = &*action
                     && result.ok
                 {
@@ -1030,7 +1099,7 @@ impl App {
                 {
                     self.take_side_done(tab, paths);
                 }
-                let worktree = (matches!(*action, Action::WorktreeAdd { .. } | Action::WorktreeRemove { .. }) && result.ok).then(|| (*action).clone());
+                let worktree = (removed_worktree || matches!(*action, Action::WorktreeAdd { .. } | Action::WorktreeRemove { .. }) && result.ok).then(|| (*action).clone());
                 self.acted(tab, *action, quiet, result);
                 if let Some(action) = worktree {
                     self.worktree_done(tab, &action);
@@ -1095,7 +1164,7 @@ impl App {
             Msg::FileHistory { tab, file, request, result } => self.history_loaded(tab, file, request, result),
             Msg::ConflictInfo { tab, file, request, info } => self.conflict_loaded(tab, file, request, *info),
             Msg::ConflictSaved { tab, result } => self.conflict_saved(tab, result),
-            Msg::Ai { id, result } => self.ai_done(id, *result),
+            Msg::Ai { id, commit_tab, result } => self.ai_done(id, commit_tab, *result),
             Msg::AiPreview { tab, kind, result } => self.ai_preview(tab, kind, result),
             Msg::Blame { tab, key, request, result } => {
                 if let Some(r) = self.repo_mut(tab)
@@ -1189,6 +1258,113 @@ mod tests {
         assert_eq!(app.tabs.len(), before + 1);
         assert_eq!(app.repo_tab_id(&path), id);
         assert_eq!(app.tabs.len(), before + 1);
+    }
+
+    #[test]
+    fn headless_commit_ai_failure_keeps_the_reason_with_the_draft() {
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx);
+        let mut app = App::new(&cc, StartOptions::default(), crate::settings::Store::in_memory());
+        let path = std::env::temp_dir().join(format!("gitcraft-ai-notice-{}", std::process::id()));
+        let path = path.to_str().unwrap();
+        let tab = app.repo_tab_id(path);
+        let draft = repo::Draft { summary: "My draft".into(), ..Default::default() };
+        app.set_draft(path, draft.clone());
+        app.ai_reads.push("ai-test".into());
+        app.ai_label = Some("Writing a commit message".into());
+        let reason = "Codex needs a model change in Preferences > AI.";
+        app.handle(Msg::Ai { id: "ai-test".into(), commit_tab: Some(tab), result: Box::new(Err(reason.into())) });
+        assert!(app.ai_label.is_none());
+        assert!(app.prefs.is_none());
+        assert!(app.draft(path) == draft);
+        app.toasts.clear();
+        assert_eq!(app.repo(tab).unwrap().work.commit_ai_error.as_deref(), Some(reason));
+
+        app.ai_preview(tab, 0, Err("Could not read the staged files.".into()));
+        assert_eq!(app.repo(tab).unwrap().work.commit_ai_error.as_deref(), Some("Could not read the staged files."));
+    }
+
+    #[test]
+    fn headless_auto_fetch_checks_new_repos_and_retries_busy_repos_without_resetting_the_interval() {
+        use std::time::{Duration, Instant};
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx);
+        let mut app = App::new(&cc, StartOptions::default(), crate::settings::Store::in_memory());
+        let dir = std::env::temp_dir().join(format!("gitcraft-auto-fetch-{}", std::process::id()));
+        let path = dir.to_str().unwrap();
+        let tab = app.repo_tab_id(path);
+        let data = gitcraft_core::git::RepoData { remotes: vec!["origin".into()], ..Default::default() };
+        let view = gitcraft_core::session::RepoView {
+            path: path.into(), name: String::new(), data,
+            graph: Default::default(), history_cursor: None, undo: Default::default(),
+        };
+        app.repo_mut(tab).unwrap().view = Some(view);
+        let now = Instant::now();
+        let interval = Duration::from_secs(300);
+        assert_eq!(app.due_fetches(now, interval).0, vec![(tab, path.to_owned())]);
+        app.busy_repos.push(path.into());
+        let (due, next) = app.due_fetches(now, interval);
+        assert!(due.is_empty());
+        assert_eq!(next, Some(Duration::from_secs(1)));
+        app.finish_busy_repo(path);
+        assert_eq!(app.due_fetches(now, interval).0, vec![(tab, path.to_owned())]);
+        app.repo_mut(tab).unwrap().last_fetch = Some(now);
+        let (due, next) = app.due_fetches(now, interval);
+        assert!(due.is_empty());
+        assert_eq!(next, Some(interval));
+        assert_eq!(app.due_fetches(now + interval, interval).0, vec![(tab, path.to_owned())]);
+
+        let linked_path = dir.with_extension("linked");
+        let linked_path = linked_path.to_str().unwrap();
+        let linked_tab = app.repo_tab_id(linked_path);
+        let worktree = |path: &str| gitcraft_core::git::Worktree {
+            path: path.into(), branch: String::new(), locked: false, prunable: false,
+        };
+        let view = app.repo_mut(tab).unwrap().view.as_mut().unwrap();
+        view.data.worktrees = vec![worktree(path), worktree(linked_path)];
+        app.repo_mut(linked_tab).unwrap().view = Some(view.clone());
+        app.activate(linked_tab);
+        let (due, _) = app.due_fetches(now + interval, interval);
+        assert_eq!(app.group_fetches(&due), vec![vec![linked_path.to_owned(), path.to_owned()]]);
+        app.repo_mut(tab).unwrap().deferred = None;
+        app.auto_fetch_done(vec![linked_path.into()], now, gitcraft_core::actions::AutoFetchResult {
+            refs_changed: false, error: None,
+        });
+        assert!(app.repo(tab).unwrap().deferred.is_none());
+        app.auto_fetch_done(vec![linked_path.into()], now, gitcraft_core::actions::AutoFetchResult {
+            refs_changed: true, error: None,
+        });
+        assert_eq!(app.repo(tab).unwrap().deferred, Some(true));
+    }
+
+    #[test]
+    fn headless_dirty_worktree_refusal_requires_a_separate_force_confirmation() {
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx);
+        let mut app = App::new(&cc, StartOptions::default(), crate::settings::Store::in_memory());
+        let root = std::env::temp_dir().join(format!("gitcraft-remove-confirmation-{}", std::process::id()));
+        let repo = root.to_string_lossy().into_owned();
+        let worktree = root.join("topic").to_string_lossy().into_owned();
+        let tab = app.repo_tab_id(&repo);
+        let action = Action::WorktreeRemoveAndBranch {
+            path: worktree.clone(), branch: "topic".into(), remote_branch: Some("origin/topic".into()),
+            stale_only: false, force: false,
+        };
+        app.handle(Msg::Acted {
+            tab, path: repo, action: Box::new(action), quiet: false,
+            result: DesktopActionResult::Performed(gitcraft_core::actions::ActionResult {
+                ok: false, message: format!("fatal: '{worktree}' contains modified or untracked files, use --force to delete it"),
+            }),
+        });
+        let dialog = app.dialog.as_ref().expect("dirty removal has a separate confirmation");
+        assert_eq!(dialog.title, "Force remove worktree?");
+        assert!(dialog.cancel.is_some());
+        assert!(dialog.choices.iter().any(|choice| choice.label == "Force Remove" && choice.kind == widgets::Kind::Danger));
+        let dialogs::Body::Text(warning) = &dialog.body else { panic!("expected a warning"); };
+        for text in [worktree.as_str(), "Staged changes", "unstaged changes", "untracked files", "ignored files", "origin/topic"] {
+            assert!(warning.contains(text), "{warning}");
+        }
+        assert!(app.repo(tab).unwrap().running.is_none(), "the warning must not start force removal");
     }
 
     #[test]
