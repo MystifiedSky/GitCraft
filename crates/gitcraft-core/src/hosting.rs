@@ -49,6 +49,10 @@ pub fn secret_get(name: &str) -> Option<String> {
     secret_lookup(name).ok().flatten()
 }
 
+pub fn has_connection(id: &str) -> Result<bool, String> {
+    secret_lookup(&secret_name(id)).map(|token| token.is_some())
+}
+
 pub fn secret_set(name: &str, value: &str) -> Result<(), String> {
     let mut cache = secret_cache().lock().unwrap_or_else(|error| error.into_inner());
     let entry = keyring::Entry::new(SERVICE, name).map_err(keychain_error)?;
@@ -576,6 +580,7 @@ pub fn sync_git_credentials(gitlab_host: &str) {
             "github" | "github-enterprise" => "x-access-token".to_string(),
             "gitlab" | "gitlab-self" => "oauth2".to_string(),
             "bitbucket" if c.bitbucket_user.trim().is_empty() => "x-token-auth".to_string(),
+            "bitbucket" if c.bitbucket_user.contains('@') => "x-bitbucket-api-token-auth".to_string(),
             "bitbucket" => c.bitbucket_user.trim().to_string(),
             "bitbucket-server" => c.bitbucket_server_user.trim().to_string(),
             "gitea" => c.gitea_user.trim().to_owned(),

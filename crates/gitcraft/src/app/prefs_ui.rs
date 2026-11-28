@@ -114,7 +114,7 @@ pub const SERVICES: [Service; 14] = [
     Service { id: "github-enterprise", label: "GitHub Enterprise Server", hosting: true, browser: false, gh: false, fields: &[("githubEnterpriseHost", "Host Domain", "github.mycompany.com", "")], needs: &["githubEnterpriseHost"], token_help: "A personal access token with the repo scope." },
     Service { id: "gitlab", label: "GitLab", hosting: true, browser: true, gh: false, fields: &[], needs: &[], token_help: "A personal access token with the api and read_user scopes." },
     Service { id: "gitlab-self", label: "GitLab Self-Managed", hosting: true, browser: false, gh: false, fields: &[("gitlabHost", "Host Domain", "gitlab.mycompany.com", "")], needs: &["gitlabHost"], token_help: "A personal access token with the api and read_user scopes." },
-    Service { id: "bitbucket", label: "Bitbucket", hosting: true, browser: true, gh: false, fields: &[("bitbucketUser", "Username", "only for an app password / API token", "Leave blank for an access token or a browser sign-in.")], needs: &[], token_help: "An app password (with your username) or an access token, with repository, pull request and account permissions." },
+    Service { id: "bitbucket", label: "Bitbucket", hosting: true, browser: true, gh: false, fields: &[("bitbucketUser", "Atlassian account email", "you@example.com", "Enter your Atlassian account email for a scoped API token. Leave blank for a bearer token or browser sign-in.")], needs: &[], token_help: "Use a scoped Bitbucket API token. Creating repositories requires workspace read and repository admin access. Pushing requires repository read and write access." },
     Service { id: "bitbucket-server", label: "Bitbucket Data Center", hosting: true, browser: false, gh: false, fields: &[("bitbucketServerHost", "Host Domain", "bitbucket.mycompany.com", ""), ("bitbucketServerUser", "Username", "for pushing over HTTPS", "")], needs: &["bitbucketServerHost"], token_help: "An HTTP access token with Project (Admin) and Repositories (Admin) permissions." },
     Service { id: "azure", label: "Azure DevOps", hosting: true, browser: true, gh: false, fields: &[("azureOrg", "Azure Organization", "mycompany", "")], needs: &["azureOrg"], token_help: "A personal access token with Code (read, write & manage), Work Items (read & write), Project and Team (read), Identity (read)." },
     Service { id: "azure-server", label: "Azure DevOps Server 2022", hosting: true, browser: false, gh: false, fields: &[("azureServerCollection", "Collection URL", "https://dev.example.com/tfs/DefaultCollection", "")], needs: &["azureServerCollection"], token_help: "A collection personal access token with Code and Project permissions." },
@@ -138,7 +138,7 @@ pub fn token_url(id: &str, i: &Value) -> String {
         "github-enterprise" => format!("https://{}/settings/tokens/new?scopes=repo,read:org,write:public_key&description=GitCraft", host(&g("githubEnterpriseHost"))),
         "gitlab" => "https://gitlab.com/-/user_settings/personal_access_tokens?name=GitCraft&scopes=api,read_user".into(),
         "gitlab-self" => format!("https://{}/-/user_settings/personal_access_tokens?name=GitCraft&scopes=api,read_user", host(&g("gitlabHost"))),
-        "bitbucket" => "https://bitbucket.org/account/settings/app-passwords/new".into(),
+        "bitbucket" => "https://id.atlassian.com/manage-profile/security/api-tokens".into(),
         "bitbucket-server" => format!("https://{}/plugins/servlet/access-tokens/manage", host(&g("bitbucketServerHost"))),
         "azure" => format!("https://dev.azure.com/{}/_usersSettings/tokens", g("azureOrg").trim()),
         "azure-server" => format!("https://{}/_usersSettings/tokens", host(&g("azureServerCollection"))),
@@ -154,7 +154,7 @@ pub fn token_url(id: &str, i: &Value) -> String {
 /// The settings GitCraft uses, with their defaults, for values not saved yet.
 fn default_of(key: &str) -> Value {
     match key {
-        "autoFetchMin" => json!(5),
+        "autoFetchMin" => json!(super::DEFAULT_AUTO_FETCH_MINUTES),
         "autoPrune" | "autoUpdateSubmodules" | "rememberTabs" | "lazyLoad" | "conflictDetection" | "autoUpdate" | "ghostRefs" | "highlightRowsOnHover" | "toolbarLabels" | "showAgentsView" | "autogroupWorktreeTabs" | "spellcheck" | "notifySuccess" | "monospaceOnly" | "editorLineNumbers" | "editorSyntax" | "termDim" | "useCommitTemplate" | "sshUseAgent" | "keepGitconfigUpdated" | "worktreeWipInGraph" => json!(true),
         "defaultBranch" => json!("main"),
         "initialCommits" => json!(2000),
@@ -526,7 +526,10 @@ impl App {
                 });
             });
         });
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && self.dialog.is_none() && !ctx.egui_wants_keyboard_input() {
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape))
+            && self.dialog.as_ref().is_none_or(|dialog| dialog.suspended_for_connection())
+            && !ctx.egui_wants_keyboard_input()
+        {
             close = true;
         }
         if close {
@@ -777,9 +780,9 @@ impl App {
             "general" => {
                 h(ui, "General");
                 self.want_config("global", None, &["core.autocrlf", "core.longpaths"]);
-                let fetch = self.settings.num("autoFetchMin", 5.0);
+                let fetch = self.settings.num("autoFetchMin", super::DEFAULT_AUTO_FETCH_MINUTES);
                 let w = (fetch > 0.0 && fetch < 2.0).then_some("If you have many visible remotes, this may impact performance.");
-                row(ui, "Auto-Fetch Interval", "In minutes, between 0 and 60 (0 disables auto-fetch). Fetches all visible remotes.", w, None, false, |ui| self.num(ui, pui, s("autoFetchMin"), 0.0, 60.0, 90.0));
+                row(ui, "Auto-Fetch Interval", "Fetches when a repository opens, then at this interval in minutes. Set to 0 to disable auto-fetch.", w, None, false, |ui| self.num(ui, pui, s("autoFetchMin"), 0.0, 60.0, 90.0));
                 row(ui, "Auto-Prune", "", None, None, false, |ui| self.toggle(ui, s("autoPrune"), true));
                 row(ui, "Keep submodules up to date", "Automatically update all submodules after performing a Git action", None, None, false, |ui| self.toggle(ui, s("autoUpdateSubmodules"), true));
                 let b = self.settings.string("defaultBranch", "main");
@@ -1340,6 +1343,7 @@ impl App {
             app.toast(true, if method == "gh" { format!("Connected to {label} with the GitHub CLI sign-in") } else { format!("Connected to {label}") });
             app.prefs_data.statuses = None;
             app.hosting_changed();
+            app.refresh_init_connection(id);
         });
     }
 
@@ -1354,6 +1358,7 @@ impl App {
             app.toast(true, ok);
             app.prefs_data.statuses = None;
             app.hosting_changed();
+            app.refresh_init_connection(id);
         });
     }
 

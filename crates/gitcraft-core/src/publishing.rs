@@ -11,16 +11,20 @@ pub struct Target {
 }
 
 pub fn targets(service: &str) -> Result<Vec<Target>, String> {
+    let base = hosting::api_base(service);
+    if hosting::host_of(service).is_empty() || base.is_empty() || (service == "azure" && base.ends_with('/')) {
+        return Err("Configure the server or organization in Preferences > Integrations.".into());
+    }
     let get = |path: &str| {
         hosting::http(
             "GET",
-            &format!("{}{path}", hosting::api_base(service)),
+            &format!("{base}{path}"),
             &hosting::auth(service)?,
             None,
         )
     };
     let collect = |path: &str| {
-        let url = format!("{}{path}", hosting::api_base(service));
+        let url = format!("{base}{path}");
         crate::pagination::collect(&url, |url| hosting::http_page("GET", url, &hosting::auth(service)?, None))
     };
     let pairs: Vec<(String, String)> = match service {
@@ -63,23 +67,27 @@ pub fn targets(service: &str) -> Result<Vec<Target>, String> {
             destinations
         }
         "bitbucket" => {
-            let url = format!("{}/workspaces?pagelen=100", hosting::api_base(service));
-            let v = crate::pagination::collect(&url, |url| {
-                hosting::http_page("GET", url, &hosting::auth(service)?, None)
-            })?;
+            let v = collect("/user/workspaces?pagelen=100")?;
             v["values"]
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|v| Some((v["slug"].as_str()?.into(), v["name"].as_str()?.into())))
+                .filter_map(|v| {
+                    let workspace = &v["workspace"];
+                    let slug = workspace["slug"].as_str()?;
+                    Some((slug.into(), workspace["name"].as_str().unwrap_or(slug).into()))
+                })
+                .collect()
+        }
+        "bitbucket-server" => {
+            let projects = collect("/projects?limit=100")?;
+            projects["values"].as_array().into_iter().flatten()
+                .filter_map(|project| Some((project["key"].as_str()?.into(), project["name"].as_str()?.into())))
                 .collect()
         }
         "azure" | "azure-server" => {
             let version = if service == "azure" { "7.1" } else { "7.0" };
-            let url = format!("{}/_apis/projects?api-version={version}", hosting::api_base(service));
-            let v = crate::pagination::collect(&url, |url| {
-                hosting::http_page("GET", url, &hosting::auth(service)?, None)
-            })?;
+            let v = collect(&format!("/_apis/projects?api-version={version}"))?;
             v["value"]
                 .as_array()
                 .into_iter()
@@ -115,6 +123,22 @@ pub struct PublishResult {
     pub error: Option<String>,
 }
 
+pub fn visibility_options(service: &str, target: &str) -> &'static [(&'static str, &'static str)] {
+    match service {
+        "azure" | "azure-server" => &[("private", "Inherited from the project")],
+        "bitbucket-server" => &[("private", "Private")],
+        "gitlab-self" => &[("private", "Private"), ("public", "Public"), ("internal", "Internal")],
+        "github" | "github-enterprise" if target.starts_with("org:") => {
+            &[("private", "Private"), ("public", "Public"), ("internal", "Internal")]
+        }
+        _ => &[("private", "Private"), ("public", "Public")],
+    }
+}
+
+pub fn supports_description(service: &str) -> bool {
+    !matches!(service, "azure" | "azure-server" | "bitbucket-server")
+}
+
 fn create_request(r: &PublishRequest) -> Result<(String, Value), String> {
     if r.name.trim().is_empty()
         || r.name.starts_with('.')
@@ -128,10 +152,11 @@ fn create_request(r: &PublishRequest) -> Result<(String, Value), String> {
                 .into(),
         );
     }
-    let internal = r.service == "gitlab-self" ||
-        (matches!(r.service.as_str(), "github" | "github-enterprise") && r.target.starts_with("org:"));
-    if !(["private", "public"].contains(&r.visibility.as_str()) || internal && r.visibility == "internal") {
+    if !visibility_options(&r.service, &r.target).iter().any(|(id, _)| *id == r.visibility) {
         return Err("This destination does not support the selected repository visibility.".into());
+    }
+    if !r.description.is_empty() && !supports_description(&r.service) {
+        return Err("This destination does not support repository descriptions.".into());
     }
     let private = r.visibility == "private";
     Ok(match r.service.as_str() {
@@ -160,11 +185,14 @@ fn create_request(r: &PublishRequest) -> Result<(String, Value), String> {
             ("/projects".into(), body)
         }
         "bitbucket" => (format!("/repositories/{}/{}",q(&r.target),q(&r.name)),json!({"scm":"git","name":r.name,"description":r.description,"is_private":private})),
-        "azure" | "azure-server" if r.visibility=="private" && r.description.is_empty() => {
+        "bitbucket-server" if !r.target.is_empty() => (
+            format!("/projects/{}/repos", q(&r.target)),
+            json!({"name":r.name,"scmId":"git","public":false}),
+        ),
+        "azure" | "azure-server" => {
             let version = if r.service == "azure" { "7.1" } else { "7.0" };
             (format!("/{}/_apis/git/repositories?api-version={version}", q(&r.target)),json!({"name":r.name,"project":{"id":r.target}}))
         }
-        "azure" | "azure-server" => return Err("Azure repository access is inherited from its project; a repository description is not supported.".into()),
         _ => return Err("Choose a supported hosting service.".into()),
     })
 }
@@ -173,7 +201,8 @@ fn created_url(service: &str, v: &Value) -> Result<String, String> {
     let url=match service {
         "github" | "github-enterprise" | "gitea" | "forgejo" | "codeberg" => v["clone_url"].as_str(),
         "gitlab" | "gitlab-self" => v["http_url_to_repo"].as_str(),
-        "bitbucket" => v["links"]["clone"].as_array().and_then(|links|links.iter().find(|v|v["name"]=="https")).and_then(|v|v["href"].as_str()),
+        "bitbucket" | "bitbucket-server" => v["links"]["clone"].as_array().into_iter().flatten()
+            .filter_map(|link| link["href"].as_str()).find(|href| href.starts_with("https://")),
         "azure" | "azure-server" => v["remoteUrl"].as_str(),
         _ => None,
     }.ok_or("The service created the repository but returned no clone URL. Check your account before trying again.")?;
@@ -205,8 +234,7 @@ fn preflight(dir: &Path, r: &PublishRequest) -> Result<(), String> {
     let head = git::run(dir, &["rev-parse", "--verify", "HEAD"]);
     if !branch.ok
         || branch.stdout.trim() != format!("refs/heads/{}", r.branch)
-        || !head.ok
-        || head.stdout.trim() != r.head
+        || (if r.head.is_empty() { head.ok } else { !head.ok || head.stdout.trim() != r.head })
     {
         return Err("The checked-out branch or commit changed. Close this panel and review the branch before publishing.".into());
     }
@@ -228,11 +256,25 @@ pub fn publish(
         let response=hosting::http("POST",&format!("{}{path}",hosting::api_base(&r.service)),&hosting::auth(&r.service)?,Some(body))
             .map_err(|error|format!("{error}\nCheck your account for the repository before retrying; a lost response can occur after creation."))?;
         let url = created_url(&r.service, &response)?;
-        if r.visibility == "internal" && response["visibility"] != "internal" {
-            return Err(format!("The service created {url} but did not confirm Internal visibility. Verify the repository's access before connecting or pushing."));
+        if !visibility_matches(r, &response) {
+            return Err(format!("The service created {url} but did not confirm the requested {} visibility. Verify the repository's access before connecting or pushing.", r.visibility));
         }
         Ok(url)
     })
+}
+
+fn visibility_matches(r: &PublishRequest, response: &Value) -> bool {
+    let private = r.visibility == "private";
+    match r.service.as_str() {
+        "azure" | "azure-server" => true,
+        "gitlab" | "gitlab-self" => response["visibility"] == r.visibility,
+        "github" | "github-enterprise" if r.visibility == "internal" => response["visibility"] == "internal",
+        "github" | "github-enterprise" => response["private"] == private
+            && response["visibility"].as_str().is_none_or(|visibility| visibility == r.visibility),
+        "bitbucket" => response["is_private"] == private,
+        "bitbucket-server" => response["public"] == !private,
+        _ => response["private"] == private,
+    }
 }
 
 fn publish_with(
@@ -304,6 +346,9 @@ fn finish(dir: &Path, r: &PublishRequest, url: &str, jobs: &crate::jobs::Jobs) -
         return result;
     }
     result.connected = true;
+    if r.head.is_empty() {
+        return result;
+    }
     // Pin the object and destination even if another Git process changes branches during the request.
     let destination = format!("refs/heads/{}", r.branch);
     let spec = format!("{}:{destination}", r.head);
@@ -344,6 +389,44 @@ fn finish(dir: &Path, r: &PublishRequest, url: &str, jobs: &crate::jobs::Jobs) -
         }
     }
     result
+}
+
+/// Initialize the local repository before creating the remote. Keep the local copy and
+/// report the stage that failed if the service cannot be reached or the first push fails.
+pub fn initialize(
+    engine: &crate::actions::Engine,
+    parent: &str,
+    options: crate::manage::InitOptions,
+    request: PublishRequest,
+) -> Result<crate::manage::InitOutcome, String> {
+    hosting::auth(&request.service)?;
+    initialize_with(engine, parent, options, request, |dir, request| publish(dir, request, &engine.jobs))
+}
+
+fn initialize_with(
+    engine: &crate::actions::Engine,
+    parent: &str,
+    options: crate::manage::InitOptions,
+    mut request: PublishRequest,
+    publish: impl FnOnce(&Path, &PublishRequest) -> Result<PublishResult, String>,
+) -> Result<crate::manage::InitOutcome, String> {
+    create_request(&request)?;
+    let mut local = crate::session::init_repo(engine, parent, &request.name, Some(options))?;
+    let dir = Path::new(&local.path);
+    let branch = git::run(dir, &["symbolic-ref", "HEAD"]);
+    request.branch = branch.stdout.trim().strip_prefix("refs/heads/").unwrap_or_default().to_owned();
+    request.head = git::run(dir, &["rev-parse", "--verify", "HEAD"]).stdout.trim().to_owned();
+    let warning = match publish(dir, &request) {
+        Ok(result) => result.error.map(|error| format!("The hosted repository was created at {}, but setup did not finish. {error}", result.url)),
+        Err(error) => Some(format!("The local repository was created. Publishing did not finish. {error}")),
+    };
+    if let Some(warning) = warning {
+        local.warning = Some(match local.warning {
+            Some(local) => format!("{warning}\n{local}"),
+            None => warning,
+        });
+    }
+    Ok(local)
 }
 
 #[cfg(test)]
@@ -442,6 +525,13 @@ mod tests {
         let (path, body) = create_request(&r).unwrap();
         assert!(path.contains("workspace%20a/_apis/git/repositories"));
         assert_eq!(body["project"]["id"], "workspace a");
+        r.service = "bitbucket-server".into();
+        r.target = "PROJ".into();
+        let (path, body) = create_request(&r).unwrap();
+        assert_eq!(path, "/projects/PROJ/repos");
+        assert_eq!(body["public"], false);
+        assert!(visibility_matches(&r, &json!({"public":false})));
+        assert!(!visibility_matches(&r, &json!({"public":true})));
         r.name = "../bad".into();
         assert!(create_request(&r).is_err());
         assert!(created_url(
@@ -463,6 +553,27 @@ mod tests {
             "https://gitlab.com/a/b.git"
         );
         assert_eq!(created_url("bitbucket",&json!({"links":{"clone":[{"name":"ssh","href":"ssh://example"},{"name":"https","href":"https://bitbucket.org/a/b.git"}]}})).unwrap(),"https://bitbucket.org/a/b.git");
+    }
+
+    #[test]
+    fn initializes_locally_before_publishing_and_preserves_local_copy_on_failure() {
+        let (_, request) = fixture();
+        let parent = tempfile::tempdir().unwrap();
+        let parent_path = parent.path().to_str().unwrap();
+        let engine = crate::actions::Engine::default();
+        let options = || crate::manage::InitOptions { branch: "custom".into(), ..Default::default() };
+        let name = request.name.clone();
+        let outcome = initialize_with(&engine, parent_path, options(), request.clone(), |dir, request| {
+            assert_eq!(dir, parent.path().join(&name));
+            assert_eq!(request.branch, "custom");
+            assert!(preflight(dir, request).is_ok());
+            Err("The account cannot create repositories.".into())
+        }).unwrap();
+        assert!(Path::new(&outcome.path).join(".git").is_dir());
+        assert!(outcome.warning.unwrap().contains("The local repository was created"));
+        assert!(initialize_with(&engine, parent_path, options(), request, |_, _| {
+            panic!("must check the local destination before publishing")
+        }).is_err());
     }
     #[test]
     fn local_preflight_refuses_stale_branch_and_existing_remote_before_creation() {
