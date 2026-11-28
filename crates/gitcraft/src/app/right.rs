@@ -46,6 +46,12 @@ pub enum WorkTab {
     Patch,
 }
 
+/// The heights the work form can take, leaving the file lists at least 60 px.
+const WORK_FORM_MIN: f32 = 120.0;
+const WORK_FORM_MAX: f32 = 800.0;
+const WORK_FORM_DEFAULT: f32 = 300.0;
+const WORK_FORM_HEIGHT: &str = "workFormHeight";
+
 /// Files changed in the index and the working folder, counted once.
 pub fn working_changes(s: &WorkStatus) -> (usize, usize, usize, usize) {
     let mut files: BTreeMap<&str, &FileChange> = s.staged.iter().map(|f| (f.path.as_str(), f)).collect();
@@ -446,13 +452,16 @@ impl App {
         });
         self.view_switch(ui, later);
         // The lists, above the commit box.
-        let box_h = match wu.tab {
-            WorkTab::Commit => 300.0 + if wu.options_open { 110.0 } else { 0.0 },
-            WorkTab::Stash => 220.0,
-            WorkTab::Patch => 230.0,
-        };
+        let options_extra = if wu.tab == WorkTab::Commit && wu.options_open { 110.0 } else { 0.0 };
+        let line_h = ui.fonts_mut(|f| f.row_height(&FontId::proportional(13.5))) + ui.spacing().extra_text_line_spacing;
+        let min_h = min_form_height(wu.tab, wu.options_open, line_h);
+        let base_min = (min_h - options_extra).max(WORK_FORM_MIN);
+        let base_h = (self.settings.num(WORK_FORM_HEIGHT, WORK_FORM_DEFAULT as f64) as f32).clamp(base_min, WORK_FORM_MAX);
+        let box_h = base_h + options_extra;
+        let default_h = WORK_FORM_DEFAULT + options_extra;
         const FILE_SECTION_HEIGHT: f32 = 30.0;
-        let lists_h = work_list_height(ui.available_height(), box_h);
+        let form_min = 50.0 + bottom_fixed_height(wu.tab, wu.options_open);
+        let lists_h = work_list_height(ui.available_height(), box_h, form_min);
         let mut events: Vec<(bool, FileEvent)> = Vec::new();
         let active_unstaged = r.ui.diff.as_ref().filter(|d| d.source == DiffSource::Unstaged).map(|d| d.file.clone());
         let active_staged = r.ui.diff.as_ref().filter(|d| d.source == DiffSource::Staged).map(|d| d.file.clone());
@@ -589,38 +598,57 @@ impl App {
                 }
             }
         }
-        work_form_scroll(tab, ui.available_height()).show(ui, |ui| {
-            // Grip, then the Commit / Stash / Patch tabs.
-            let w = ui.available_width();
-            let (grip, _) = ui.allocate_exact_size(vec2(w, 20.0), Sense::hover());
-            ui.painter().rect_filled(Rect::from_center_size(grip.center(), vec2(100.0, 4.0)), CornerRadius::same(2), c.white(0.1));
-            let (tabs, _) = ui.allocate_exact_size(vec2(w, 30.0), Sense::hover());
-            ui.painter().line_segment([tabs.left_bottom(), tabs.right_bottom()], Stroke::new(1.0, c.white(0.1)));
-            let mut tx = tabs.left() + 8.0;
-            for (t, icon, label) in [(WorkTab::Commit, Icon::GitCommitHorizontal, "Commit"), (WorkTab::Stash, Icon::Download, "Stash"), (WorkTab::Patch, Icon::FileDown, "Patch")] {
-                let on = wu.tab == t;
-                let show_label = on || t == WorkTab::Commit;
-                let g = ui.painter().layout_no_wrap(label.to_owned(), FontId::proportional(14.0), c.white(1.0));
-                let tw = 20.0 + 15.0 + if show_label { 6.0 + g.size().x } else { 0.0 };
-                let tr = Rect::from_min_size(pos2(tx, tabs.top()), vec2(tw, 30.0));
-                let resp = ui.interact(tr, ui.scope_id().with(("worktab", label)), Sense::click());
-                if on {
-                    ui.painter().rect(tr, CornerRadius { nw: 3, ne: 3, sw: 0, se: 0 }, c.field, Stroke::new(1.0, c.white(0.1)), StrokeKind::Inside);
-                    ui.painter().line_segment([tr.left_bottom() + vec2(1.0, 0.0), tr.right_bottom() - vec2(1.0, 0.0)], Stroke::new(1.0, c.field));
-                }
-                let ink = if on || resp.hovered() { c.white(1.0) } else { c.white(0.7) };
-                icons::paint(ui, Rect::from_min_size(pos2(tr.left() + 10.0, tr.center().y - 7.5), Vec2::splat(15.0)), icon, 15.0, ink);
-                if show_label {
-                    ui.painter().text(pos2(tr.left() + 31.0, tr.center().y), Align2::LEFT_CENTER, label, FontId::proportional(14.0), ink);
-                }
-                if resp.tip(label).clicked() {
-                    wu.tab = t;
-                }
-                tx += tw + 2.0;
+        // Grip, then the Commit / Stash / Patch tabs.
+        let form_top = ui.cursor().top();
+        let form_h = ui.available_height().min((ui.clip_rect().bottom() - form_top).max(0.0));
+        let grip_w = ui.available_width();
+        let (grip, _) = ui.allocate_exact_size(vec2(grip_w, 20.0), Sense::hover());
+        let response = ui.interact(grip, egui::Id::NULL.with(("work_form_split", tab)), Sense::drag());
+        let lit = response.hovered() || response.dragged();
+        let bar = Rect::from_center_size(grip.center(), vec2(100.0, 4.0));
+        ui.painter().rect_filled(bar, CornerRadius::same(2), if lit { ACCENT } else { c.white(0.1) });
+        if lit {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        }
+        if let Some(height) = super::screen::dragged_details_size(&response, box_h, false) {
+            let base = clamped_base_height(height, min_h, options_extra);
+            later.push(Box::new(move |app| app.settings.set(WORK_FORM_HEIGHT, base.round())));
+        }
+        let push = self.settings.flag("pushAfterCommit", false);
+        let mut commit_now: Option<bool> = None;
+        // The tabs and the bottom controls stay visible; only the form between them scrolls.
+        let w = ui.available_width();
+        let (tabs, _) = ui.allocate_exact_size(vec2(w, 30.0), Sense::hover());
+        ui.painter().line_segment([tabs.left_bottom(), tabs.right_bottom()], Stroke::new(1.0, c.white(0.1)));
+        let mut tx = tabs.left() + 8.0;
+        for (t, icon, label) in [(WorkTab::Commit, Icon::GitCommitHorizontal, "Commit"), (WorkTab::Stash, Icon::Download, "Stash"), (WorkTab::Patch, Icon::FileDown, "Patch")] {
+            let on = wu.tab == t;
+            let show_label = on || t == WorkTab::Commit;
+            let g = ui.painter().layout_no_wrap(label.to_owned(), FontId::proportional(14.0), c.white(1.0));
+            let tw = 20.0 + 15.0 + if show_label { 6.0 + g.size().x } else { 0.0 };
+            let tr = Rect::from_min_size(pos2(tx, tabs.top()), vec2(tw, 30.0));
+            let resp = ui.interact(tr, ui.scope_id().with(("worktab", label)), Sense::click());
+            if on {
+                ui.painter().rect(tr, CornerRadius { nw: 3, ne: 3, sw: 0, se: 0 }, c.field, Stroke::new(1.0, c.white(0.1)), StrokeKind::Inside);
+                ui.painter().line_segment([tr.left_bottom() + vec2(1.0, 0.0), tr.right_bottom() - vec2(1.0, 0.0)], Stroke::new(1.0, c.field));
             }
-            let push = self.settings.flag("pushAfterCommit", false);
-            let mut commit_now: Option<bool> = None;
-            egui::Frame::new().inner_margin(egui::Margin { left: 8, right: 8, top: 10, bottom: 8 }).show(ui, |ui| {
+            let ink = if on || resp.hovered() { c.white(1.0) } else { c.white(0.7) };
+            icons::paint(ui, Rect::from_min_size(pos2(tr.left() + 10.0, tr.center().y - 7.5), Vec2::splat(15.0)), icon, 15.0, ink);
+            if show_label {
+                ui.painter().text(pos2(tr.left() + 31.0, tr.center().y), Align2::LEFT_CENTER, label, FontId::proportional(14.0), ink);
+            }
+            if resp.tip(label).clicked() {
+                wu.tab = t;
+            }
+            tx += tw + 2.0;
+        }
+        // The bottom controls keep their place; their height is known from the last frame.
+        let bottom_id = egui::Id::NULL.with(("work_bottom_h", tab, work_tab_id(wu.tab), wu.tab == WorkTab::Commit && wu.options_open));
+        let bottom_estimate = if wu.tab == WorkTab::Commit { if wu.options_open { 200.0 } else { 88.0 } } else { 56.0 };
+        let bottom_h = ui.data(|d| d.get_temp::<f32>(bottom_id)).unwrap_or(bottom_estimate).min((form_h - 50.0).max(0.0));
+        let middle_h = (form_h - 20.0 - 30.0 - bottom_h).max(0.0);
+        work_form_scroll(tab, middle_h).show(ui, |ui| {
+            egui::Frame::new().inner_margin(egui::Margin { left: 8, right: 8, top: 10, bottom: 0 }).show(ui, |ui| {
                 ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
                 match wu.tab {
                     WorkTab::Commit => {
@@ -663,7 +691,8 @@ impl App {
                                     later.push(Box::new(move |app| app.ai_commit_message(tab)));
                                 }
                             });
-                            let dresp = spelling::edit(ui, &mut draft.description, description_id, spelling::Field::Description, language, &mut wu.description_spelling);
+                            let rows = description_rows(form_h, default_h, line_h);
+                            let dresp = spelling::edit(ui, &mut draft.description, description_id, spelling::Field::Description(rows), language, &mut wu.description_spelling);
                             if dresp.changed() {
                                 draft_changed = true;
                             }
@@ -689,52 +718,11 @@ impl App {
                                 wu.commit_ai_error = None;
                             }
                         }
-                        ui.horizontal(|ui| {
-                            let (cr, cresp) = ui.allocate_exact_size(vec2(14.0, 20.0), Sense::click());
-                            widgets::chevron(ui, cr, wu.options_open, 14.0, c.white(0.7));
-                            let resp = ui.add(egui::Label::new(egui::RichText::new("Commit options").size(13.5).color(c.white(0.7))).sense(Sense::click()));
-                            if resp.clicked() || cresp.clicked() {
-                                wu.options_open = !wu.options_open;
-                            }
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if widgets::button(ui, Kind::Ai, Some(Icon::Sparkles), "Compose with AI", 24.0, true).tip("Split your changes into focused commits with AI").clicked() {
-                                    later.push(Box::new(move |app| app.compose_commits(tab)));
-                                }
-                                if Self::ai_button(ui, "Explain the working changes with AI").clicked() {
-                                    later.push(Box::new(move |app| app.explain_working(tab)));
-                                }
-                            });
-                        });
-                        if wu.options_open {
-                            ui.horizontal(|ui| {
-                                ui.add_space(20.0);
-                                let mut push = push;
-                                if widgets::checkbox(ui, &mut push, "Push after committing", 12.5).clicked() {
-                                    later.push(Box::new(move |app| app.settings.set("pushAfterCommit", push)));
-                                }
-                            });
-                            ui.horizontal(|ui| {
-                                ui.add_space(20.0);
-                                ui.label(egui::RichText::new("Co-authors:").size(12.5).color(c.white(0.8)));
-                                let w = ui.available_width();
-                                widgets::field(ui, &mut wu.coauthors, "Name <email>, …", w, 22.0, 12.0).tip("Adds a Co-authored-by line for each person (separate several with commas)");
-                            });
-                            ui.horizontal(|ui| {
-                                ui.add_space(20.0);
-                                let mut skip = wu.skip_hooks.unwrap_or_else(|| self.settings.flag("skipHooks", false));
-                                if widgets::checkbox(ui, &mut skip, "Skip Git hooks", 12.5).clicked() {
-                                    wu.skip_hooks = Some(skip);
-                                }
-                            });
-                            ui.horizontal(|ui| {
-                                ui.add_space(20.0);
-                                widgets::checkbox(ui, &mut wu.sign_off, "Sign off (DCO)", 12.5).tip("Add a Signed-off-by trailer using your Git identity");
-                            });
-                        }
                     }
                     WorkTab::Patch => {
                         egui::Frame::new().fill(c.field).stroke(Stroke::new(1.0, c.white(0.1))).corner_radius(CornerRadius::same(3)).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
                             ui.set_width(ui.available_width());
+                            ui.set_min_height(ui.available_height());
                             ui.add(egui::Label::new(egui::RichText::new("Share your uncommitted changes as a .patch file, without pushing a branch. Untracked files must be staged first. Anyone can apply it with GitCraft or git apply.").size(12.5).color(c.fg2)).wrap());
                             ui.add_space(6.0);
                             if widgets::link(ui, "Apply a patch file…", 12.5).clicked() {
@@ -745,6 +733,7 @@ impl App {
                     WorkTab::Stash => {
                         egui::Frame::new().fill(c.field).stroke(Stroke::new(1.0, c.white(0.1))).corner_radius(CornerRadius::same(3)).show(ui, |ui| {
                             ui.spacing_mut().item_spacing = Vec2::ZERO;
+                            ui.set_min_height(ui.available_height());
                             ui.horizontal(|ui| {
                                 ui.add_space(10.0);
                                 let w = ui.available_width() - 26.0 - 8.0;
@@ -761,61 +750,115 @@ impl App {
                         });
                     }
                 }
-                // The big green button.
-                let (label, enabled) = match wu.tab {
-                    WorkTab::Patch if total == 0 => ("No Changes for a Patch".to_owned(), false),
-                    WorkTab::Patch => (format!("Save {total} File Change{} as a Patch", if total == 1 { "" } else { "s" }), true),
-                    WorkTab::Stash if total == 0 => ("No Changes to Stash".to_owned(), false),
-                    WorkTab::Stash => (format!("Stash Changes to {total} File{}", if total == 1 { "" } else { "s" }), true),
-                    _ if !conflicted.is_empty() => (format!("Resolve {} Conflict{} to Commit", conflicted.len(), if conflicted.len() == 1 { "" } else { "s" }), false),
-                    _ if merging && !draft.summary.trim().is_empty() => ("Commit and Merge".to_owned(), true),
-                    _ if staged.is_empty() && !draft.amend => ("Stage Changes to Commit".to_owned(), false),
-                    _ if draft.summary.trim().is_empty() => ("Type a Message to Commit".to_owned(), false),
-                    _ if draft.amend => (format!("Amend Previous Commit{}", if push { " and Push" } else { "" }), true),
-                    _ => (format!("Commit Changes to {} File{}{}", staged.len(), if staged.len() == 1 { "" } else { "s" }, if push { " and Push" } else { "" }), true),
-                };
-                let w = ui.available_width();
-                let (rect, resp) = ui.allocate_exact_size(vec2(w, 40.0), if enabled { Sense::click() } else { Sense::hover() });
-                let (fill, stroke, ink) = if enabled {
-                    (GOOD.gamma_multiply(if resp.hovered() { 0.35 } else { 0.25 }), GOOD, c.white(1.0))
-                } else {
-                    (GOOD.gamma_multiply(0.1), GOOD.gamma_multiply(0.25), c.white(0.45))
-                };
-                ui.painter().rect(rect, CornerRadius::same(3), fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
-                let g = ui.painter().layout_no_wrap(label, super::fonts::semibold(13.5), ink);
-                let x0 = rect.center().x - (g.size().x + 23.0) / 2.0;
-                icons::paint(ui, Rect::from_min_size(pos2(x0, rect.center().y - 7.5), Vec2::splat(15.0)), Icon::GitCommitHorizontal, 15.0, ink);
-                ui.painter().galley(pos2(x0 + 23.0, rect.center().y - g.size().y / 2.0), g, ink);
-                if resp.clicked() {
-                    match wu.tab {
-                        WorkTab::Patch => {
-                            let name = super::patches::patch_name(if draft.summary.is_empty() { &branch } else { &draft.summary });
-                            later.push(Box::new(move |app| app.save_patch(tab, Vec::new(), &name)));
-                        }
-                        WorkTab::Stash => {
-                            // The title stays while Git runs and if it fails; it is cleared once the stash is made.
-                            let message = wu.stash_message.clone();
-                            later.push(Box::new(move |app| app.act(tab, Action::Stash { message })));
-                        }
-                        WorkTab::Commit => commit_now = Some(false),
-                    }
-                }
-                if let Some(all) = commit_now
-                    && wu.tab == WorkTab::Commit
-                    && (all || enabled)
-                {
-                    // The summary typed this frame is stored first, so the commit uses what was submitted rather than the
-                    // draft as it was before the last key press.
-                    let (stored_path, typed) = (path.clone(), draft_changed.then(|| draft.clone()));
-                    later.push(Box::new(move |app| {
-                        if let Some(typed) = typed {
-                            app.set_draft(&stored_path, typed);
-                        }
-                        app.commit_from_wip(tab, all);
-                    }));
-                }
             });
         });
+        // The options and the big green button keep their place at the bottom of the form.
+        let bottom = egui::Frame::new().inner_margin(egui::Margin { left: 8, right: 8, top: 8, bottom: 8 }).show(ui, |ui| {
+            ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+            if wu.tab == WorkTab::Commit {
+                ui.horizontal(|ui| {
+                    let (cr, cresp) = ui.allocate_exact_size(vec2(14.0, 20.0), Sense::click());
+                    widgets::chevron(ui, cr, wu.options_open, 14.0, c.white(0.7));
+                    let resp = ui.add(egui::Label::new(egui::RichText::new("Commit options").size(13.5).color(c.white(0.7))).sense(Sense::click()));
+                    if resp.clicked() || cresp.clicked() {
+                        wu.options_open = !wu.options_open;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if widgets::button(ui, Kind::Ai, Some(Icon::Sparkles), "Compose with AI", 24.0, true).tip("Split your changes into focused commits with AI").clicked() {
+                            later.push(Box::new(move |app| app.compose_commits(tab)));
+                        }
+                        if Self::ai_button(ui, "Explain the working changes with AI").clicked() {
+                            later.push(Box::new(move |app| app.explain_working(tab)));
+                        }
+                    });
+                });
+                if wu.options_open {
+                    let options_h = (form_h - 50.0 - bottom_fixed_height(WorkTab::Commit, true)).max(0.0);
+                    let mut rows = |ui: &mut Ui| {
+                        ui.horizontal(|ui| {
+                            ui.add_space(20.0);
+                            let mut push = push;
+                            if widgets::checkbox(ui, &mut push, "Push after committing", 12.5).clicked() {
+                                later.push(Box::new(move |app| app.settings.set("pushAfterCommit", push)));
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.add_space(20.0);
+                            ui.label(egui::RichText::new("Co-authors:").size(12.5).color(c.white(0.8)));
+                            let w = ui.available_width();
+                            widgets::field(ui, &mut wu.coauthors, "Name <email>, …", w, 22.0, 12.0).tip("Adds a Co-authored-by line for each person (separate several with commas)");
+                        });
+                        ui.horizontal(|ui| {
+                            ui.add_space(20.0);
+                            let mut skip = wu.skip_hooks.unwrap_or_else(|| self.settings.flag("skipHooks", false));
+                            if widgets::checkbox(ui, &mut skip, "Skip Git hooks", 12.5).clicked() {
+                                wu.skip_hooks = Some(skip);
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.add_space(20.0);
+                            widgets::checkbox(ui, &mut wu.sign_off, "Sign off (DCO)", 12.5).tip("Add a Signed-off-by trailer using your Git identity");
+                        });
+                    };
+                    if options_h > 0.0 {
+                        egui::ScrollArea::vertical().id_salt(("work_options", tab)).max_height(options_h).auto_shrink([false, true]).show(ui, |ui| rows(ui));
+                    }
+                }
+            }
+            let (label, enabled) = match wu.tab {
+                WorkTab::Patch if total == 0 => ("No Changes for a Patch".to_owned(), false),
+                WorkTab::Patch => (format!("Save {total} File Change{} as a Patch", if total == 1 { "" } else { "s" }), true),
+                WorkTab::Stash if total == 0 => ("No Changes to Stash".to_owned(), false),
+                WorkTab::Stash => (format!("Stash Changes to {total} File{}", if total == 1 { "" } else { "s" }), true),
+                _ if !conflicted.is_empty() => (format!("Resolve {} Conflict{} to Commit", conflicted.len(), if conflicted.len() == 1 { "" } else { "s" }), false),
+                _ if merging && !draft.summary.trim().is_empty() => ("Commit and Merge".to_owned(), true),
+                _ if staged.is_empty() && !draft.amend => ("Stage Changes to Commit".to_owned(), false),
+                _ if draft.summary.trim().is_empty() => ("Type a Message to Commit".to_owned(), false),
+                _ if draft.amend => (format!("Amend Previous Commit{}", if push { " and Push" } else { "" }), true),
+                _ => (format!("Commit Changes to {} File{}{}", staged.len(), if staged.len() == 1 { "" } else { "s" }, if push { " and Push" } else { "" }), true),
+            };
+            let w = ui.available_width();
+            let (rect, resp) = ui.allocate_exact_size(vec2(w, 40.0), if enabled { Sense::click() } else { Sense::hover() });
+            let (fill, stroke, ink) = if enabled {
+                (GOOD.gamma_multiply(if resp.hovered() { 0.35 } else { 0.25 }), GOOD, c.white(1.0))
+            } else {
+                (GOOD.gamma_multiply(0.1), GOOD.gamma_multiply(0.25), c.white(0.45))
+            };
+            ui.painter().rect(rect, CornerRadius::same(3), fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
+            let g = ui.painter().layout_no_wrap(label, super::fonts::semibold(13.5), ink);
+            let x0 = rect.center().x - (g.size().x + 23.0) / 2.0;
+            icons::paint(ui, Rect::from_min_size(pos2(x0, rect.center().y - 7.5), Vec2::splat(15.0)), Icon::GitCommitHorizontal, 15.0, ink);
+            ui.painter().galley(pos2(x0 + 23.0, rect.center().y - g.size().y / 2.0), g, ink);
+            if resp.clicked() {
+                match wu.tab {
+                    WorkTab::Patch => {
+                        let name = super::patches::patch_name(if draft.summary.is_empty() { &branch } else { &draft.summary });
+                        later.push(Box::new(move |app| app.save_patch(tab, Vec::new(), &name)));
+                    }
+                    WorkTab::Stash => {
+                        // The title stays while Git runs and if it fails; it is cleared once the stash is made.
+                        let message = wu.stash_message.clone();
+                        later.push(Box::new(move |app| app.act(tab, Action::Stash { message })));
+                    }
+                    WorkTab::Commit => commit_now = Some(false),
+                }
+            }
+            if let Some(all) = commit_now
+                && wu.tab == WorkTab::Commit
+                && (all || enabled)
+            {
+                // The summary typed this frame is stored first, so the commit uses what was submitted rather than the
+                // draft as it was before the last key press.
+                let (stored_path, typed) = (path.clone(), draft_changed.then(|| draft.clone()));
+                later.push(Box::new(move |app| {
+                    if let Some(typed) = typed {
+                        app.set_draft(&stored_path, typed);
+                    }
+                    app.commit_from_wip(tab, all);
+                }));
+            }
+        });
+        ui.data_mut(|d| d.insert_temp(bottom_id, bottom.response.rect.height()));
         if draft_changed {
             later.push(Box::new(move |app| app.set_draft(&path, draft)));
         }
@@ -1201,9 +1244,45 @@ impl App {
     }
 }
 
-fn work_list_height(available: f32, box_h: f32) -> f32 {
+fn work_list_height(available: f32, box_h: f32, form_min: f32) -> f32 {
     let available = available.max(0.0);
-    (available - box_h).max(60.0_f32.min(available / 2.0))
+    let lists = (available - box_h).max(60.0_f32.min(available / 2.0));
+    lists.min((available - form_min).max(0.0))
+}
+
+/// The footer height besides the optional options fields.
+fn bottom_fixed_height(tab: WorkTab, options_open: bool) -> f32 {
+    match tab {
+        WorkTab::Commit if options_open => 96.0,
+        WorkTab::Commit => 88.0,
+        WorkTab::Stash | WorkTab::Patch => 56.0,
+    }
+}
+
+fn work_tab_id(tab: WorkTab) -> u8 {
+    match tab {
+        WorkTab::Commit => 0,
+        WorkTab::Stash => 1,
+        WorkTab::Patch => 2,
+    }
+}
+
+fn default_form_height(tab: WorkTab, options_open: bool) -> f32 {
+    WORK_FORM_DEFAULT + if tab == WorkTab::Commit && options_open { 110.0 } else { 0.0 }
+}
+
+fn clamped_base_height(height: f32, min_h: f32, options_extra: f32) -> f32 {
+    (height - options_extra).clamp((min_h - options_extra).max(WORK_FORM_MIN), WORK_FORM_MAX)
+}
+
+/// The form cannot shrink past the controls and two lines of text.
+fn min_form_height(tab: WorkTab, options_open: bool, line_h: f32) -> f32 {
+    (default_form_height(tab, options_open) - 2.0 * line_h).max(WORK_FORM_MIN)
+}
+
+/// The description grows by the rows the form gained above its default height.
+fn description_rows(form_h: f32, default_h: f32, line_h: f32) -> usize {
+    (4.0 + (form_h - default_h) / line_h.max(1.0)).floor().max(2.0) as usize
 }
 
 fn work_form_scroll(tab: u64, height: f32) -> egui::ScrollArea {
@@ -1226,12 +1305,50 @@ mod tests {
     #[test]
     fn short_work_panel_leaves_room_for_the_form() {
         let available: f32 = 32.0;
-        let lists_h = work_list_height(available, 300.0);
+        let lists_h = work_list_height(available, 300.0, 0.0);
         assert!(lists_h < available, "the form must have a visible viewport");
         assert_eq!(lists_h, 16.0);
-        assert_eq!(work_list_height(0.0, 300.0), 0.0);
-        assert_eq!(work_list_height(600.0, 300.0), 300.0);
-        assert_eq!(work_list_height(150.0, 410.0), 60.0);
+        assert_eq!(work_list_height(0.0, 300.0, 0.0), 0.0);
+        assert_eq!(work_list_height(600.0, 300.0, 0.0), 300.0);
+        assert_eq!(work_list_height(150.0, 410.0, 0.0), 60.0);
+    }
+
+    #[test]
+    fn work_list_height_follows_a_resized_form() {
+        assert_eq!(work_list_height(600.0, 400.0, 0.0), 200.0);
+        assert_eq!(work_list_height(600.0, 120.0, 0.0), 480.0);
+        assert_eq!(work_list_height(600.0, 900.0, 0.0), 60.0);
+        assert_eq!(work_list_height(200.0, 300.0, 146.0), 54.0);
+        assert_eq!(work_list_height(140.0, 300.0, 146.0), 0.0);
+    }
+
+    #[test]
+    fn form_heights_keep_their_defaults_and_limits() {
+        assert_eq!(work_tab_id(WorkTab::Commit), 0);
+        assert_eq!(work_tab_id(WorkTab::Stash), 1);
+        assert_eq!(work_tab_id(WorkTab::Patch), 2);
+        assert_eq!(default_form_height(WorkTab::Commit, false), 300.0);
+        assert_eq!(default_form_height(WorkTab::Commit, true), 410.0);
+        assert_eq!(default_form_height(WorkTab::Stash, false), 300.0);
+        assert_eq!(default_form_height(WorkTab::Patch, false), 300.0);
+        assert_eq!(min_form_height(WorkTab::Commit, false, 18.0), 264.0);
+        assert_eq!(min_form_height(WorkTab::Commit, true, 18.0), 374.0);
+        assert_eq!(min_form_height(WorkTab::Stash, false, 18.0), 264.0);
+        assert_eq!(bottom_fixed_height(WorkTab::Commit, false), 88.0);
+        assert_eq!(bottom_fixed_height(WorkTab::Commit, true), 96.0);
+        assert_eq!(bottom_fixed_height(WorkTab::Stash, false), 56.0);
+        assert_eq!(clamped_base_height(10.0, 264.0, 0.0), 264.0);
+        assert_eq!(clamped_base_height(900.0, 264.0, 0.0), WORK_FORM_MAX);
+        assert_eq!(clamped_base_height(320.0, 264.0, 0.0), 320.0);
+        assert_eq!(clamped_base_height(910.0, 374.0, 110.0), WORK_FORM_MAX);
+    }
+
+    #[test]
+    fn description_grows_with_the_form() {
+        assert_eq!(description_rows(300.0, 300.0, 18.0), 4);
+        assert_eq!(description_rows(390.0, 300.0, 18.0), 9);
+        assert_eq!(description_rows(250.0, 300.0, 18.0), 2);
+        assert_eq!(description_rows(300.0, 410.0, 18.0), 2);
     }
 
     #[test]

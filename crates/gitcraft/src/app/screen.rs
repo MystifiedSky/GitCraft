@@ -174,7 +174,7 @@ impl App {
     }
 }
 
-fn dragged_details_size(response: &egui::Response, size: f32, vertical: bool) -> Option<f32> {
+pub(super) fn dragged_details_size(response: &egui::Response, size: f32, vertical: bool) -> Option<f32> {
     let delta = response.total_drag_delta()?;
     let id = response.id.with("start_size");
     let started = response.drag_started();

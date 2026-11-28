@@ -87,6 +87,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
+- Drag the bar above the Commit, Stash and Patch tabs to resize the form against the file lists; the same height is kept for all three tabs, the text area grows with the form, and the tabs, options and commit button stay visible. ([#62](https://github.com/MystifiedSky/GitCraft/pull/62))
 - Generate an overall commit message for large change sets using a file summary and selected excerpts.
 - Keep AI commit-message errors visible beside the commit draft, and report an empty AI answer without replacing the draft.
 - Refresh remote branches in the graph when repositories open and on their own fetch schedules, even when another branch is checked out.

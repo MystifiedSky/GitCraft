@@ -102,7 +102,7 @@ fn misspellings(dictionary: &Dictionary, text: &str) -> Vec<Range<usize>> {
 
 pub(super) enum Field {
     Summary(f32),
-    Description,
+    Description(usize),
 }
 
 pub(super) fn edit(
@@ -115,7 +115,7 @@ pub(super) fn edit(
 ) -> WidgetAtomResponse {
     let size = match field {
         Field::Summary(_) => 15.0,
-        Field::Description => 13.5,
+        Field::Description(_) => 13.5,
     };
     let font = FontId::proportional(size);
     let dictionary = language
@@ -166,10 +166,10 @@ pub(super) fn edit(
             .align(Align2::LEFT_CENTER)
             .min_size(vec2(width, 30.0))
             .desired_width(width),
-        Field::Description => TextEdit::multiline(text)
+        Field::Description(rows) => TextEdit::multiline(text)
             .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(10, 6)))
             .hint_text(egui::RichText::new("Description").color(p().white(0.7)))
-            .desired_rows(4)
+            .desired_rows(rows)
             .desired_width(f32::INFINITY),
     }
     .id(id)
