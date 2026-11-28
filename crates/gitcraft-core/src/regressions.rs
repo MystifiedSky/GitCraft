@@ -4,6 +4,50 @@ use crate::{actions::{Action, Engine}, git};
 use std::path::Path;
 
 #[test]
+fn auto_fetch_shows_remote_main_while_another_branch_is_checked_out() {
+    let author = fixture("gitcraft-remote-author-");
+    let remote = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let local = workspace.path().join("clone");
+    let checked = |dir: &Path, args: &[&str]| {
+        let result = git::run(dir, args);
+        assert!(result.ok, "{}", result.message());
+    };
+    checked(remote.path(), &["init", "--bare", "-qb", "main"]);
+    checked(author.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+    checked(author.path(), &["push", "-q", "origin", "main"]);
+    checked(workspace.path(), &["clone", "-q", remote.path().to_str().unwrap(), "clone"]);
+    checked(&local, &["checkout", "-qb", "skylar"]);
+    let original = head(&local);
+    let engine = Engine::default();
+    assert!(!engine.auto_fetch(&local, false).refs_changed, "an unchanged fetch needs no graph read");
+
+    checked(author.path(), &["commit", "-qm", "Remote main update", "--allow-empty"]);
+    checked(author.path(), &["push", "-q", "origin", "main"]);
+    let updated = head(author.path());
+    let fetched = engine.auto_fetch(&local, false);
+    assert!(fetched.refs_changed && fetched.error.is_none());
+    let data = git::load_view_checked(&local, 100, &git::RefView::default()).unwrap();
+    assert_eq!(data.head_branch.as_deref(), Some("skylar"));
+    assert_eq!(data.head_sha, original);
+    assert!(data.commits.iter().any(|commit| commit.sha == updated));
+    assert!(data.refs.iter().any(|r| r.full == "refs/remotes/origin/main" && r.sha == updated));
+    assert!(data.refs.iter().any(|r| r.full == "refs/heads/main" && r.sha == original));
+    assert!(!engine.auto_fetch(&local, false).refs_changed);
+
+    let missing_remote = workspace.path().join("missing.git");
+    checked(&local, &["remote", "add", "broken", missing_remote.to_str().unwrap()]);
+    checked(author.path(), &["commit", "-qm", "Another remote update", "--allow-empty"]);
+    checked(author.path(), &["push", "-q", "origin", "main"]);
+    let fetched = engine.auto_fetch(&local, false);
+    assert!(fetched.refs_changed && fetched.error.is_some(), "a failed remote must not hide updates from the other remote");
+    let data = git::load_view_checked(&local, 100, &git::RefView::default()).unwrap();
+    assert!(data.commits.iter().any(|commit| commit.sha == head(author.path())));
+    assert_eq!(data.head_branch.as_deref(), Some("skylar"));
+    assert_eq!(data.head_sha, original);
+}
+
+#[test]
 fn feature_bisect_reports_first_bad_and_restores_branch() {
     let fixture = fixture("gitcraft-bisect-");
     let dir = fixture.path();
@@ -268,6 +312,89 @@ fn discard_without_new_changes_preserves_an_existing_stash() {
     assert!(!engine.perform(&path.to_string_lossy(), Action::DiscardAll).ok);
     assert_eq!(git::run(path, &["rev-parse", "stash@{0}"]).stdout, saved);
     assert!(engine.undo_info(&path.to_string_lossy()).undo.is_none());
+}
+
+#[test]
+fn removes_only_the_selected_stale_worktree_and_keeps_its_files() {
+    let repo = fixture("gitcraft-stale-worktree-");
+    let dir = repo.path();
+    let workspace = tempfile::tempdir().unwrap();
+    let stale = workspace.path().join("stale worktree");
+    let other = workspace.path().join("other stale worktree");
+    let run = |args: &[&str]| {
+        let result = git::run(dir, args);
+        assert!(result.ok, "{}", result.message());
+    };
+    for (branch, worktree) in [("stale", &stale), ("other", &other)] {
+        run(&["worktree", "add", "-qb", branch, worktree.to_str().unwrap()]);
+        std::fs::remove_file(worktree.join(".git")).unwrap();
+    }
+    std::fs::write(stale.join("keep.txt"), b"local work").unwrap();
+    let worktree_path = || git::try_worktrees(dir).unwrap().into_iter().find(|tree| tree.branch == "stale").unwrap();
+    let selected = worktree_path();
+    assert!(selected.prunable);
+    assert!(!git::run(dir, &["worktree", "remove", "--", &selected.path]).ok);
+
+    let engine = Engine::default();
+    let forced = engine.perform(&dir.to_string_lossy(), Action::WorktreeRemove {
+        path: selected.path.clone(), force: true, stale_only: false,
+    });
+    assert!(!forced.ok && stale.join("keep.txt").is_file());
+    let result = engine.perform_for_desktop(&dir.to_string_lossy(), Action::WorktreeRemoveAndBranch {
+        path: selected.path, branch: "stale".into(), remote_branch: None, stale_only: true, force: false,
+    });
+    let crate::actions::DesktopActionResult::WorktreeRemoved(result) = result else {
+        panic!("the desktop must be told the worktree was removed");
+    };
+    assert!(result.ok, "{}", result.message);
+    assert_eq!(std::fs::read(stale.join("keep.txt")).unwrap(), b"local work");
+    let remaining = git::try_worktrees(dir).unwrap();
+    assert!(!remaining.iter().any(|tree| tree.branch == "stale"));
+    assert!(remaining.iter().any(|tree| tree.branch == "other" && tree.prunable));
+    assert!(!git::run(dir, &["show-ref", "--verify", "refs/heads/stale"]).ok);
+    assert!(engine.perform(&dir.to_string_lossy(), Action::Undo).ok);
+    assert!(git::run(dir, &["show-ref", "--verify", "refs/heads/stale"]).ok);
+}
+
+#[test]
+fn refused_worktree_removal_keeps_both_branches() {
+    let repo = fixture("gitcraft-dirty-worktree-");
+    let dir = repo.path();
+    let workspace = tempfile::tempdir().unwrap();
+    let worktree = workspace.path().join("dirty");
+    let remote = workspace.path().join("remote.git");
+    let run = |args: &[&str]| {
+        let result = git::run(dir, args);
+        assert!(result.ok, "{}", result.message());
+    };
+    run(&["init", "--bare", "-q", remote.to_str().unwrap()]);
+    run(&["remote", "add", "origin", remote.to_str().unwrap()]);
+    run(&["worktree", "add", "-qb", "topic", worktree.to_str().unwrap()]);
+    run(&["push", "-qu", "origin", "topic"]);
+    std::fs::write(worktree.join("keep.txt"), b"local work").unwrap();
+
+    let engine = Engine::default();
+    let remove = || Action::WorktreeRemoveAndBranch {
+        path: worktree.to_str().unwrap().to_owned(), branch: "topic".into(), remote_branch: Some("origin/topic".into()), stale_only: false, force: false,
+    };
+    let result = engine.perform(&dir.to_string_lossy(), remove());
+    assert!(!result.ok);
+    assert!(result.message.contains("untracked"), "{}", result.message);
+    run(&["show-ref", "--verify", "refs/heads/topic"]);
+    assert!(git::run(&remote, &["show-ref", "--verify", "refs/heads/topic"]).ok);
+    assert_eq!(std::fs::read(worktree.join("keep.txt")).unwrap(), b"local work");
+    let force = remove().force_worktree_retry(&result).expect("dirty removal should offer a force confirmation");
+    assert!(force.force_worktree_retry(&result).is_none());
+
+    let result = engine.perform(&dir.to_string_lossy(), Action::WorktreeRemove {
+        path: worktree.to_str().unwrap().into(), force: false, stale_only: true,
+    });
+    assert!(!result.ok && worktree.is_dir(), "a stale-only confirmation must preserve a connected folder");
+    let result = engine.perform(&dir.to_string_lossy(), force);
+    assert!(result.ok, "{}", result.message);
+    assert!(!worktree.exists());
+    assert!(!git::run(dir, &["show-ref", "--verify", "refs/heads/topic"]).ok);
+    assert!(!git::run(&remote, &["show-ref", "--verify", "refs/heads/topic"]).ok);
 }
 
 #[cfg(windows)]

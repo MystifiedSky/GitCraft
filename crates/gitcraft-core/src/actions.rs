@@ -212,7 +212,8 @@ pub enum Action {
     RemoteEdit { name: String, new_name: String, url: String, push_url: String },
     RemoteRemove { name: String },
     WorktreeAdd { path: String, branch: String, new_branch: bool, start: Option<String> },
-    WorktreeRemove { path: String, force: bool },
+    WorktreeRemove { path: String, force: bool, #[serde(default)] stale_only: bool },
+    WorktreeRemoveAndBranch { path: String, branch: String, remote_branch: Option<String>, stale_only: bool, #[serde(default)] force: bool },
     WorktreeLock { path: String, message: String },
     WorktreeUnlock { path: String },
     SubmoduleAdd { url: String, path: String },
@@ -270,9 +271,34 @@ pub struct ActionResult {
     pub message: String,
 }
 
+pub struct AutoFetchResult {
+    pub refs_changed: bool,
+    pub error: Option<String>,
+}
+
 pub enum DesktopActionResult {
+    /// The worktree is gone even if a subsequent branch deletion failed.
+    WorktreeRemoved(ActionResult),
     Performed(ActionResult),
     OpenWorktree { path: String, action: Option<Action> },
+}
+
+impl Action {
+    /// Git gives this refusal specifically for changes in a registered worktree.
+    pub fn force_worktree_retry(&self, result: &ActionResult) -> Option<Self> {
+        if result.ok || !result.message.contains("contains modified or untracked files, use --force to delete it") {
+            return None;
+        }
+        let mut action = self.clone();
+        match &mut action {
+            Self::WorktreeRemove { force, stale_only: false, .. }
+            | Self::WorktreeRemoveAndBranch { force, stale_only: false, .. } if !*force => {
+                *force = true;
+                Some(action)
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -799,6 +825,10 @@ impl Engine {
         let dir = Path::new(repo);
         let operation = crate::operation::lock_for(dir);
         let _guard = operation.lock().unwrap_or_else(|e| e.into_inner());
+        if let Action::WorktreeRemoveAndBranch { path, branch, remote_branch, stale_only, force } = action {
+            let (removed, result) = self.remove_worktree_and_branch(repo, dir, &path, &branch, remote_branch, stale_only, force);
+            return if removed { DesktopActionResult::WorktreeRemoved(result) } else { DesktopActionResult::Performed(result) };
+        }
         if let Some(path) = self.checkout_worktree(dir, &action) {
             let carry = match &action {
                 Action::Checkout { .. } | Action::CheckoutRemote { .. } => None,
@@ -1260,23 +1290,10 @@ impl Engine {
                 done(result, if skip { "Skipped commit" } else { "Rebase continued" })
             },
             Action::AutoFetch { prune } => {
-                let read_refs = || git::run(dir, &["for-each-ref", "--format=%(refname)%00%(objectname)%00%(symref)", "refs/remotes", "refs/tags"]);
-                let before = read_refs();
-                let mut args = vec!["fetch", "--all", "--quiet", "--no-write-fetch-head", "--no-auto-maintenance"];
-                if prune { args.push("--prune"); }
-                let mut command = git::git_command(dir, &args);
-                command.env("GCM_INTERACTIVE", "never").env("SSH_ASKPASS_REQUIRE", "never");
-                let output = crate::read_jobs::run_bounded(command, None, std::time::Duration::from_secs(30),
-                    "Auto-fetch timed out. Fetch manually to retry.");
-                self.record(&format!("git {}", args.join(" ")), &output);
-                if !output.ok {
-                    let message = if output.stderr.starts_with("Auto-fetch timed out") { output.stderr }
-                        else { "Auto-fetch failed. Fetch manually for more information.".into() };
-                    return ActionResult { ok: false, message };
-                }
-                let after = read_refs();
-                let changed = !before.ok || !after.ok || before.stdout != after.stdout;
-                ActionResult { ok: true, message: if changed { "Remote refs changed".into() } else { String::new() } }
+                let result = self.auto_fetch_locked(dir, prune);
+                let ok = result.error.is_none();
+                let message = result.error.unwrap_or_else(|| if result.refs_changed { "Remote refs changed".into() } else { String::new() });
+                ActionResult { ok, message }
             }
             Action::Bisect { mode, commit, good } => {
                 let gitdir = git::run(dir, &["rev-parse", "--absolute-git-dir"]);
@@ -1391,9 +1408,11 @@ impl Engine {
                 };
                 done(o, &format!("Worktree created at {}", path.trim()))
             }
-            Action::WorktreeRemove { path, force } => {
-                let o = if force { self.git(dir, &["worktree", "remove", "--force", "--", &path]) } else { self.git(dir, &["worktree", "remove", "--", &path]) };
-                done(o, "Worktree removed")
+            Action::WorktreeRemove { path, force, stale_only } => {
+                self.remove_worktree(dir, &path, force, stale_only)
+            }
+            Action::WorktreeRemoveAndBranch { path, branch, remote_branch, stale_only, force } => {
+                self.remove_worktree_and_branch(repo, dir, &path, &branch, remote_branch, stale_only, force).1
             }
             Action::WorktreeLock { path, message } => {
                 let o = if message.trim().is_empty() { self.git(dir, &["worktree", "lock", &path]) } else { self.git(dir, &["worktree", "lock", "--reason", message.trim(), &path]) };
@@ -1887,6 +1906,109 @@ impl Engine {
         }
     }
 
+    pub fn auto_fetch(&self, dir: &Path, prune: bool) -> AutoFetchResult {
+        let operation = crate::operation::lock_for(dir);
+        let _guard = operation.lock().unwrap_or_else(|error| error.into_inner());
+        self.auto_fetch_locked(dir, prune)
+    }
+
+    fn auto_fetch_locked(&self, dir: &Path, prune: bool) -> AutoFetchResult {
+        let read_refs = || git::run(dir, &[
+            "for-each-ref", "--format=%(refname)%00%(objectname)%00%(symref)", "refs/heads", "refs/remotes", "refs/tags",
+        ]);
+        let before = read_refs();
+        let mut args = vec!["fetch", "--all", "--quiet", "--no-write-fetch-head", "--no-auto-maintenance"];
+        if prune { args.push("--prune"); }
+        let mut command = git::git_command(dir, &args);
+        command.env("GCM_INTERACTIVE", "never").env("SSH_ASKPASS_REQUIRE", "never");
+        let output = crate::read_jobs::run_bounded(command, None, std::time::Duration::from_secs(30),
+            "Auto-fetch timed out. Fetch manually to retry.");
+        self.record(&format!("git {}", args.join(" ")), &output);
+        // With multiple remotes, a fetch can update refs even if another remote failed.
+        let after = read_refs();
+        let refs_changed = !before.ok || !after.ok || before.stdout != after.stdout;
+        let error = (!output.ok).then(|| {
+            if output.stderr.starts_with("Auto-fetch timed out") { output.stderr }
+            else { "Auto-fetch failed. Fetch manually for more information.".into() }
+        });
+        AutoFetchResult { refs_changed, error }
+    }
+
+    fn remove_worktree(&self, dir: &Path, path: &str, force: bool, stale_only: bool) -> ActionResult {
+        if !force {
+            let target = dir.join(path);
+            let stale = git::try_worktrees(dir).ok().and_then(|worktrees| worktrees.into_iter().skip(1).find(|worktree| {
+                worktree.prunable && !worktree.locked
+                    && crate::worktrees::same_path(Path::new(&worktree.path), &target)
+                    && matches!(Path::new(&worktree.path).join(".git").symlink_metadata(), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+            }));
+            if let Some(worktree) = stale {
+                return match crate::worktrees::forget_stale(dir, &worktree) {
+                    Ok(()) => ActionResult { ok: true, message: "Removed stale worktree registration.".into() },
+                    Err(message) => ActionResult { ok: false, message },
+                };
+            }
+        }
+        if stale_only {
+            return ActionResult { ok: false, message: "This worktree is no longer stale or its Git link changed. Refresh and review the removal again.".into() };
+        }
+        let mut args = vec!["worktree", "remove"];
+        let force_path = if force {
+            args.push("--force");
+            match crate::worktrees::force_removal_path(dir, path) {
+                Ok(path) => Some(path),
+                Err(message) => return ActionResult { ok: false, message },
+            }
+        } else { None };
+        args.extend(["--", force_path.as_deref().unwrap_or(path)]);
+        let out = self.git(dir, &args);
+        ActionResult { ok: out.ok, message: if out.ok { "Worktree removed.".into() } else { out.message() } }
+    }
+
+    fn remove_worktree_and_branch(
+        &self,
+        repo: &str,
+        dir: &Path,
+        path: &str,
+        branch: &str,
+        remote_branch: Option<String>,
+        stale_only: bool,
+        force: bool,
+    ) -> (bool, ActionResult) {
+        let worktrees = match git::try_worktrees(dir) {
+            Ok(worktrees) => worktrees,
+            Err(message) => return (false, ActionResult { ok: false, message }),
+        };
+        let Some(worktree) = worktrees.iter().skip(1).find(|worktree| {
+            worktree.branch == branch && crate::worktrees::same_path(Path::new(&worktree.path), &dir.join(path))
+        }) else {
+            let message = "This worktree or its branch changed. Refresh and review the removal again.".into();
+            return (false, ActionResult { ok: false, message });
+        };
+        if let Some(remote) = &remote_branch {
+            let upstream = self.git(dir, &["rev-parse", "--symbolic-full-name", "--verify", &format!("{branch}@{{upstream}}")]);
+            if !upstream.ok || upstream.stdout.trim() != format!("refs/remotes/{remote}") {
+                let message = "The branch's upstream changed. Refresh and review the removal again.".into();
+                return (false, ActionResult { ok: false, message });
+            }
+        }
+        let removal = self.remove_worktree(dir, &worktree.path, force, stale_only);
+        if !removal.ok {
+            return (false, removal);
+        }
+        let local = self.perform_locked(repo, Action::DeleteBranch { name: branch.to_owned() });
+        if !local.ok {
+            return (true, ActionResult { ok: false, message: format!("{} Could not delete {branch}: {}", removal.message, local.message) });
+        }
+        if let Some(remote_branch) = remote_branch {
+            let remote = self.perform_locked(repo, Action::DeleteRemoteBranch { remote_branch });
+            if !remote.ok {
+                return (true, ActionResult { ok: false, message: format!("{} Deleted {branch} locally. Could not delete the remote branch: {}", removal.message, remote.message) });
+            }
+        }
+        (true, ActionResult { ok: true, message: format!("{} Deleted {branch}.", removal.message) })
+    }
+
     fn restore_stash(&self, dir: &Path, action: &str, index: usize, without_index: bool) -> git::GitOut {
         let stash = format!("stash@{{{index}}}");
         let mut args = vec!["stash", action, "-q"];
@@ -2311,7 +2433,7 @@ mod tests {
         let created = e.perform(&repo, Action::WorktreeAdd { path: wt.clone(), branch: "selected".into(), new_branch: true, start: Some(first.clone()) });
         assert!(created.ok, "{}", created.message);
         assert_eq!(head(Path::new(&wt)), first);
-        assert!(e.perform(&repo, Action::WorktreeRemove { path: wt, force: false }).ok);
+        assert!(e.perform(&repo, Action::WorktreeRemove { path: wt, force: false, stale_only: false }).ok);
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -3033,7 +3155,7 @@ mod tests {
         assert!(e.perform(&repo, Action::WorktreeLock { path: wts.clone(), message: "busy".into() }).ok);
         assert!(git::load(&d, 10).worktrees.iter().any(|w| w.locked));
         assert!(e.perform(&repo, Action::WorktreeUnlock { path: wts.clone() }).ok);
-        assert!(e.perform(&repo, Action::WorktreeRemove { path: wts.clone(), force: false }).ok);
+        assert!(e.perform(&repo, Action::WorktreeRemove { path: wts.clone(), force: false, stale_only: false }).ok);
         assert_eq!(git::load(&d, 10).worktrees.len(), 1);
 
         // Submodule from the bare repository.

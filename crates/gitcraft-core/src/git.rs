@@ -71,13 +71,14 @@ pub struct Worktree {
     pub path: String,
     pub branch: String,
     pub locked: bool,
+    pub prunable: bool,
 }
 
 fn parse_worktrees(output: &str) -> Vec<Worktree> {
     output.split("\0\0").filter_map(|record| {
         let mut fields = record.split('\0');
         let path = fields.next()?.strip_prefix("worktree ")?.to_owned();
-        let mut worktree = Worktree { path, branch: String::new(), locked: false };
+        let mut worktree = Worktree { path, branch: String::new(), locked: false, prunable: false };
         for field in fields {
             if let Some(branch) = field.strip_prefix("branch refs/heads/") {
                 worktree.branch = branch.to_owned();
@@ -85,6 +86,8 @@ fn parse_worktrees(output: &str) -> Vec<Worktree> {
                 worktree.branch = "(detached)".into();
             } else if field == "locked" || field.starts_with("locked ") {
                 worktree.locked = true;
+            } else if field == "prunable" || field.starts_with("prunable ") {
+                worktree.prunable = true;
             }
         }
         Some(worktree)

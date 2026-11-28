@@ -301,11 +301,12 @@ impl App {
     }
 
     pub(crate) fn remove_worktree(&mut self, tab: u64, wt: &str) {
+        let (prompt, stale_only) = self.worktree_removal_prompt(tab, wt);
         let wt = wt.to_owned();
         // Its tab closes once the worktree is removed (see `worktree_done`), so a refused removal
         // leaves it open.
-        self.dialog = Some(Dialog::confirm_with("Remove worktree?", &format!("Remove the worktree at {wt}? Its folder is deleted; its branch stays."), "Remove", true, move |app, _| {
-            app.act(tab, Action::WorktreeRemove { path: wt, force: false });
+        self.dialog = Some(Dialog::confirm_with("Remove worktree?", &format!("{prompt} Its branch stays."), "Remove", true, move |app, _| {
+            app.act_worktree_removal(tab, Action::WorktreeRemove { path: wt, force: false, stale_only });
         }));
     }
 
@@ -316,22 +317,72 @@ impl App {
         if let Some(up) = &upstream {
             fields.push(Field::new("remote", &format!("Also delete {up} from the remote"), FieldKind::Check).when("local"));
         }
+        let (intro, stale_only) = self.worktree_removal_prompt(tab, wt);
         let (wt, branch) = (wt.to_owned(), branch.to_owned());
-        let d = Dialog::new("Remove worktree?", Body::Form { intro: format!("Remove the worktree at {wt}? Its folder is deleted."), fields, grid: false })
+        let d = Dialog::new("Remove worktree?", Body::Form { intro, fields, grid: false })
             .flag_value("local", true)
             .choice("Remove", Kind::Danger, move |app, values| {
-                app.act(tab, Action::WorktreeRemove { path: wt.clone(), force: false });
-                // Queued after the removal: the branch can only go once no worktree has it checked out.
-                if values.flag("local") {
-                    app.act(tab, Action::DeleteBranch { name: branch.clone() });
-                    if values.flag("remote")
-                        && let Some(up) = &upstream
-                    {
-                        app.act(tab, Action::DeleteRemoteBranch { remote_branch: up.clone() });
+                let action = if values.flag("local") {
+                    Action::WorktreeRemoveAndBranch {
+                        path: wt, branch, stale_only, force: false,
+                        remote_branch: upstream.filter(|_| values.flag("remote")),
                     }
-                }
+                } else {
+                    Action::WorktreeRemove { path: wt, force: false, stale_only }
+                };
+                app.act_worktree_removal(tab, action);
             });
         self.dialog = Some(d);
+    }
+
+    fn worktree_removal_prompt(&self, tab: u64, path: &str) -> (String, bool) {
+        let prunable = self.repo(tab).and_then(|repo| repo.view.as_ref()).is_some_and(|view| {
+            view.data.worktrees.iter().any(|worktree| worktree.prunable && super::same_folder(&worktree.path, path))
+        });
+        if prunable {
+            (format!("Remove the stale worktree registration for {path}? Files in its folder are kept."), true)
+        } else {
+            (format!("Remove the worktree at {path}? Its folder and files, including ignored files, will be deleted."), false)
+        }
+    }
+
+    fn act_worktree_removal(&mut self, tab: u64, action: Action) {
+        let target = match &action {
+            Action::WorktreeRemove { path, .. } | Action::WorktreeRemoveAndBranch { path, .. } => self.tab_of(path),
+            _ => None,
+        };
+        if target.is_some_and(|target| self.has_unsaved(Some(&[target]))) {
+            self.toast(false, "Save or discard open editor changes in the worktree before removing it.");
+            return;
+        }
+        self.act(tab, action);
+    }
+
+    pub(super) fn offer_force_worktree_removal(
+        &mut self, tab: u64, action: &Action, result: &gitcraft_core::actions::ActionResult,
+    ) -> bool {
+        if self.dialog.is_some() || self.repo(tab).is_none() {
+            return false;
+        }
+        let Some(action) = action.force_worktree_retry(result) else { return false };
+        let (path, branches) = match &action {
+            Action::WorktreeRemove { path, .. } => (path, String::new()),
+            Action::WorktreeRemoveAndBranch { path, branch, remote_branch, .. } => {
+                let mut branches = format!("\n\nLocal branch {branch} will also be deleted.");
+                if let Some(remote_branch) = remote_branch {
+                    branches.push_str(&format!(" Remote branch {remote_branch} will also be deleted."));
+                }
+                (path, branches)
+            }
+            _ => return false,
+        };
+        let warning = format!(
+            "This worktree has local changes. Force removal permanently deletes the folder and all files at:\n\n{path}\n\nStaged changes, unstaged changes, untracked files, and ignored files in this folder will be lost. Commit or back up anything you want to keep before continuing.{branches}"
+        );
+        self.dialog = Some(Dialog::confirm_with("Force remove worktree?", &warning, "Force Remove", true, move |app, _| {
+            app.act_worktree_removal(tab, action);
+        }));
+        true
     }
 
     pub(crate) fn add_submodule(&mut self, tab: u64) {
@@ -510,7 +561,7 @@ impl App {
                     self.open_repo(&folder);
                 }
             }
-            Action::WorktreeRemove { path, .. } => {
+            Action::WorktreeRemove { path, .. } | Action::WorktreeRemoveAndBranch { path, .. } => {
                 if let Some(t) = self.tab_of(path) {
                     self.close_tab(t);
                 }

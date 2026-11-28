@@ -301,7 +301,7 @@ impl App {
         };
         let mut worktrees: Vec<Worktree> = v.data.worktrees.clone();
         if !worktrees.iter().any(|w| same_folder(&w.path, &v.path)) {
-            worktrees.insert(0, Worktree { path: v.path.clone(), branch: v.data.head_branch.clone().unwrap_or_default(), locked: false });
+            worktrees.insert(0, Worktree { path: v.path.clone(), branch: v.data.head_branch.clone().unwrap_or_default(), locked: false, prunable: false });
         }
         let roots: Vec<String> = worktrees.iter().map(|w| w.path.clone()).collect();
         let key = roots.join("\n");

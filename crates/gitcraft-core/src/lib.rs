@@ -37,6 +37,7 @@ pub mod terminal;
 pub mod updates;
 pub mod watch_plan;
 pub mod watch;
+mod worktrees;
 #[cfg(test)]
 mod regressions;
 
