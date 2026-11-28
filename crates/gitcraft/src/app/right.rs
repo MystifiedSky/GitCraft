@@ -453,11 +453,15 @@ impl App {
         self.view_switch(ui, later);
         // The lists, above the commit box.
         let options_extra = if wu.tab == WorkTab::Commit && wu.options_open { 110.0 } else { 0.0 };
-        let base_h = self.settings.num(WORK_FORM_HEIGHT, WORK_FORM_DEFAULT as f64) as f32;
+        let line_h = ui.fonts_mut(|f| f.row_height(&FontId::proportional(13.5))) + ui.spacing().extra_text_line_spacing;
+        let min_h = min_form_height(wu.tab, wu.options_open, line_h);
+        let base_min = (min_h - options_extra).max(WORK_FORM_MIN);
+        let base_h = (self.settings.num(WORK_FORM_HEIGHT, WORK_FORM_DEFAULT as f64) as f32).clamp(base_min, WORK_FORM_MAX);
         let box_h = base_h + options_extra;
         let default_h = WORK_FORM_DEFAULT + options_extra;
         const FILE_SECTION_HEIGHT: f32 = 30.0;
-        let lists_h = work_list_height(ui.available_height(), box_h);
+        let form_min = 50.0 + bottom_fixed_height(wu.tab, wu.options_open);
+        let lists_h = work_list_height(ui.available_height(), box_h, form_min);
         let mut events: Vec<(bool, FileEvent)> = Vec::new();
         let active_unstaged = r.ui.diff.as_ref().filter(|d| d.source == DiffSource::Unstaged).map(|d| d.file.clone());
         let active_staged = r.ui.diff.as_ref().filter(|d| d.source == DiffSource::Staged).map(|d| d.file.clone());
@@ -595,7 +599,8 @@ impl App {
             }
         }
         // Grip, then the Commit / Stash / Patch tabs.
-        let form_h = ui.available_height();
+        let form_top = ui.cursor().top();
+        let form_h = ui.available_height().min((ui.clip_rect().bottom() - form_top).max(0.0));
         let grip_w = ui.available_width();
         let (grip, _) = ui.allocate_exact_size(vec2(grip_w, 20.0), Sense::hover());
         let response = ui.interact(grip, egui::Id::NULL.with(("work_form_split", tab)), Sense::drag());
@@ -605,10 +610,8 @@ impl App {
         if lit {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
         }
-        let line_h = ui.fonts_mut(|f| f.row_height(&FontId::proportional(13.5))) + ui.spacing().extra_text_line_spacing;
-        let min_h = min_form_height(wu.tab, wu.options_open, line_h);
-        if let Some(height) = super::screen::dragged_details_size(&response, form_h, false) {
-            let base = clamped_form_height(height, min_h) - options_extra;
+        if let Some(height) = super::screen::dragged_details_size(&response, box_h, false) {
+            let base = clamped_base_height(height, min_h, options_extra);
             later.push(Box::new(move |app| app.settings.set(WORK_FORM_HEIGHT, base.round())));
         }
         let push = self.settings.flag("pushAfterCommit", false);
@@ -640,8 +643,9 @@ impl App {
             tx += tw + 2.0;
         }
         // The bottom controls keep their place; their height is known from the last frame.
-        let bottom_id = egui::Id::NULL.with(("work_bottom_h", tab, work_tab_id(wu.tab)));
-        let bottom_h = ui.data(|d| d.get_temp::<f32>(bottom_id)).unwrap_or_else(|| if wu.tab == WorkTab::Commit { if wu.options_open { 200.0 } else { 88.0 } } else { 56.0 });
+        let bottom_id = egui::Id::NULL.with(("work_bottom_h", tab, work_tab_id(wu.tab), wu.tab == WorkTab::Commit && wu.options_open));
+        let bottom_estimate = if wu.tab == WorkTab::Commit { if wu.options_open { 200.0 } else { 88.0 } } else { 56.0 };
+        let bottom_h = ui.data(|d| d.get_temp::<f32>(bottom_id)).unwrap_or(bottom_estimate).min((form_h - 50.0).max(0.0));
         let middle_h = (form_h - 20.0 - 30.0 - bottom_h).max(0.0);
         work_form_scroll(tab, middle_h).show(ui, |ui| {
             egui::Frame::new().inner_margin(egui::Margin { left: 8, right: 8, top: 10, bottom: 0 }).show(ui, |ui| {
@@ -769,30 +773,36 @@ impl App {
                     });
                 });
                 if wu.options_open {
-                    ui.horizontal(|ui| {
-                        ui.add_space(20.0);
-                        let mut push = push;
-                        if widgets::checkbox(ui, &mut push, "Push after committing", 12.5).clicked() {
-                            later.push(Box::new(move |app| app.settings.set("pushAfterCommit", push)));
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.add_space(20.0);
-                        ui.label(egui::RichText::new("Co-authors:").size(12.5).color(c.white(0.8)));
-                        let w = ui.available_width();
-                        widgets::field(ui, &mut wu.coauthors, "Name <email>, …", w, 22.0, 12.0).tip("Adds a Co-authored-by line for each person (separate several with commas)");
-                    });
-                    ui.horizontal(|ui| {
-                        ui.add_space(20.0);
-                        let mut skip = wu.skip_hooks.unwrap_or_else(|| self.settings.flag("skipHooks", false));
-                        if widgets::checkbox(ui, &mut skip, "Skip Git hooks", 12.5).clicked() {
-                            wu.skip_hooks = Some(skip);
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.add_space(20.0);
-                        widgets::checkbox(ui, &mut wu.sign_off, "Sign off (DCO)", 12.5).tip("Add a Signed-off-by trailer using your Git identity");
-                    });
+                    let options_h = (form_h - 50.0 - bottom_fixed_height(WorkTab::Commit, true)).max(0.0);
+                    let mut rows = |ui: &mut Ui| {
+                        ui.horizontal(|ui| {
+                            ui.add_space(20.0);
+                            let mut push = push;
+                            if widgets::checkbox(ui, &mut push, "Push after committing", 12.5).clicked() {
+                                later.push(Box::new(move |app| app.settings.set("pushAfterCommit", push)));
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.add_space(20.0);
+                            ui.label(egui::RichText::new("Co-authors:").size(12.5).color(c.white(0.8)));
+                            let w = ui.available_width();
+                            widgets::field(ui, &mut wu.coauthors, "Name <email>, …", w, 22.0, 12.0).tip("Adds a Co-authored-by line for each person (separate several with commas)");
+                        });
+                        ui.horizontal(|ui| {
+                            ui.add_space(20.0);
+                            let mut skip = wu.skip_hooks.unwrap_or_else(|| self.settings.flag("skipHooks", false));
+                            if widgets::checkbox(ui, &mut skip, "Skip Git hooks", 12.5).clicked() {
+                                wu.skip_hooks = Some(skip);
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.add_space(20.0);
+                            widgets::checkbox(ui, &mut wu.sign_off, "Sign off (DCO)", 12.5).tip("Add a Signed-off-by trailer using your Git identity");
+                        });
+                    };
+                    if options_h > 0.0 {
+                        egui::ScrollArea::vertical().id_salt(("work_options", tab)).max_height(options_h).auto_shrink([false, true]).show(ui, |ui| rows(ui));
+                    }
                 }
             }
             let (label, enabled) = match wu.tab {
@@ -1234,9 +1244,19 @@ impl App {
     }
 }
 
-fn work_list_height(available: f32, box_h: f32) -> f32 {
+fn work_list_height(available: f32, box_h: f32, form_min: f32) -> f32 {
     let available = available.max(0.0);
-    (available - box_h).max(60.0_f32.min(available / 2.0))
+    let lists = (available - box_h).max(60.0_f32.min(available / 2.0));
+    lists.min((available - form_min).max(0.0))
+}
+
+/// The footer height besides the optional options fields.
+fn bottom_fixed_height(tab: WorkTab, options_open: bool) -> f32 {
+    match tab {
+        WorkTab::Commit if options_open => 96.0,
+        WorkTab::Commit => 88.0,
+        WorkTab::Stash | WorkTab::Patch => 56.0,
+    }
 }
 
 fn work_tab_id(tab: WorkTab) -> u8 {
@@ -1251,8 +1271,8 @@ fn default_form_height(tab: WorkTab, options_open: bool) -> f32 {
     WORK_FORM_DEFAULT + if tab == WorkTab::Commit && options_open { 110.0 } else { 0.0 }
 }
 
-fn clamped_form_height(height: f32, min: f32) -> f32 {
-    height.clamp(min, WORK_FORM_MAX)
+fn clamped_base_height(height: f32, min_h: f32, options_extra: f32) -> f32 {
+    (height - options_extra).clamp((min_h - options_extra).max(WORK_FORM_MIN), WORK_FORM_MAX)
 }
 
 /// The form cannot shrink past the controls and two lines of text.
@@ -1285,19 +1305,21 @@ mod tests {
     #[test]
     fn short_work_panel_leaves_room_for_the_form() {
         let available: f32 = 32.0;
-        let lists_h = work_list_height(available, 300.0);
+        let lists_h = work_list_height(available, 300.0, 0.0);
         assert!(lists_h < available, "the form must have a visible viewport");
         assert_eq!(lists_h, 16.0);
-        assert_eq!(work_list_height(0.0, 300.0), 0.0);
-        assert_eq!(work_list_height(600.0, 300.0), 300.0);
-        assert_eq!(work_list_height(150.0, 410.0), 60.0);
+        assert_eq!(work_list_height(0.0, 300.0, 0.0), 0.0);
+        assert_eq!(work_list_height(600.0, 300.0, 0.0), 300.0);
+        assert_eq!(work_list_height(150.0, 410.0, 0.0), 60.0);
     }
 
     #[test]
     fn work_list_height_follows_a_resized_form() {
-        assert_eq!(work_list_height(600.0, 400.0), 200.0);
-        assert_eq!(work_list_height(600.0, 120.0), 480.0);
-        assert_eq!(work_list_height(600.0, 900.0), 60.0);
+        assert_eq!(work_list_height(600.0, 400.0, 0.0), 200.0);
+        assert_eq!(work_list_height(600.0, 120.0, 0.0), 480.0);
+        assert_eq!(work_list_height(600.0, 900.0, 0.0), 60.0);
+        assert_eq!(work_list_height(200.0, 300.0, 146.0), 54.0);
+        assert_eq!(work_list_height(140.0, 300.0, 146.0), 0.0);
     }
 
     #[test]
@@ -1312,9 +1334,13 @@ mod tests {
         assert_eq!(min_form_height(WorkTab::Commit, false, 18.0), 264.0);
         assert_eq!(min_form_height(WorkTab::Commit, true, 18.0), 374.0);
         assert_eq!(min_form_height(WorkTab::Stash, false, 18.0), 264.0);
-        assert_eq!(clamped_form_height(10.0, 264.0), 264.0);
-        assert_eq!(clamped_form_height(900.0, 264.0), WORK_FORM_MAX);
-        assert_eq!(clamped_form_height(320.0, 264.0), 320.0);
+        assert_eq!(bottom_fixed_height(WorkTab::Commit, false), 88.0);
+        assert_eq!(bottom_fixed_height(WorkTab::Commit, true), 96.0);
+        assert_eq!(bottom_fixed_height(WorkTab::Stash, false), 56.0);
+        assert_eq!(clamped_base_height(10.0, 264.0, 0.0), 264.0);
+        assert_eq!(clamped_base_height(900.0, 264.0, 0.0), WORK_FORM_MAX);
+        assert_eq!(clamped_base_height(320.0, 264.0, 0.0), 320.0);
+        assert_eq!(clamped_base_height(910.0, 374.0, 110.0), WORK_FORM_MAX);
     }
 
     #[test]
