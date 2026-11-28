@@ -60,6 +60,8 @@ The app is in [crates/gitcraft](crates/gitcraft) and its back end in [crates/git
 
 The Rust suite uses disposable repositories. Run it serially because some tests change process-wide runtime preferences. Live AI tests are ignored by default and require explicit local setup. Fixtures must not depend on your Git configuration: to check, run the suite with `GIT_CONFIG_GLOBAL` pointing at a file that sets `core.autocrlf = true`, as many Windows machines do.
 
+To smoke-test GitHub Copilot, install the current Copilot CLI, select **GitHub Copilot subscription** under **Preferences → AI**, and use **Sign in with GitHub**. Fetch the model list, then run **Test Connection**. With the signed-in CLI on `PATH`, `cargo test --locked -p gitcraft-core live_copilot_connection -- --ignored` checks discovery, model listing, and a small structured request that uses your Copilot allowance.
+
 Only one GitCraft window runs per user: a second launch hands its folder or `gitcraft://clone?url=` link to the running one and exits. To try that without touching your own preferences, build first (`cargo build --locked`), then start both launches of the built program with `HOME` (on Windows, `LOCALAPPDATA`) pointing at an empty folder, for example `HOME=/tmp/gc target/debug/gitcraft repo-a`, then `HOME=/tmp/gc target/debug/gitcraft repo-b`. Don't use `cargo run` for them: with `HOME` changed, rustup can't find the installed toolchain (or keep `RUSTUP_HOME` and `CARGO_HOME` at their original values for both launches). The second launch exits at once and `repo-b` opens as a tab in the first window. `--new-window` opens a separate window instead.
 
 To package the app locally, install the packager once with `cargo install cargo-packager --locked --version 0.11.8`, then run `cargo build --release --locked -p gitcraft` and `cargo packager --release -p gitcraft --formats <formats>` (after a `--target` build, pass the same `--target` to the packager: 0.11.8 ignores `--binaries-dir`, and a relative `--out-dir` is read from `crates/gitcraft`): `nsis` or `wix` on Windows, `app` or `dmg` on macOS, `deb` or `appimage` on Linux. For an RPM, install `cargo install cargo-generate-rpm --locked --version 0.21.1` and run `cargo generate-rpm -p crates/gitcraft`. Published updater artifacts are built separately by the signed release pipeline; a local build alone does not verify the published update flow.
@@ -111,7 +113,9 @@ Use a disposable repository with a local bare remote. Record the app version, OS
 - Install, launch, close, and reopen the packaged app. Launch it again with a folder while it runs: the folder opens as a tab.
 - Open a `gitcraft://clone?url=` link and "Open in GitCraft" from Explorer or the Finder.
 - Open, clone, and initialize repositories, including paths with spaces and Unicode.
+- On Windows, open a repository from a Git-reported path (with forward slashes). Use **Open in File Manager** from the File menu, toolbar Actions, and Repository Management, and verify Explorer opens the repository root. Use the same action from a nested changed file's context menu and verify Explorer selects the file.
 - Stage a file, hunk, and line; commit; amend; verify the index and working tree.
+- On Windows in a disposable repository, start an untracked executable and edit a tracked file. Choose **Discard All** and verify the error names the executable, the tracked edit remains, and no stash was created. Close the executable, retry, and use Undo to confirm both files are restored.
 - Create and switch branches; merge, resolve a conflict, rebase, and exercise guarded undo/redo.
 - Stash and restore work; fetch, pull, and push against the local remote.
 - Verify graph scrolling, author images, diffs, file watching, and multiple repository tabs.

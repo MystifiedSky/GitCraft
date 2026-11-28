@@ -16,7 +16,7 @@ const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 #[serde(rename_all = "camelCase", default)]
 pub struct AiConfig {
     pub enabled: bool,
-    /// anthropic, openai, codex, claude_code, google, ollama or custom.
+    /// anthropic, openai, codex, claude_code, copilot, google, ollama or custom.
     pub provider: String,
     pub endpoint: String,
     pub cli_path: String,
@@ -72,7 +72,7 @@ pub fn key_name(provider: &str) -> &'static str {
 pub(crate) fn provider_label(p: &str) -> &'static str {
     match p {
         "openai" => "OpenAI", "google" => "Google", "ollama" => "Ollama",
-        "codex" => "ChatGPT via Codex", "claude_code" => "Claude Code",
+        "codex" => "ChatGPT via Codex", "claude_code" => "Claude Code", "copilot" => "GitHub Copilot",
         "custom" => "your compatible AI server", _ => "Anthropic",
     }
 }

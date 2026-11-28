@@ -681,7 +681,7 @@ impl App {
                     for i in (0..dialog.choices.len()).rev() {
                         let ch = &dialog.choices[i];
                         let full = if running && i == dialog.choices.len() - 1 { dialog.busy.clone().unwrap_or_default() } else { ch.label.clone() };
-                        let label = footer_label(&row, &full, width - 32.0);
+                        let label = fit_button_label(&row, &full, width - 32.0);
                         let enabled = !running && (blocked.is_none() || ch.kind != Kind::Primary);
                         let response = widgets::button_labeled(&mut row, ch.kind, None, &label, &full, 28.0, enabled);
                         let response = if label == full { response } else { response.on_hover_text(&full) };
@@ -690,7 +690,7 @@ impl App {
                         }
                     }
                     if let Some(cancel) = &dialog.cancel {
-                        let label = footer_label(&row, cancel, width - 32.0);
+                        let label = fit_button_label(&row, cancel, width - 32.0);
                         let response = widgets::button_labeled(&mut row, Kind::Default, None, &label, cancel, 28.0, !running);
                         let response = if label == *cancel { response } else { response.on_hover_text(cancel) };
                         if response.clicked() {
@@ -746,7 +746,7 @@ fn footer_button_width(ui: &Ui, label: &str) -> f32 {
 }
 
 /// `label` cut with … so its button fits `available`; the full label belongs in a tooltip.
-fn footer_label(ui: &Ui, label: &str, available: f32) -> String {
+pub(super) fn fit_button_label(ui: &Ui, label: &str, available: f32) -> String {
     if footer_button_width(ui, label) <= available {
         return label.to_owned();
     }

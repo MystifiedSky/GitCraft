@@ -3,9 +3,10 @@
 //! afterwards with the whole app.
 
 use super::App;
+use super::dialogs::{Body, Dialog, fit_button_label};
 use super::rebase::{base_for, head_line};
 use super::theme::p;
-use super::widgets::REMOVED;
+use super::widgets::{self, Kind, REMOVED};
 use gitcraft_core::actions::Action;
 use gitcraft_core::git::{Commit, GitRef, RefKind, Stash};
 use gitcraft_core::session::RepoView;
@@ -175,6 +176,28 @@ fn drop_detail(action: &Action) -> String {
     }
 }
 
+fn branch_drop_dialog(title: &str, mut actions: Vec<(String, String, Later)>) -> Dialog {
+    let draw = move |app: &mut App, ui: &mut egui::Ui| -> bool {
+        let selected = actions.iter().enumerate().position(|(index, (label, detail, _))| {
+            if index > 0 {
+                ui.add_space(10.0);
+            }
+            let display = fit_button_label(ui, label, ui.available_width());
+            let pressed = widgets::button_labeled(ui, Kind::Default, None, &display, label, 28.0, true)
+                .on_hover_text(format!("{label}\n{detail}"))
+                .clicked();
+            ui.add_space(4.0);
+            ui.add(egui::Label::new(egui::RichText::new(detail).size(11.5).color(p().fg3)).truncate());
+            pressed
+        });
+        if let Some(index) = selected {
+            (actions.remove(index).2)(app);
+        }
+        selected.is_some()
+    };
+    Dialog::new(title, Body::Custom(Box::new(draw))).width(520.0)
+}
+
 /// A ref name without its `refs/…` prefix, for messages.
 pub(crate) fn short_ref(name: &str) -> &str {
     name.strip_prefix("refs/heads/").or_else(|| name.strip_prefix("refs/remotes/")).or_else(|| name.strip_prefix("refs/tags/")).unwrap_or(name)
@@ -202,50 +225,19 @@ impl App {
         if choices.is_empty() && !pull_request {
             return self.toast(false, format!("Check out {t} or {s} first to merge or rebase them."));
         }
-        let mut rows: Vec<(String, String, std::rc::Rc<dyn Fn(&mut App)>)> = Vec::new();
-        for (label, action) in choices {
+        let mut actions: Vec<(String, String, Later)> = choices.into_iter().map(|(label, action)| {
             let detail = drop_detail(&action);
-            rows.push((label, detail, std::rc::Rc::new(move |app: &mut App| app.act(tab, action.clone()))));
-        }
+            (label, detail, Box::new(move |app: &mut App| app.act(tab, action)) as Later)
+        }).collect();
         if pull_request {
             // Into the target's own branch name (a remote branch's name without its remote).
             let into = if target.kind == RefKind::Remote { split_remote(v, &t).map_or(t.clone(), |(_, b)| b) } else { t.clone() };
             let source = s.clone();
             let label = format!("Start a pull request from {source} into {into}");
-            let detail = format!("Open a pull request from {source} into {into}.");
-            rows.push((label, detail, std::rc::Rc::new(move |app: &mut App| app.start_pull_request_into(tab, &source, Some(into.clone())))));
+            let detail = "Open the pull request form with these branches selected.".into();
+            actions.push((label, detail, Box::new(move |app| app.start_pull_request_into(tab, &source, Some(into)))));
         }
-        let title = format!("{s} → {t}");
-        let draw = move |app: &mut App, ui: &mut egui::Ui| -> bool {
-            let c = p();
-            ui.label(egui::RichText::new(format!("What should GitCraft do with {s} and {t}?")).size(13.0).color(c.fg));
-            ui.add_space(6.0);
-            let width = ui.available_width();
-            for (title, detail, run) in &rows {
-                let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 48.0), egui::Sense::click());
-                let accessible = title.clone();
-                response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, accessible.clone()));
-                let response = response.on_hover_text(format!("{title}\n{detail}"));
-                let activated = response.clicked() || (response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Space)));
-                let hovered = response.hovered();
-                if hovered {
-                    ui.painter().rect_filled(rect, egui::CornerRadius::same(4), c.hoverrow);
-                    super::icons::paint(ui, egui::Rect::from_min_size(egui::pos2(rect.right() - 20.0, rect.center().y - 5.5), egui::Vec2::splat(11.0)), super::icons::Icon::ChevronRight, 11.0, c.fg2);
-                }
-                let title = super::widgets::fit(ui, title, egui::FontId::proportional(13.0), c.fg, width - 36.0);
-                let detail = super::widgets::fit(ui, detail, egui::FontId::proportional(11.5), c.fg3, width - 36.0);
-                ui.painter().galley(egui::pos2(rect.left() + 10.0, rect.top() + 8.0), title, c.fg);
-                ui.painter().galley(egui::pos2(rect.left() + 10.0, rect.top() + 27.0), detail, c.fg3);
-                if activated {
-                    run(app);
-                    return true;
-                }
-                ui.add_space(2.0);
-            }
-            false
-        };
-        let d = super::dialogs::Dialog::new(&title, super::dialogs::Body::Custom(Box::new(draw))).width(520.0).cancel_label("Cancel");
-        self.dialog = Some(d);
+        self.dialog = Some(branch_drop_dialog(&format!("{s} → {t}"), actions));
     }
 
     pub(crate) fn pinned_ref(&self, path: &str) -> Option<String> {
@@ -734,6 +726,68 @@ mod tests {
         assert!(is_loaded_ancestor(&v, &parent, &tip));
         assert!(!is_loaded_ancestor(&v, &tip, &parent));
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn headless_branch_drop_buttons_fit_and_scroll_in_a_compact_dialog() {
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = App::new(&cc, crate::app::StartOptions::default(), crate::settings::Store::in_memory());
+        let long_ref = format!("feature/{}", "long-".repeat(30));
+        let labels = [
+            "Fast-forward main to feature".to_owned(),
+            "Merge feature into main".to_owned(),
+            "Merge main into feature".to_owned(),
+            "Rebase feature onto main".to_owned(),
+            format!("Start a pull request from {long_ref} into main"),
+        ];
+        let actions = labels.iter().map(|label| {
+            let run: Later = Box::new(|app| app.dialog = Some(Dialog::info("Action selected", "Fixture")));
+            (label.clone(), "Description of the action.".into(), run)
+        }).collect();
+        app.dialog = Some(branch_drop_dialog(&format!("{long_ref} → main"), actions));
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(330.0, 265.0));
+        let render = |app: &mut App, events| {
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), events, ..Default::default() }, |_| app.draw_dialog(&ctx));
+            output.textures_delta.clear();
+            output.shapes
+        };
+        let visible = |shapes: &[egui::epaint::ClippedShape], prefix: &str| shapes.iter().find_map(|shape| {
+            if let egui::Shape::Text(text) = &shape.shape
+                && text.galley.text().starts_with(prefix)
+                && shape.clip_rect.contains_rect(text.visual_bounding_rect())
+                && screen.contains_rect(text.visual_bounding_rect())
+            {
+                return Some(text.visual_bounding_rect().center());
+            }
+            None
+        });
+
+        render(&mut app, vec![]);
+        let first = render(&mut app, vec![]);
+        let action = visible(&first, "Fast-forward main").expect("first action fits");
+        let cancel = visible(&first, "Cancel").expect("Cancel stays visible");
+        assert!(visible(&first, "Start a pull request").is_none());
+
+        let wheel = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -800.0),
+            phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Unknown,
+            modifiers: egui::Modifiers::NONE,
+        };
+        render(&mut app, vec![egui::Event::PointerMoved(action), wheel]);
+        for _ in 0..12 {
+            render(&mut app, vec![]);
+        }
+        let last = render(&mut app, vec![]);
+        let action = visible(&last, "Start a pull request").expect("last action fits after scrolling");
+        assert_eq!(visible(&last, "Cancel"), Some(cancel));
+
+        let click = |pressed| egui::Event::PointerButton {
+            pos: action, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
+        };
+        render(&mut app, vec![egui::Event::PointerMoved(action), click(true)]);
+        render(&mut app, vec![click(false)]);
+        assert_eq!(app.dialog.as_ref().unwrap().title, "Action selected");
     }
 
     #[test]

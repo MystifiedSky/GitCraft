@@ -57,7 +57,7 @@
     </td>
     <td width="50%" valign="top">
       <h3>Bring your AI</h3>
-      Generate commit and stash messages, explain changes, draft pull requests, and get help resolving conflicts. Connect your ChatGPT or Claude subscription through its CLI, an API provider, or a local model. AI is optional, with models configurable for each helper.
+      Generate commit and stash messages, explain changes, draft pull requests, and get help resolving conflicts. Connect your ChatGPT, Claude, or GitHub Copilot subscription through its CLI, an API provider, or a local model. AI is optional, with models configurable for each helper.
     </td>
   </tr>
   <tr>
