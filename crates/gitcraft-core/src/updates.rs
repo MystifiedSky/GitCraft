@@ -220,23 +220,18 @@ pub fn download(update: &Update, progress: impl Fn(Option<u32>) + Send) -> Resul
     Ok(path)
 }
 
-/// Install a downloaded update. On Windows the installer closes GitCraft and opens the new version
-/// itself (`Ok(false)`); elsewhere the caller quits and starts [`relaunch_target`] (`Ok(true)`).
+/// Install a downloaded update. On Windows the installer is scheduled after this
+/// process exits (`Ok(false)`); elsewhere the caller starts [`relaunch_target`] (`Ok(true)`).
 pub fn install(file: &Path) -> Result<bool, String> {
     #[cfg(windows)]
     {
-        if file.extension().is_some_and(|e| e.eq_ignore_ascii_case("msi")) {
-            // msiexec doesn't start GitCraft again: a hidden PowerShell waits for it, then does.
-            let exe = std::env::current_exe().map_err(|e| format!("Could not find GitCraft: {e}"))?;
-            let script = msi_script(file, &exe);
-            std::process::Command::new("powershell.exe")
-                .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script.as_str()])
-                .spawn()
-                .map_err(|e| format!("Could not start the installer: {e}"))?;
-            return Ok(false);
-        }
-        // Passive install with the progress bar only, then start GitCraft again.
-        std::process::Command::new(file).args(["/P", "/R"]).spawn().map_err(|e| format!("Could not start the installer: {e}"))?;
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        let exe = std::env::current_exe().map_err(|e| format!("Could not find GitCraft: {e}"))?;
+        // SAFETY: GetCurrentProcess returns a valid pseudo-handle for this process.
+        let creation_time = process_creation_time(unsafe { GetCurrentProcess() })
+            .map_err(|e| format!("Could not identify this GitCraft process: {e}"))?;
+        let script = windows_update_script(file, &exe, std::process::id(), creation_time);
+        windows_update_command(&script)?.spawn().map_err(|e| format!("Could not schedule the installer: {e}"))?;
         Ok(false)
     }
     #[cfg(target_os = "linux")]
@@ -259,17 +254,94 @@ pub fn install(file: &Path) -> Result<bool, String> {
 }
 
 /// A PowerShell quoted string.
+#[cfg(any(windows, test))]
 fn ps_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "''"))
 }
 
-/// The PowerShell that installs an MSI update with only a progress bar, waits for it, and starts
-/// GitCraft again when it succeeded (or a restart is pending).
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg(windows)]
+fn process_creation_time(handle: windows_sys::Win32::Foundation::HANDLE) -> std::io::Result<u64> {
+    use windows_sys::Win32::{Foundation::FILETIME, System::Threading::GetProcessTimes};
+    let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let (mut creation, mut exit, mut kernel, mut user) = (zero, zero, zero, zero);
+    // SAFETY: The handle refers to a process and each output points to valid, distinct storage.
+    if unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(u64::from(creation.dwHighDateTime) << 32 | u64::from(creation.dwLowDateTime))
+}
+
+#[cfg(windows)]
+fn windows_update_command(script: &str) -> Result<std::process::Command, String> {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+    let windows = std::env::var_os("SystemRoot").ok_or("Could not locate Windows PowerShell.")?;
+    let powershell = PathBuf::from(windows).join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(utf16);
+    let mut command = std::process::Command::new(powershell);
+    command.args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &encoded])
+        .creation_flags(CREATE_NO_WINDOW);
+    Ok(command)
+}
+
+/// Pin the process with a handle before checking its creation time. An exited launcher
+/// or reused PID must not stop an update or make it wait for an unrelated process.
+#[cfg(any(windows, test))]
+fn wait_for_windows_exit(pid: u32, creation_time: u64) -> String {
+    format!(r#"
+$app = Get-Process -Id {pid} -ErrorAction SilentlyContinue
+if ($null -ne $app) {{
+    $sameProcess = $false
+    try {{
+        $null = $app.Handle
+        $sameProcess = $app.StartTime.ToFileTimeUtc() -eq {creation_time}
+    }} catch {{
+        if (-not $app.HasExited) {{ throw }}
+    }}
+    if ($sameProcess -and -not $app.WaitForExit(60000)) {{
+        throw 'GitCraft did not finish closing. Close it, then reopen GitCraft and try the update again.'
+    }}
+    $app.Dispose()
+}}
+"#)
+}
+
+#[cfg(any(windows, test))]
+fn windows_update_script(file: &Path, exe: &Path, pid: u32, creation_time: u64) -> String {
+    let wait = wait_for_windows_exit(pid, creation_time);
+    let install = if file.extension().is_some_and(|e| e.eq_ignore_ascii_case("msi")) {
+        msi_script(file, exe)
+    } else {
+        format!(
+            "$p = Start-Process -FilePath {} -ArgumentList '/P','/R' -PassThru; $p.WaitForExit(); if ($p.ExitCode -ne 0) {{ throw \"GitCraft's installer exited with code $($p.ExitCode).\" }}",
+            ps_quote(&file.display().to_string())
+        )
+    };
+    format!(r#"
+$ErrorActionPreference = 'Stop'
+try {{
+    {wait}
+    while (Get-Process -Name 'gitcraft' -ErrorAction SilentlyContinue) {{
+        Add-Type -AssemblyName System.Windows.Forms
+        $choice = [Windows.Forms.MessageBox]::Show('Close the other GitCraft windows, then choose Retry to continue updating.', 'GitCraft Update', 'RetryCancel', 'Information')
+        if ($choice -ne 'Retry') {{ exit 1 }}
+    }}
+    {install}
+}} catch {{
+    Add-Type -AssemblyName System.Windows.Forms
+    [void][Windows.Forms.MessageBox]::Show($_.Exception.Message, 'GitCraft Update', 'OK', 'Error')
+    exit 1
+}}
+"#)
+}
+
+/// MSI does not relaunch GitCraft. Start it after a successful install.
+#[cfg(any(windows, test))]
 fn msi_script(file: &Path, exe: &Path) -> String {
     let package = ps_quote(&format!("\"{}\"", file.display()));
     format!(
-        "$p = Start-Process -FilePath msiexec.exe -ArgumentList '/i',{package},'/passive','/norestart' -Wait -PassThru; if ($p.ExitCode -eq 0 -or $p.ExitCode -eq 3010) {{ Start-Process -FilePath {} }}",
+        r#"$p = Start-Process -FilePath "$env:SystemRoot\System32\msiexec.exe" -ArgumentList '/i',{package},'/passive','/norestart' -PassThru; $p.WaitForExit(); if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {{ throw "Windows Installer exited with code $($p.ExitCode)." }}; Start-Process -FilePath {}"#,
         ps_quote(&exe.display().to_string())
     )
 }
@@ -383,6 +455,52 @@ mod tests {
         assert!(script.contains("'\"C:/Temp/it''s/GitCraft.msi\"'"), "{script}");
         assert!(script.contains("Start-Process -FilePath 'C:/Program Files/GitCraft/gitcraft.exe'"), "{script}");
         assert!(script.contains("'/passive','/norestart'"));
+    }
+
+    #[test]
+    fn both_windows_installers_start_after_the_process_wait() {
+        let exe = Path::new("C:/Program Files/GitCraft/gitcraft.exe");
+        for (file, args) in [("GitCraft.exe", "'/P','/R'"), ("GitCraft.msi", "'/passive','/norestart'")] {
+            let script = windows_update_script(Path::new(file), exe, 1234, 5678);
+            assert!(script.contains("Get-Process -Id 1234"));
+            assert!(script.contains("ToFileTimeUtc() -eq 5678"));
+            assert!(script.find("WaitForExit(60000)").unwrap() < script.find("Start-Process").unwrap());
+            assert!(script.contains(args));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_update_handoff_waits_for_the_exact_process() {
+        use std::{os::windows::io::AsRawHandle, process::Stdio, time::Instant};
+        let mut app = windows_update_command("[void][Console]::ReadLine()").unwrap()
+            .stdin(Stdio::piped()).spawn().unwrap();
+        let stdin = app.stdin.take().unwrap();
+        let creation = process_creation_time(app.as_raw_handle()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ready = dir.path().join("ready");
+        let installed = dir.path().join("installer started");
+        let mark = |path: &Path| format!("Set-Content -LiteralPath {} -Value ready", ps_quote(&path.display().to_string()));
+        let mut helper = windows_update_command(&format!("$ErrorActionPreference = 'Stop'\n{}\n{}\n{}",
+            mark(&ready), wait_for_windows_exit(app.id(), creation), mark(&installed),
+        )).unwrap().spawn().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !ready.is_file() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(ready.is_file(), "the Windows helper did not reach the wait");
+
+        // A stale creation time must not wait for this still-running process.
+        let status = windows_update_command(&format!("$ErrorActionPreference = 'Stop'\n{}", wait_for_windows_exit(app.id(), creation + 1)))
+            .unwrap().status().unwrap();
+        assert!(status.success());
+        assert!(app.try_wait().unwrap().is_none());
+        assert!(!installed.exists(), "the installer ran while GitCraft was still open");
+
+        drop(stdin);
+        assert!(app.wait().unwrap().success());
+        assert!(helper.wait().unwrap().success());
+        assert!(installed.is_file(), "the installer did not run after GitCraft exited");
     }
 
     #[test]

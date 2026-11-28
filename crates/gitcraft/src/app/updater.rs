@@ -173,7 +173,7 @@ impl App {
                 }
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
-            // The installer closes GitCraft and opens the new version itself.
+            // The Windows installer is scheduled to run once this process has closed.
             Ok(false) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Err(e) => {
                 self.discarding = false;

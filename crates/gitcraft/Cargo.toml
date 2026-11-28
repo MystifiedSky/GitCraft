@@ -70,6 +70,24 @@ component-refs = ["GitCraftExplorerCommands"]
 installer-mode = "currentUser"
 # "Open in GitCraft" on folders and folder backgrounds in Explorer, removed again on uninstall.
 preinstall-section = """
+; Previous GitCraft versions launch the passive installer just before exiting.
+Section -WaitForGitCraft
+  StrCmp $PassiveMode 1 0 gitcraft_wait_done
+  gitcraft_wait_start:
+    StrCpy $R9 20
+  gitcraft_wait_check:
+    nsis_tauri_utils::FindProcess "${MAINBINARYNAME}.exe"
+    Pop $R8
+    StrCmp $R8 0 0 gitcraft_wait_done
+    Sleep 250
+    IntOp $R9 $R9 - 1
+    IntCmp $R9 0 gitcraft_wait_prompt gitcraft_wait_prompt gitcraft_wait_check
+  gitcraft_wait_prompt:
+    MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "$(appRunning)" /SD IDCANCEL IDRETRY gitcraft_wait_start
+    Abort
+  gitcraft_wait_done:
+SectionEnd
+
 Section ExplorerCommands
   WriteRegStr HKCU "Software\\Classes\\Directory\\shell\\GitCraft" "" "Open in GitCraft"
   WriteRegStr HKCU "Software\\Classes\\Directory\\shell\\GitCraft\\command" "" '"$INSTDIR\\${MAINBINARYNAME}.exe" "%1"'
