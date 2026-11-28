@@ -55,18 +55,19 @@ pub fn save(path: &Path, settings: &Value) -> Result<(), String> {
     write_atomic(path, &serde_json::to_vec_pretty(settings).map_err(|error| error.to_string())?).map_err(|error| error.to_string())
 }
 
-/// What one window changed since it last saved: preferences by key, and whole top-level
-/// sections (`tabs`, `drafts`, `profiles`, or all of `settings` when a profile is switched).
-/// `None` removes the key.
+/// What one window changed since it last saved: preferences by key, entries of map preferences
+/// changed one at a time, and whole top-level sections (`tabs`, `drafts`, `profiles`, or all of
+/// `settings` when a profile is switched). `None` removes the key or entry.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Changes {
     pub settings: std::collections::BTreeMap<String, Option<Value>>,
+    pub entries: std::collections::BTreeMap<String, std::collections::BTreeMap<String, Option<Value>>>,
     pub sections: std::collections::BTreeMap<String, Option<Value>>,
 }
 
 impl Changes {
     pub fn is_empty(&self) -> bool {
-        self.settings.is_empty() && self.sections.is_empty()
+        self.settings.is_empty() && self.entries.is_empty() && self.sections.is_empty()
     }
 
     /// `doc` with these changes made: sections first, then the preferences on top.
@@ -81,7 +82,7 @@ impl Changes {
                 None => root.remove(key),
             };
         }
-        if self.settings.is_empty() {
+        if self.settings.is_empty() && self.entries.is_empty() {
             return;
         }
         let settings = root.entry("settings").or_insert_with(|| Value::Object(serde_json::Map::new()));
@@ -94,6 +95,22 @@ impl Changes {
                 Some(value) => settings.insert(key.clone(), value.clone()),
                 None => settings.remove(key),
             };
+        }
+        for (key, entries) in &self.entries {
+            let value = settings.entry(key.clone()).or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if !value.is_object() {
+                *value = Value::Object(serde_json::Map::new());
+            }
+            let map = value.as_object_mut().expect("just made an object");
+            for (entry, value) in entries {
+                match value {
+                    Some(value) => map.insert(entry.clone(), value.clone()),
+                    None => map.remove(entry),
+                };
+            }
+            if map.is_empty() {
+                settings.remove(key);
+            }
         }
     }
 }
@@ -208,5 +225,22 @@ mod tests {
         third.sections.insert("settings".into(), Some(serde_json::json!({"theme": "dark"})));
         third.settings.insert("zoom".into(), Some(serde_json::json!(2)));
         assert_eq!(save_changes(&path, &third).unwrap()["settings"], serde_json::json!({"theme": "dark", "zoom": 2}));
+    }
+
+    #[test]
+    fn entries_of_a_map_setting_merge_across_windows() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        save(&path, &serde_json::json!({"settings": {"tabWidths": {"/a": 100}}})).unwrap();
+        let mut first = Changes::default();
+        first.entries.entry("tabWidths".into()).or_default().insert("/b".into(), Some(serde_json::json!(200)));
+        assert_eq!(save_changes(&path, &first).unwrap()["settings"]["tabWidths"], serde_json::json!({"/a": 100, "/b": 200}));
+        let mut second = Changes::default();
+        second.entries.entry("tabWidths".into()).or_default().insert("/a".into(), None);
+        let merged = save_changes(&path, &second).unwrap();
+        assert_eq!(merged["settings"]["tabWidths"], serde_json::json!({"/b": 200}));
+        let mut third = Changes::default();
+        third.entries.entry("tabWidths".into()).or_default().insert("/b".into(), None);
+        assert_eq!(save_changes(&path, &third).unwrap()["settings"].get("tabWidths"), None);
     }
 }
