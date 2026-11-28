@@ -6,6 +6,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Added
 
+- Use your GitHub Copilot subscription for GitCraft’s AI helpers. Sign in with GitHub from Preferences → AI or reuse your Copilot CLI sign-in.
 - Move the commit details panel below the commit graph or back to the right from the panel header or the View menu, and resize it in either layout. ([#57](https://github.com/MystifiedSky/GitCraft/pull/57))
 - Live agent status: set up Claude Code or Codex in Preferences > External Tools, and the Agents view shows whether each session is running, waiting for you or done. Claude Code's permission requests appear on the worktree card with the command it wants to run, to allow or deny there; an unanswered request is asked in the terminal as before. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
 - The graph marks the commit each other worktree has checked out with a count of its uncommitted changes; click it to open that worktree. Turn it off in Preferences > Agents. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
@@ -64,6 +65,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 ### Changed
 
 - Repository tabs now widen to fit their name and only shorten it with an ellipsis when the strip is full, sharing the space with the other tabs. Dragging a tab's edge still sets a fixed width, and double-clicking it fits the name again. Dragging a tab to reorder it lifts it under the pointer, leaving a gap where it will land. ([#61](https://github.com/MystifiedSky/GitCraft/pull/61))
+- Use consistent buttons in the branch drag-and-drop dialog, with a scrollable action list for smaller windows.
 - The collapsed left panel lists Patches instead of Cloud Patches, matching the expanded panel. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
 - Speed up release builds by reusing passing tests for the release commit and compiling macOS architectures in parallel. Verify update signatures before publishing. ([#55](https://github.com/MystifiedSky/GitCraft/pull/55))
 
@@ -82,6 +84,8 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
+- If a file is locked on Windows, Discard All names it and stops before stashing or removing changes.
+- Open repositories and reveal files in Windows Explorer when Git reports paths with forward slashes.
 - Keep dialog buttons inside the dialog box: wrap them onto new rows, shorten long labels with a tooltip, and truncate long titles. ([#60](https://github.com/MystifiedSky/GitCraft/pull/60))
 - Drag and drop every branch in the list a commit's +N badge opens, not only the first label. ([#60](https://github.com/MystifiedSky/GitCraft/pull/60))
 - Restore the GitCraft icon on Windows taskbar pins, shortcuts, and the executable in Explorer.

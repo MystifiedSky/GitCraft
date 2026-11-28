@@ -477,7 +477,9 @@ impl App {
                                         0 => run = Some((vec![path.clone()], false)),
                                         1 => run = Some((vec![path.clone()], true)),
                                         2 => {
-                                            let _ = gitcraft_core::shell::open_path(Path::new(path));
+                                            if let Err(error) = gitcraft_core::shell::open_path(Path::new(path)) {
+                                                app.toast(false, error);
+                                            }
                                         }
                                         _ => remove.push(path.clone()),
                                     }

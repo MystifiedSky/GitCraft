@@ -270,6 +270,41 @@ fn discard_without_new_changes_preserves_an_existing_stash() {
     assert!(engine.undo_info(&path.to_string_lossy()).undo.is_none());
 }
 
+#[cfg(windows)]
+#[test]
+fn discard_with_a_locked_file_preserves_changes_and_retries() {
+    use std::{fs, os::windows::fs::OpenOptionsExt};
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+    let folder = fixture("gitcraft-discard-locked-");
+    let dir = folder.path();
+    let repo = dir.to_string_lossy();
+    fs::write(dir.join("file.txt"), "staged change\n").unwrap();
+    assert!(git::run(dir, &["add", "file.txt"]).ok);
+    fs::write(dir.join("file.txt"), "working change\n").unwrap();
+    let locked_path = dir.join("running.exe");
+    fs::write(&locked_path, b"untracked change").unwrap();
+    let lock = fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(&locked_path).unwrap();
+    let status = || git::run(dir, &["status", "--porcelain=v1"]).stdout;
+    let before = status();
+    let engine = Engine::default();
+    let result = engine.perform(&repo, Action::DiscardAll);
+    assert!(!result.ok);
+    assert!(git::run(dir, &["stash", "list"]).stdout.is_empty(), "a rejected discard must leave no stash");
+    assert!(result.message.contains("running.exe") && result.message.contains("in use"), "{}", result.message);
+    assert_eq!(status(), before);
+    assert!(engine.undo_info(&repo).undo.is_none());
+
+    drop(lock);
+    let result = engine.perform(&repo, Action::DiscardAll);
+    assert!(result.ok, "{}", result.message);
+    assert!(status().is_empty());
+    let result = engine.perform(&repo, Action::Undo);
+    assert!(result.ok, "{}", result.message);
+    assert_eq!(status(), before);
+    assert_eq!(fs::read(locked_path).unwrap(), b"untracked change");
+}
+
 #[test]
 fn editor_saves_refuse_newer_disk_contents_and_deletions() {
     let folder = fixture("gitcraft-editor-version-"); let path = folder.path();

@@ -1719,9 +1719,9 @@ impl Engine {
                 if !changed.ok { return done(changed, ""); }
                 let mut backup = None;
                 if !changed.stdout.is_empty() {
-                    let stash = match self.stash_for_discard(dir, Some(&found)) {
+                    let stash = match self.stash_for_discard(dir, Some(&found), "Auto stash before discard") {
                         Ok(stash) => stash,
-                        Err(error) => return error,
+                        Err(error) => return done(error, ""),
                     };
                     let saved = crate::discard_backups::save_before_file_restore(dir, &stash, source, &found);
                     if !saved.ok {
@@ -1895,30 +1895,69 @@ impl Engine {
         self.git(dir, &args)
     }
 
-    fn stash_for_discard(&self, dir: &Path, paths: Option<&[&str]>) -> Result<String, ActionResult> {
+    #[cfg(windows)]
+    fn check_discard_locks(&self, dir: &Path, paths: Option<&[&str]>) -> Result<(), git::GitOut> {
+        use std::{fs::OpenOptions, os::windows::fs::OpenOptionsExt};
+        use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION, ERROR_USER_MAPPED_FILE};
+        use windows_sys::Win32::Storage::FileSystem::{DELETE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_WRITE_DATA};
+
+        let mut args = vec!["--no-optional-locks", "status", "--porcelain=v1", "-z", "-uall", "--no-renames"];
+        if let Some(paths) = paths {
+            args.push("--");
+            args.extend_from_slice(paths);
+        }
+        let status = self.git(dir, &args);
+        if !status.ok {
+            return Err(status);
+        }
+        for path in status.stdout.split('\0').filter_map(|entry| entry.get(3..)) {
+            // A running executable may allow a DELETE handle but refuse write access.
+            // Request both without writing, truncating or following a symlink.
+            let access = OpenOptions::new().access_mode(DELETE | FILE_WRITE_DATA)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT).open(dir.join(path));
+            let error = access.err().and_then(|error| error.raw_os_error()).map(|code| code as u32);
+            if matches!(error, Some(ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION | ERROR_USER_MAPPED_FILE)) {
+                return Err(git::GitOut::failed(&format!(
+                    "Cannot discard changes while \"{path}\" is in use. Close the program using it, then try again."
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn stash_for_discard(&self, dir: &Path, paths: Option<&[&str]>, subject: &str) -> Result<String, git::GitOut> {
+        // Git writes the stash before cleanup. Check for Windows file locks before either step.
+        #[cfg(windows)]
+        self.check_discard_locks(dir, paths)?;
         // Keep an automatic stash so the discard can be undone.
-        let mut a = vec!["stash", "push", "--include-untracked", "-m", "Auto stash before discard"];
+        let mut a = vec!["stash", "push", "--include-untracked", "-m", subject];
         if let Some(p) = paths {
             a.push("--");
             a.extend(p.iter().copied());
         }
         let previous = self.rev(dir, "stash@{0}");
         let o = self.git(dir, &a);
-        if !o.ok {
-            return Err(ActionResult { ok: false, message: o.message() });
-        }
         let sha = self.rev(dir, "stash@{0}");
+        if !o.ok {
+            if !sha.is_empty() && sha != previous {
+                return Err(git::GitOut::failed(&format!(
+                    "Git saved a backup in Stashes before cleanup failed. Some changes may already have been removed.\n{}",
+                    o.message()
+                )));
+            }
+            return Err(o);
+        }
         if sha.is_empty() || sha == previous {
-            return Err(ActionResult { ok: false, message: DISCARD_NOTHING.into() });
+            return Err(git::GitOut::failed(DISCARD_NOTHING));
         }
         Ok(sha)
     }
 
     fn discard(&self, repo: &str, dir: &Path, paths: Option<Vec<String>>) -> ActionResult {
         let pathspec = paths.as_ref().map(|paths| paths.iter().map(String::as_str).collect::<Vec<_>>());
-        let sha = match self.stash_for_discard(dir, pathspec.as_deref()) {
+        let sha = match self.stash_for_discard(dir, pathspec.as_deref(), "Auto stash before discard") {
             Ok(sha) => sha,
-            Err(error) => return error,
+            Err(error) => return ActionResult { ok: false, message: error.message() },
         };
         let backup = crate::discard_backups::save(dir, &sha);
         if backup.ok && self.rev(dir, "stash@{0}") == sha { let _ = self.git(dir, &["stash", "drop", "-q"]); }
@@ -2009,18 +2048,15 @@ impl Engine {
                 if !matches!((redo_state.as_deref(), discard_state(dir)), (Some(expected), Ok(current)) if expected == current) {
                     return git::GitOut::failed("The working tree changed after Undo. Discard the intended files again instead of redoing this action.");
                 }
-                let previous = self.rev(dir, "stash@{0}");
-                let mut args = vec!["stash", "push", "--include-untracked", "-m", "Auto stash before redo discard"];
-                if let Some(paths) = paths { args.push("--"); args.extend(paths.iter().map(String::as_str)); }
-                let out = self.git(dir, &args);
-                if out.ok && self.rev(dir, "stash@{0}") == previous { return git::GitOut::failed("There are no changes to discard."); }
-                if out.ok {
-                    let sha = self.rev(dir, "stash@{0}");
-                    if crate::discard_backups::save(dir, &sha).ok && self.rev(dir, "stash@{0}") == sha {
-                        let _ = self.git(dir, &["stash", "drop", "-q"]);
-                    }
+                let pathspec = paths.as_ref().map(|paths| paths.iter().map(String::as_str).collect::<Vec<_>>());
+                let sha = match self.stash_for_discard(dir, pathspec.as_deref(), "Auto stash before redo discard") {
+                    Ok(sha) => sha,
+                    Err(error) => return error,
+                };
+                if crate::discard_backups::save(dir, &sha).ok && self.rev(dir, "stash@{0}") == sha {
+                    let _ = self.git(dir, &["stash", "drop", "-q"]);
                 }
-                out
+                git::GitOut { ok: true, stdout: String::new(), stderr: String::new() }
             },
             (UndoRec::Rewrite { before, .. }, true) => self.git(dir, &["reset", "-q", "--keep", before]),
             (UndoRec::Rewrite { after, .. }, false) => self.git(dir, &["reset", "-q", "--keep", after]),

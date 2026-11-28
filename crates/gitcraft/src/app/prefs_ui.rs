@@ -1456,24 +1456,29 @@ impl App {
     fn ai_section(&mut self, ui: &mut Ui, pui: &mut PrefsUi) {
         let c = p();
         h(ui, "AI");
-        note(ui, "Use your ChatGPT or Claude subscription, a hosted API, or a local server for GitCraft’s AI helpers.");
+        note(ui, "Use your ChatGPT, Claude, or GitHub Copilot subscription, a hosted API, or a local server for GitCraft’s AI helpers.");
         let ai = self.ai_config();
         let a = |k: &str| Target::Ai(k.into());
         let provider = ai.provider.clone();
-        let cli = matches!(provider.as_str(), "codex" | "claude_code");
-        let (cli_name, cli_login, cli_folder, cli_var, cli_docs) = if provider == "codex" { ("Codex CLI", "codex login", "~/.codex", "CODEX_HOME", "https://developers.openai.com/codex/cli") } else { ("Claude Code", "claude auth login", "~/.claude", "CLAUDE_CONFIG_DIR", "https://code.claude.com/docs/en/quickstart") };
+        let cli = gitcraft_core::ai_cli::Agent::from_provider(&provider).is_some();
+        let (cli_name, cli_login, cli_folder, cli_var, cli_docs) = match provider.as_str() {
+            "codex" => ("Codex CLI", "codex login", "~/.codex", "CODEX_HOME", "https://developers.openai.com/codex/cli"),
+            "copilot" => ("GitHub Copilot CLI", "copilot login", "~/.copilot", "COPILOT_HOME", "https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/authenticate-copilot-cli"),
+            _ => ("Claude Code", "claude auth login", "~/.claude", "CLAUDE_CONFIG_DIR", "https://code.claude.com/docs/en/quickstart"),
+        };
         let label = match provider.as_str() {
             "anthropic" => "Anthropic",
             "openai" => "OpenAI",
             "codex" => "ChatGPT",
             "claude_code" => "Claude",
+            "copilot" => "GitHub Copilot",
             "google" => "Google",
             "ollama" => "Ollama",
             _ => "compatible server",
         };
         row(ui, "Enable AI", "Commit and stash messages, commit composition, change explanations, pull request drafts and conflict resolution all use this connection.", None, None, false, |ui| self.toggle(ui, a("enabled"), true));
         row(ui, "Provider", "Requests go directly to this connection when you press an AI button. A local connection keeps your code on your server.", None, None, false, |ui| {
-            let options = [("anthropic", "Anthropic API (Claude)"), ("openai", "OpenAI API"), ("codex", "ChatGPT subscription (Codex CLI)"), ("claude_code", "Claude subscription (Claude Code)"), ("google", "Google (Gemini)"), ("ollama", "Ollama (local AI)"), ("custom", "Local / OpenAI-compatible API")];
+            let options = [("anthropic", "Anthropic API (Claude)"), ("openai", "OpenAI API"), ("codex", "ChatGPT subscription (Codex CLI)"), ("claude_code", "Claude subscription (Claude Code)"), ("copilot", "GitHub Copilot subscription (Copilot CLI)"), ("google", "Google (Gemini)"), ("ollama", "Ollama (local AI)"), ("custom", "Local / OpenAI-compatible API")];
             let shown = options.iter().find(|(v, _)| *v == provider).map(|(_, l)| *l).unwrap_or("");
             let mut chosen = None;
             let w = ui.available_width();
@@ -1497,7 +1502,22 @@ impl App {
             }
         });
         if cli {
-            row(ui, &format!("{label} sign-in"), &format!("Install {cli_name}, then run {cli_login} in a terminal and sign in to your {label} account. Requests use that CLI’s allowance. GitCraft passes the context needed for the helper to {cli_name}."), None, None, false, |ui| {
+            let sign_in_help = if provider == "copilot" {
+                "Install GitHub Copilot CLI, then sign in with GitHub or reuse an existing Copilot CLI sign-in. AI requests use your Copilot allowance.".into()
+            } else {
+                format!("Install {cli_name}, then run {cli_login} in a terminal and sign in to your {label} account. Requests use that CLI’s allowance. GitCraft passes the context needed for the helper to {cli_name}.")
+            };
+            row(ui, &format!("{label} sign-in"), &sign_in_help, None, None, false, |ui| {
+                if provider == "copilot" {
+                    let waiting = self.prefs_data.busy.iter().any(|b| b == "copilot_sign_in");
+                    if pbutton(ui, if waiting { "Waiting for GitHub…" } else { "Sign in with GitHub" }, Kind::Primary, !waiting) {
+                        let config = self.ai_config();
+                        pui.test = None;
+                        self.prefs_task("copilot_sign_in", move || gitcraft_core::ai_cli::sign_in_copilot(&config.cli_path, &config.cli_config_dir), |app, ()| {
+                            app.toast(true, "Signed in to GitHub Copilot.");
+                        });
+                    }
+                }
                 if pbutton(ui, "Setup Guide", Kind::Default, true) {
                     self.open_url(cli_docs);
                 }
@@ -1972,6 +1992,24 @@ use chrono::TimeZone;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn headless_copilot_preferences_show_sign_in_and_models() {
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = App::new(&cc, crate::app::StartOptions::default(), crate::settings::Store::in_memory());
+        app.choose_provider("copilot", None);
+        let mut prefs = PrefsUi::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.ai_section(ui, &mut prefs));
+        output.textures_delta.clear();
+        let painted: Vec<_> = output.shapes.iter().filter_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) => Some(text.galley.text()),
+            _ => None,
+        }).collect();
+        assert!(painted.contains(&"Sign in with GitHub"));
+        assert!(painted.contains(&"Fetch Models"));
+        assert!(!painted.contains(&"Provider API Key"));
+    }
 
     #[test]
     fn headless_preference_fields_mask_only_credentials() {
