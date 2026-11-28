@@ -545,7 +545,6 @@ impl App {
             (screen.height() * 0.18).min((screen.height() - 180.0).max(8.0))
         };
         let has_footer = dialog.cancel.is_some() || !dialog.choices.is_empty();
-        let footer_height = if has_footer { 44.0 } else { 0.0 };
         let available_height = screen.bottom() - top - 8.0;
         let max_height = if stacked { available_height } else { (screen.height() * 0.75).max(180.0).min(available_height) };
         let token = dialog.token;
@@ -559,10 +558,19 @@ impl App {
                     ui.set_max_height(max_height);
                 }
                 ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+                let footer_height = if has_footer {
+                    let labels = dialog.choices.iter().enumerate().rev().map(|(i, choice)| {
+                        if dialog.busy.is_some() && i + 1 == dialog.choices.len() { dialog.busy.as_deref().unwrap_or_default() } else { choice.label.as_str() }
+                    }).chain(dialog.cancel.as_deref());
+                    footer_needed_height(ui, labels, width)
+                } else {
+                    0.0
+                };
                 // Header.
                 let (head, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
-                ui.painter().text(pos2(head.left() + 16.0, head.center().y), Align2::LEFT_CENTER, &dialog.title, FontId::proportional(14.0), c.white(1.0));
                 ui.painter().line_segment([head.left_bottom(), head.right_bottom()], Stroke::new(1.0, c.line));
+                let title = widgets::fit(ui, &dialog.title, FontId::proportional(14.0), c.white(1.0), width - 56.0);
+                ui.painter().galley(pos2(head.left() + 16.0, head.center().y - title.size().y / 2.0), title, c.white(1.0));
                 let x = Rect::from_center_size(pos2(head.right() - 24.0, head.center().y), Vec2::splat(22.0));
                 let xr = ui.interact(x, ui.scope_id().with("close"), Sense::click());
                 icons::paint(ui, x, Icon::X, 16.0, if xr.hovered() { c.white(1.0) } else { c.fg2 });
@@ -664,22 +672,30 @@ impl App {
                 // Footer.
                 if has_footer {
                     ui.add_space(0.0);
-                    let (foot, _) = ui.allocate_exact_size(vec2(width, 44.0), Sense::hover());
-                    let mut row = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(foot.min, pos2(foot.right() - 16.0, foot.bottom() - 16.0))).layout(egui::Layout::right_to_left(egui::Align::Center)));
-                    row.spacing_mut().item_spacing.x = 8.0;
+                    let (foot, _) = ui.allocate_exact_size(vec2(width, footer_height), Sense::hover());
+                    #[cfg(test)]
+                    ui.data_mut(|d| d.insert_temp(egui::Id::NULL.with("dialog_footer"), foot));
+                    let mut row = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(foot.left() + 16.0, foot.top() + 8.0), pos2(foot.right() - 16.0, foot.bottom() - 8.0))).layout(egui::Layout::right_to_left(egui::Align::Min).with_main_wrap(true)));
+                    row.spacing_mut().item_spacing = vec2(8.0, 8.0);
                     let running = dialog.busy.is_some();
                     for i in (0..dialog.choices.len()).rev() {
                         let ch = &dialog.choices[i];
-                        let label = if running && i == dialog.choices.len() - 1 { dialog.busy.clone().unwrap_or_default() } else { ch.label.clone() };
+                        let full = if running && i == dialog.choices.len() - 1 { dialog.busy.clone().unwrap_or_default() } else { ch.label.clone() };
+                        let label = footer_label(&row, &full, width - 32.0);
                         let enabled = !running && (blocked.is_none() || ch.kind != Kind::Primary);
-                        if widgets::button(&mut row, ch.kind, None, &label, 28.0, enabled).clicked() {
+                        let response = widgets::button_labeled(&mut row, ch.kind, None, &label, &full, 28.0, enabled);
+                        let response = if label == full { response } else { response.on_hover_text(&full) };
+                        if response.clicked() {
                             chosen = Some(i);
                         }
                     }
-                    if let Some(cancel) = &dialog.cancel
-                        && widgets::button(&mut row, Kind::Default, None, cancel, 28.0, !running).clicked()
-                    {
-                        close = true;
+                    if let Some(cancel) = &dialog.cancel {
+                        let label = footer_label(&row, cancel, width - 32.0);
+                        let response = widgets::button_labeled(&mut row, Kind::Default, None, &label, cancel, 28.0, !running);
+                        let response = if label == *cancel { response } else { response.on_hover_text(cancel) };
+                        if response.clicked() {
+                            close = true;
+                        }
                     }
                 }
             });
@@ -721,6 +737,46 @@ impl App {
         }
         self.dialog = Some(dialog);
     }
+}
+
+/// Width of a footer button with `label`, as `widgets::button` draws it.
+fn footer_button_width(ui: &Ui, label: &str) -> f32 {
+    let text = ui.painter().layout_no_wrap(label.to_owned(), FontId::proportional(13.0), Color32::WHITE).size().x;
+    text + 24.0
+}
+
+/// `label` cut with … so its button fits `available`; the full label belongs in a tooltip.
+fn footer_label(ui: &Ui, label: &str, available: f32) -> String {
+    if footer_button_width(ui, label) <= available {
+        return label.to_owned();
+    }
+    let max_text = (available - 24.0).max(0.0);
+    let mut kept: Vec<char> = label.chars().collect();
+    while !kept.is_empty() {
+        kept.pop();
+        let candidate = format!("{}…", kept.iter().collect::<String>().trim_end());
+        if ui.painter().layout_no_wrap(candidate.clone(), FontId::proportional(13.0), Color32::WHITE).size().x <= max_text {
+            return candidate;
+        }
+    }
+    "…".into()
+}
+
+/// Room the footer needs for `labels`, which wrap within `width` like the buttons do.
+fn footer_needed_height<'a>(ui: &Ui, labels: impl Iterator<Item = &'a str>, width: f32) -> f32 {
+    let available = (width - 32.0).max(1.0);
+    let mut used = 0.0;
+    let mut rows = 1;
+    for label in labels {
+        let button = footer_button_width(ui, label).min(available);
+        if used > 0.0 && used + 8.0 + button > available {
+            rows += 1;
+            used = button;
+        } else {
+            used += (if used > 0.0 { 8.0 } else { 0.0 }) + button;
+        }
+    }
+    16.0 + rows as f32 * 28.0 + (rows - 1) as f32 * 8.0
 }
 
 /// The dialog's body: text, a form, or a list. Enter in a text field presses the last button.
@@ -971,6 +1027,68 @@ fn headless_short_dialog_does_not_constrain_the_next_body() {
             assert!(shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text() == label && s.clip_rect.contains_rect(t.visual_bounding_rect()))), "{label} is clipped");
         }
     }
+}
+
+#[test]
+fn headless_long_choices_wrap_inside_the_dialog() {
+    let ctx = egui::Context::default();
+    let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+    let mut app = App::new(&cc, super::StartOptions::default(), crate::settings::Store::in_memory());
+    let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(760.0, 520.0));
+    let width = 440.0;
+    let labels = [
+        "Merge feature/a-very-long-branch-name into main",
+        "Rebase feature/a-very-long-branch-name onto main",
+        "Merge main into feature/a-very-long-branch-name",
+        "Fast-forward main to feature/a-very-long-branch-name",
+        "Start a pull request from feature/a-very-long-branch-name into main",
+        "Push",
+    ];
+    let mut d = Dialog::new("Choose what to do with feature/a-very-long-branch-name and main", Body::Text("Choose an action.".into())).width(width);
+    for label in labels {
+        d = d.choice(label, Kind::Default, |_, _| {});
+    }
+    app.dialog = Some(d);
+    let mut shapes = Vec::new();
+    for _ in 0..3 {
+        let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |_| app.draw_dialog(&ctx));
+        output.textures_delta.clear();
+        shapes = output.shapes;
+    }
+    let left = screen.center().x - width / 2.0 + 1.0;
+    let right = screen.center().x + width / 2.0 - 1.0;
+    let footer: Rect = ctx.data(|d| d.get_temp(egui::Id::NULL.with("dialog_footer"))).expect("footer rect");
+    let mut found = vec![false; labels.len()];
+    let mut cancel_seen = false;
+    let mut title_seen = false;
+    let mut rows = std::collections::BTreeSet::new();
+    for shape in &shapes {
+        let egui::Shape::Text(t) = &shape.shape else { continue };
+        let text = t.galley.text();
+        if text.starts_with("Choose what to do") {
+            let rect = t.visual_bounding_rect();
+            assert!(rect.left() >= left && rect.right() <= right, "the title is outside the dialog: {rect:?}");
+            assert!(rect.top() >= screen.top() && rect.bottom() <= screen.bottom(), "the title is outside the screen: {rect:?}");
+            title_seen = true;
+            continue;
+        }
+        let shown = text.trim_end_matches('…');
+        let choice = if text == "Cancel" { Some(labels.len()) } else { labels.iter().position(|label| label.starts_with(shown)) };
+        if let Some(i) = choice {
+            assert!(!found.get(i).copied().unwrap_or(cancel_seen), "{text} matched more than once");
+            if i == labels.len() { cancel_seen = true } else { found[i] = true }
+            let rect = t.visual_bounding_rect();
+            let button = Rect::from_min_max(pos2(rect.left() - 12.0, rect.center().y - 14.0), pos2(rect.right() + 12.0, rect.center().y + 14.0));
+            assert!(button.left() >= left && button.right() <= right, "{text} button is outside the dialog: {button:?}");
+            assert!(button.top() >= screen.top() && button.bottom() <= screen.bottom(), "{text} button is outside the screen: {button:?}");
+            assert!(footer.contains_rect(button), "{text} button {button:?} is outside the footer {footer:?}");
+            rows.insert(button.top().round() as i32);
+        }
+    }
+    assert!(title_seen, "the title must be drawn");
+    assert!(found.iter().all(|seen| *seen), "every choice must be drawn");
+    assert!(cancel_seen, "Cancel must be drawn");
+    assert!(rows.len() > 1, "mixed short and long choices must wrap onto more than one row");
 }
 
 /// Where a repository can come from: the left list of the Clone and Init dialogs.

@@ -557,6 +557,18 @@ impl App {
         self.remember_tabs();
     }
 
+    /// The tab for `path`, opened in the background if it isn't open yet.
+    pub(crate) fn repo_tab_id(&mut self, path: &str) -> u64 {
+        if let Some(tab) = self.tabs.iter().find(|t| t.path().is_some_and(|p| same_folder(p, path))) {
+            return tab.id;
+        }
+        let tab = self.repo_tab(path.to_owned());
+        let id = tab.id;
+        self.tabs.push(tab);
+        self.remember_tabs();
+        id
+    }
+
     /// A missing repository was found at `path`: its tab shows that repository in the same place, without being
     /// counted as a closed tab. When the repository is already open in another tab, that tab is used instead.
     fn locate_tab(&mut self, tab: u64, path: &str) {
@@ -963,8 +975,12 @@ impl App {
                 self.finish_busy_repo(&path);
                 let result = match result {
                     DesktopActionResult::Performed(result) => result,
-                    DesktopActionResult::OpenWorktree(worktree) => {
-                        self.checkout_opened_worktree(tab, &worktree);
+                    DesktopActionResult::OpenWorktree { path, action } => {
+                        self.checkout_opened_worktree(tab, &path);
+                        if let Some(action) = action {
+                            let dest = self.repo_tab_id(&path);
+                            self.act_quiet(dest, action, quiet);
+                        }
                         return;
                     }
                 };
@@ -985,15 +1001,15 @@ impl App {
                 if matches!(*action, Action::Reset { .. }) {
                     self.recompose_reset_done(tab, result.ok);
                 }
-                // A checkout shows the working changes of the branch (or commit) now checked out.
+                // A checkout, merge, rebase or squash merge shows the working changes they leave behind.
                 if result.ok
-                    && matches!(*action, Action::Checkout { .. } | Action::CheckoutRemote { .. })
+                    && matches!(*action, Action::Checkout { .. } | Action::CheckoutRemote { .. } | Action::Merge { .. } | Action::MergeSquash { .. } | Action::Rebase { .. })
                     && let Some(r) = self.repo_mut(tab)
                 {
                     r.ui.select(repo::Selection::Wip);
                 }
-                // Keep submodules up to date: after a pull or a checkout, by the repository's choice or the global one.
-                if result.ok && matches!(*action, Action::Pull { .. } | Action::Checkout { .. } | Action::CheckoutRemote { .. } | Action::Merge { .. } | Action::Rebase { .. }) {
+                // Keep submodules up to date: after a pull, checkout or squash merge, by the repository's choice or the global one.
+                if result.ok && matches!(*action, Action::Pull { .. } | Action::Checkout { .. } | Action::CheckoutRemote { .. } | Action::Merge { .. } | Action::MergeSquash { .. } | Action::Rebase { .. }) {
                     self.update_submodules_after(tab);
                 }
                 if let Action::Stash { message } = &*action
@@ -1004,10 +1020,10 @@ impl App {
                     // Newer text typed while the stash ran is kept.
                     r.work.stash_message.clear();
                 }
-                if let Action::MergeSquash { branch } = &*action
+                if let Action::MergeSquash { branch, into, .. } = &*action
                     && result.ok
                 {
-                    self.squash_done(tab, branch);
+                    self.squash_done(tab, branch, into.as_deref());
                 }
                 if let Action::TakeSide { paths, .. } = &*action
                     && result.ok
@@ -1159,5 +1175,45 @@ mod tests {
         assert_eq!(folder_name(r"/home/a\b"), r"a\b");
         assert!(same_folder("/a/b/", "/a/b"));
         assert!(!same_folder("/a/b", "/a/c"));
+    }
+
+    #[test]
+    fn carried_actions_find_a_background_tab_for_the_worktree() {
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx);
+        let mut app = App::new(&cc, StartOptions::default(), crate::settings::Store::in_memory());
+        let before = app.tabs.len();
+        let path = std::env::temp_dir().join(format!("gitcraft-carried-tab-{}", std::process::id()));
+        let path = path.to_string_lossy().to_string();
+        let id = app.repo_tab_id(&path);
+        assert_eq!(app.tabs.len(), before + 1);
+        assert_eq!(app.repo_tab_id(&path), id);
+        assert_eq!(app.tabs.len(), before + 1);
+    }
+
+    #[test]
+    fn carried_action_reaches_an_inactive_destination_tab() {
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx);
+        let mut app = App::new(&cc, StartOptions::default(), crate::settings::Store::in_memory());
+        let source_path = std::env::temp_dir().join(format!("gitcraft-carried-source-{}", std::process::id()));
+        std::fs::create_dir_all(&source_path).unwrap();
+        let source_path = source_path.to_string_lossy().to_string();
+        let source = app.repo_tab_id(&source_path);
+        app.new_tab();
+        assert_ne!(app.active, source, "the source tab must be inactive");
+        let dest = std::env::temp_dir().join(format!("gitcraft-carried-action-{}", std::process::id()));
+        let dest = dest.to_string_lossy().to_string();
+        let action = Action::Merge { branch: "refs/heads/source".into(), into: Some("target".into()), changes: gitcraft_core::actions::CheckoutChanges::Ask };
+        app.handle(Msg::Acted {
+            tab: source,
+            path: source_path,
+            action: Box::new(action.clone()),
+            quiet: false,
+            result: DesktopActionResult::OpenWorktree { path: dest.clone(), action: Some(action) },
+        });
+        let tab = app.tabs.iter().find(|t| t.path().is_some_and(|p| same_folder(p, &dest))).expect("destination tab");
+        let repo = app.repos.get(&tab.id).expect("destination repository");
+        assert!(repo.running.is_some(), "the carried action must start in the destination");
     }
 }

@@ -95,6 +95,11 @@ pub fn stash_message(message: &str, branch: &str) -> String {
     format!("WIP on {}", if branch.is_empty() || branch == "HEAD" { "(no branch)" } else { branch })
 }
 
+/// A ref name as people write it: `refs/heads/main` becomes `main`.
+fn ref_name(name: &str) -> &str {
+    name.strip_prefix("refs/heads/").or_else(|| name.strip_prefix("refs/remotes/")).or_else(|| name.strip_prefix("refs/tags/")).unwrap_or(name)
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CheckoutChanges {
@@ -143,7 +148,7 @@ pub enum Action {
         #[serde(default)]
         sign_off: bool,
     },
-    Checkout { target: String, #[serde(default)] changes: CheckoutChanges },
+    Checkout { target: String, #[serde(default)] changes: CheckoutChanges, #[serde(default)] branch: bool },
     CheckoutRemote { remote_branch: String, #[serde(default)] stash_if_needed: bool, #[serde(default)] changes: CheckoutChanges },
     CheckoutPullRequest { url: String, reference: String, expected: String },
     CreateBranch { name: String, at: Option<String>, checkout: bool },
@@ -172,8 +177,10 @@ pub enum Action {
     CherryPick { sha: String, #[serde(default)] mainline: Option<usize> },
     Revert { sha: String, #[serde(default)] mainline: Option<usize> },
     Reset { sha: String, mode: String },
-    Merge { branch: String },
-    Rebase { onto: String },
+    /// Merge `branch` into the checked-out branch, or into `into` after checking it out.
+    Merge { branch: String, #[serde(default)] into: Option<String>, #[serde(default)] changes: CheckoutChanges },
+    /// Rebase the checked-out branch, or `branch` after checking it out, onto `onto`.
+    Rebase { onto: String, #[serde(default)] branch: Option<String>, #[serde(default)] changes: CheckoutChanges },
     AbortMerge,
     Sequencer { operation: String, command: String },
     AbortRebase,
@@ -227,7 +234,7 @@ pub enum Action {
     /// "Revert this hunk": undo one hunk (or chosen lines) of a commit in the working folder.
     RevertHunk { sha: String, parent: Option<String>, file: String, hunk: usize, lines: Option<Vec<usize>> },
     /// Squash merge: bring a branch's changes in as staged changes, to commit as one commit.
-    MergeSquash { branch: String },
+    MergeSquash { branch: String, #[serde(default)] into: Option<String>, #[serde(default)] changes: CheckoutChanges },
     /// Open a file in the external diff tool (git difftool), or a conflict in the merge tool.
     ExternalDiff { file: String, staged: bool, tool: String },
     ExternalMerge { file: String, tool: String },
@@ -265,7 +272,7 @@ pub struct ActionResult {
 
 pub enum DesktopActionResult {
     Performed(ActionResult),
-    OpenWorktree(String),
+    OpenWorktree { path: String, action: Option<Action> },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -283,6 +290,8 @@ enum UndoRec {
     Patch { patch: String, cached: bool, reverse: bool, label: String },
     /// History rewritten (rebase, cherry pick, fast-forward): move the branch back with reset --keep.
     Rewrite { before: String, after: String, label: String, branch: String, #[serde(default)] protect_index: bool },
+    /// A branch that isn't checked out moved (fast-forward): update its ref.
+    UpdateRef { name: String, before: String, after: String, label: String },
 }
 
 impl UndoRec {
@@ -299,6 +308,7 @@ impl UndoRec {
             UndoRec::Discard { .. } => "discard changes".into(),
             UndoRec::Patch { label, .. } => label.clone(),
             UndoRec::Rewrite { label, .. } => label.clone(),
+            UndoRec::UpdateRef { label, .. } => label.clone(),
         }
     }
 }
@@ -382,7 +392,7 @@ fn valid_undo_oid(oid: &str) -> bool {
 impl UndoRec {
     fn objects(&self) -> [Option<&str>; 2] {
         match self {
-            Self::Commit { before, after, .. } | Self::Reset { before, after, .. } | Self::Rewrite { before, after, .. } => [Some(before), Some(after)],
+            Self::Commit { before, after, .. } | Self::Reset { before, after, .. } | Self::Rewrite { before, after, .. } | Self::UpdateRef { before, after, .. } => [Some(before), Some(after)],
             Self::Checkout { from, to } => [Some(from), Some(to)],
             Self::InitialCommit { after, .. } => [Some(after), None],
             Self::CreateBranch { sha, .. } | Self::RenameBranch { sha, .. } | Self::DeleteBranch { sha, .. }
@@ -599,22 +609,71 @@ impl Engine {
         result.map(|message| format!("{}. {notice}", message.trim_end_matches('.'))).map_err(|error| format!("{notice}\n\n{error}"))
     }
 
+    fn checkout_drop_target(&self, repo: &str, dir: &Path, target: Option<&str>, changes: CheckoutChanges) -> Result<Option<String>, ActionResult> {
+        let Some(target) = target else { return Ok(None) };
+        if self.head_name(dir) == target {
+            return Ok(None);
+        }
+        match self.checkout_branch(repo, target, changes) {
+            Ok(message) => Ok(Some(message)),
+            Err(message) => Err(ActionResult { ok: false, message }),
+        }
+    }
+
+    fn with_checkout_notice(mut result: ActionResult, notice: Option<String>) -> ActionResult {
+        if let Some(notice) = notice {
+            result.message = if result.ok { format!("{}. {}", notice.trim_end_matches('.'), result.message) } else { format!("{notice}\n\n{}", result.message) };
+        }
+        result
+    }
+
+    fn merge_branch(&self, repo: &str, dir: &Path, branch: &str, into: Option<&str>, changes: CheckoutChanges, squash: bool) -> ActionResult {
+        if self.rev(dir, &format!("{branch}^{{commit}}")).is_empty() {
+            return ActionResult { ok: false, message: format!("{} is no longer available. Refresh the repository and try again.", ref_name(branch)) };
+        }
+        let notice = match self.checkout_drop_target(repo, dir, into, changes) {
+            Ok(notice) => notice,
+            Err(result) => return result,
+        };
+        let flag = if squash { "--squash" } else { "--no-edit" };
+        let args = crate::extras::merge_args(dir, "merge", &[flag, branch]);
+        let out = self.git(dir, &args.iter().map(String::as_str).collect::<Vec<_>>());
+        let message = if squash {
+            format!("Squashed {}; review and commit the staged changes", ref_name(branch))
+        } else {
+            format!("Merged {}", ref_name(branch))
+        };
+        let result = if out.ok { ActionResult { ok: true, message } } else { ActionResult { ok: false, message: out.message() } };
+        Self::with_checkout_notice(result, notice)
+    }
+
     fn checkout_local(&self, repo: &str, target: &str, changes: CheckoutChanges) -> Result<String, String> {
+        self.checkout_target(repo, target, changes, false)
+    }
+
+    /// Check out a local branch, even when its name looks like an object ID.
+    fn checkout_branch(&self, repo: &str, branch: &str, changes: CheckoutChanges) -> Result<String, String> {
+        self.checkout_target(repo, branch, changes, true)
+    }
+
+    fn checkout_target(&self, repo: &str, target: &str, changes: CheckoutChanges, branch: bool) -> Result<String, String> {
         let dir = Path::new(repo);
         let revision = self.rev(dir, &format!("{target}^{{commit}}"));
         if target.starts_with('-') || revision.is_empty() { return Err("The checkout target is unavailable. Refresh the repository and try again.".into()); }
         let from = self.head_name(dir);
-        if target == from || self.branch_ref(dir) == target { return Ok(format!("Already checked out {target}")); }
+        if self.branch_ref(dir) == target || (branch && target == from) { return Ok(format!("Already checked out {target}")); }
         crate::manage::require_lfs_for_checkout(dir, &revision)?;
         let name = format!("Changes before checking out {target}");
         let notice = self.prepare_checkout_changes(repo, dir, &name, changes)?;
-        let out = if valid_undo_oid(target) {
-            self.git(dir, &["checkout", "-q", "--no-overwrite-ignore", "--detach", &revision, "--"])
+        // A branch can be named like a 40- or 64-character object ID; a branch action still checks out the branch.
+        let detach = valid_undo_oid(target) && !branch;
+        let out = if detach {
+            self.git(dir, &["checkout", "-q", "--no-overwrite-ignore", "--detach", &format!("{target}^{{commit}}"), "--"])
         } else {
             self.git(dir, &["checkout", "-q", "--no-overwrite-ignore", target, "--"])
         };
         let result = if out.ok {
-            self.push_undo(repo, UndoRec::Checkout { from, to: target.to_string() });
+            self.push_undo(repo, UndoRec::Checkout { from, to: if detach { format!("{target}^{{commit}}") } else { target.to_string() } });
             Ok(format!("Checked out {target}"))
         } else if checkout_would_overwrite(&out) && matches!(changes, CheckoutChanges::Ask | CheckoutChanges::Carry) {
             Err(format!("Local changes block this checkout.\n\n{}", out.message()))
@@ -741,7 +800,11 @@ impl Engine {
         let operation = crate::operation::lock_for(dir);
         let _guard = operation.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(path) = self.checkout_worktree(dir, &action) {
-            return DesktopActionResult::OpenWorktree(path);
+            let carry = match &action {
+                Action::Checkout { .. } | Action::CheckoutRemote { .. } => None,
+                _ => Some(action.clone()),
+            };
+            return DesktopActionResult::OpenWorktree { path, action: carry };
         }
         let check_again = matches!(&action,
             Action::Checkout { changes: CheckoutChanges::Ask | CheckoutChanges::Carry, .. }
@@ -751,7 +814,7 @@ impl Engine {
         // A worktree can be added by another process while the checkout is in progress.
         if !result.ok {
             if let Some(path) = retry_target.and_then(|action| self.checkout_worktree(dir, &action)) {
-                return DesktopActionResult::OpenWorktree(path);
+                return DesktopActionResult::OpenWorktree { path, action: None };
             }
         }
         DesktopActionResult::Performed(result)
@@ -759,14 +822,18 @@ impl Engine {
 
     fn checkout_worktree(&self, dir: &Path, action: &Action) -> Option<String> {
         let (branch, remote) = match action {
-            Action::Checkout { target, .. } => {
-                if valid_undo_oid(target) { return None; }
+            Action::Checkout { target, branch, .. } => {
+                if !branch && valid_undo_oid(target) { return None; }
                 (target.strip_prefix("refs/heads/").unwrap_or(target.as_str()), None)
             }
             Action::CheckoutRemote { remote_branch, .. } => {
                 let (_, branch) = remote_branch.split_once('/')?;
                 (branch, Some(remote_branch))
             }
+            Action::Merge { into: Some(target), .. } => (target.strip_prefix("refs/heads/").unwrap_or(target.as_str()), None),
+            Action::MergeSquash { into: Some(target), .. } => (target.strip_prefix("refs/heads/").unwrap_or(target.as_str()), None),
+            Action::Rebase { branch: Some(branch), .. } => (branch.strip_prefix("refs/heads/").unwrap_or(branch.as_str()), None),
+            Action::FastForward { branch, .. } => (branch.strip_prefix("refs/heads/").unwrap_or(branch.as_str()), None),
             _ => return None,
         };
         let worktrees = git::try_worktrees(dir).ok()?;
@@ -880,10 +947,13 @@ impl Engine {
                 }
                 done(o, if amend { "Amended previous commit" } else { "Committed" })
             }
-            Action::Checkout { target, changes } => match self.checkout_local(repo, &target, changes) {
-                Ok(message) => ActionResult { ok: true, message },
-                Err(message) => ActionResult { ok: false, message },
-            },
+            Action::Checkout { target, changes, branch } => {
+                let result = if branch { self.checkout_branch(repo, &target, changes) } else { self.checkout_local(repo, &target, changes) };
+                match result {
+                    Ok(message) => ActionResult { ok: true, message },
+                    Err(message) => ActionResult { ok: false, message },
+                }
+            }
             Action::CheckoutPullRequest { url, reference, expected } => {
                 if !matches!(expected.len(), 40 | 64) || !expected.bytes().all(|c| c.is_ascii_hexdigit()) || reference.starts_with('-') {
                     return done(git::GitOut::failed("The pull request has an invalid source commit."), "");
@@ -1139,18 +1209,23 @@ impl Engine {
                 }
                 done(o, "Reset branch")
             }
-            Action::Merge { branch } => {
-                let args = crate::extras::merge_args(dir, "merge", &["--no-edit", &branch]);
-                done(self.git(dir, &args.iter().map(String::as_str).collect::<Vec<_>>()), &format!("Merged {branch}"))
-            }
-            Action::Rebase { onto } => {
+            Action::Merge { branch, into, changes } => self.merge_branch(repo, dir, &branch, into.as_deref(), changes, false),
+            Action::Rebase { onto, branch, changes } => {
+                if self.rev(dir, &format!("{onto}^{{commit}}")).is_empty() {
+                    return ActionResult { ok: false, message: format!("{} is no longer available. Refresh the repository and try again.", ref_name(&onto)) };
+                }
+                let notice = match self.checkout_drop_target(repo, dir, branch.as_deref(), changes) {
+                    Ok(notice) => notice,
+                    Err(result) => return result,
+                };
                 let before = self.rev(dir, "HEAD");
                 let o = self.git(dir, &["rebase", "--autostash", &onto]);
                 if o.ok {
                     let after = self.rev(dir, "HEAD");
-                    self.push_undo(repo, UndoRec::Rewrite { before, after, branch: self.branch_ref(dir), label: format!("rebase onto {onto}"), protect_index: false });
+                    self.push_undo(repo, UndoRec::Rewrite { before, after, branch: self.branch_ref(dir), label: format!("rebase onto {}", ref_name(&onto)), protect_index: false });
                 }
-                done(o, &format!("Rebased onto {onto}"))
+                let result = done(o, &format!("Rebased onto {}", ref_name(&onto)));
+                Self::with_checkout_notice(result, notice)
             }
             Action::AbortMerge => done(self.git(dir, &["merge", "--abort"]), "Merge aborted"),
             Action::Sequencer { operation, command } => {
@@ -1529,10 +1604,7 @@ impl Engine {
                     Err(e) => ActionResult { ok: false, message: format!("The hunk could not be reverted because {file} has changed since: {e}") },
                 }
             }
-            Action::MergeSquash { branch } => {
-                let args = crate::extras::merge_args(dir, "merge", &["--squash", &branch]);
-                done(self.git(dir, &args.iter().map(String::as_str).collect::<Vec<_>>()), &format!("Squashed {branch}; review and commit the staged changes"))
-            }
+            Action::MergeSquash { branch, into, changes } => self.merge_branch(repo, dir, &branch, into.as_deref(), changes, true),
             Action::ApplyPatchFile { file } => {
                 let o = crate::extras::apply_patch_file(dir, Path::new(&file), &|a: &[&str]| self.git(dir, a));
                 done(o, "Patch applied")
@@ -1733,18 +1805,32 @@ impl Engine {
             }
             Action::FastForward { branch, to } => {
                 let head = git::run(dir, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim().to_string();
-                let before = self.rev(dir, &format!("refs/heads/{branch}"));
-                let o = if head == branch {
-                    self.git(dir, &["merge", "--ff-only", &to])
-                } else {
-                    // Moves a branch that isn't checked out; git refuses anything but a fast-forward.
-                    self.git(dir, &["fetch", ".", &format!("{to}:{branch}")])
-                };
-                if o.ok && head == branch {
-                    let after = self.rev(dir, "HEAD");
-                    self.push_undo(repo, UndoRec::Rewrite { before, after, branch: self.branch_ref(dir), label: format!("fast-forward {branch}"), protect_index: false });
+                let name = format!("refs/heads/{branch}");
+                let before = self.rev(dir, &name);
+                let after = self.rev(dir, &format!("{to}^{{commit}}"));
+                if before.is_empty() || after.is_empty() {
+                    return done(git::GitOut::failed("The branch or target no longer exists. Refresh the repository and try again."), "");
                 }
-                done(o, &format!("Fast-forwarded {branch} to {to}"))
+                if head == branch {
+                    let o = self.git(dir, &["merge", "--ff-only", &after]);
+                    if o.ok {
+                        self.push_undo(repo, UndoRec::Rewrite { before, after, branch: self.branch_ref(dir), label: format!("fast-forward {branch}"), protect_index: false });
+                    }
+                    done(o, &format!("Fast-forwarded {} to {}", ref_name(&branch), ref_name(&to)))
+                } else {
+                    let checked_out = git::try_worktrees(dir).ok().is_some_and(|worktrees| worktrees.iter().any(|worktree| worktree.branch == branch));
+                    if checked_out {
+                        return done(git::GitOut::failed(&format!("Open the worktree that has {} checked out before fast-forwarding it.", ref_name(&branch))), "");
+                    }
+                    if !git::run(dir, &["merge-base", "--is-ancestor", &before, &after]).ok {
+                        return done(git::GitOut::failed(&format!("{} cannot be fast-forwarded to {}.", ref_name(&branch), ref_name(&to))), "");
+                    }
+                    let o = self.git(dir, &["update-ref", &name, &after, &before]);
+                    if o.ok && before != after {
+                        self.push_undo(repo, UndoRec::UpdateRef { name, before, after, label: format!("fast-forward {branch}") });
+                    }
+                    done(o, &format!("Fast-forwarded {} to {}", ref_name(&branch), ref_name(&to)))
+                }
             }
             Action::SetUpstream { branch, upstream } => {
                 if upstream.trim().is_empty() {
@@ -1938,6 +2024,18 @@ impl Engine {
             },
             (UndoRec::Rewrite { before, .. }, true) => self.git(dir, &["reset", "-q", "--keep", before]),
             (UndoRec::Rewrite { after, .. }, false) => self.git(dir, &["reset", "-q", "--keep", after]),
+            (UndoRec::UpdateRef { name, before, after, .. }, undo) => {
+                let (expected, target) = if undo { (after, before) } else { (before, after) };
+                let checked_out = self.branch_ref(dir) == *name
+                    || git::try_worktrees(dir).ok().is_some_and(|worktrees| worktrees.iter().any(|worktree| format!("refs/heads/{}", worktree.branch) == *name));
+                if checked_out {
+                    return git::GitOut::failed("Check out another branch before undoing or redoing this fast-forward.");
+                }
+                if self.rev(dir, name) != *expected {
+                    return git::GitOut::failed("The branch moved after this fast-forward; refusing to undo or redo it.");
+                }
+                self.git(dir, &["update-ref", name, target, expected])
+            }
             (UndoRec::Patch { patch, cached, reverse, .. }, undo) => {
                 // Undo applies the patch the other way round; redo applies it again.
                 let rev = if undo { !*reverse } else { *reverse };
@@ -2257,6 +2355,17 @@ mod tests {
         git::run(d, &["rev-parse", "HEAD"]).stdout.trim().to_string()
     }
 
+    /// A repository with one commit and an `Engine`, for branch-action tests.
+    fn drop_repo(name: &str) -> (std::path::PathBuf, String, Engine) {
+        let d = temp_repo(name);
+        let repo = d.to_string_lossy().to_string();
+        let e = Engine::default();
+        fs::write(d.join("base.txt"), "base\n").unwrap();
+        assert!(git::run(&d, &["add", "-A"]).ok);
+        assert!(git::run(&d, &["commit", "-q", "-m", "base"]).ok);
+        (d, repo, e)
+    }
+
     /// A person's repository showed no history: its refs/remotes/origin/HEAD file was blank, so
     /// `git log --remotes` stopped with "fatal: bad object origin/HEAD".
     #[test]
@@ -2320,9 +2429,9 @@ mod tests {
         assert!(preview.files.is_empty(), "{:?}", preview.files);
         for squash in [false, true] {
             let action = if squash {
-                Action::MergeSquash { branch: "side".into() }
+                Action::MergeSquash { branch: "side".into(), into: None, changes: Default::default() }
             } else {
-                Action::Merge { branch: "side".into() }
+                Action::Merge { branch: "side".into(), into: None, changes: Default::default() }
             };
             let result = e.perform(&repo, action);
             assert!(result.ok, "{}", result.message);
@@ -2333,6 +2442,194 @@ mod tests {
         }
         assert_eq!(git::run(&d, &["config", "--get", "merge.renames"]).stdout.trim(), "false");
         assert_eq!(git::run(&d, &["config", "--get", "merge.renamelimit"]).stdout.trim(), "-1");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn squash_merge_checks_out_its_target() {
+        let (d, repo, e) = drop_repo("drop-squash-target");
+        let g = |args: &[&str]| {
+            let o = git::run(&d, args);
+            assert!(o.ok, "{args:?}: {}", o.message());
+        };
+        g(&["checkout", "-q", "-b", "side"]);
+        fs::write(d.join("side.txt"), "side\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-q", "-m", "side"]);
+        let r = e.perform(&repo, Action::MergeSquash { branch: "side".into(), into: Some("master".into()), changes: Default::default() });
+        assert!(r.ok, "{}", r.message);
+        assert_eq!(git::run(&d, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim(), "master");
+        assert_eq!(git::run(&d, &["diff", "--cached", "--name-only"]).stdout.trim(), "side.txt");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn missing_drop_refs_do_not_check_out_the_target() {
+        let (d, repo, e) = drop_repo("drop-missing-ref");
+        let g = |args: &[&str]| {
+            let o = git::run(&d, args);
+            assert!(o.ok, "{args:?}: {}", o.message());
+        };
+        g(&["branch", "other"]);
+        let current = || git::run(&d, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim().to_string();
+        for action in [
+            Action::Merge { branch: "refs/heads/missing".into(), into: Some("other".into()), changes: Default::default() },
+            Action::Rebase { onto: "refs/heads/missing".into(), branch: Some("other".into()), changes: Default::default() },
+            Action::MergeSquash { branch: "refs/heads/missing".into(), into: Some("other".into()), changes: Default::default() },
+        ] {
+            let result = e.perform(&repo, action);
+            assert!(!result.ok);
+            assert!(result.message.contains("no longer available"), "{}", result.message);
+            assert_eq!(current(), "master");
+        }
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn hex_branch_owned_by_another_worktree_is_opened() {
+        let (d, _repo, e) = drop_repo("hex-worktree");
+        let g = |args: &[&str]| {
+            let o = git::run(&d, args);
+            assert!(o.ok, "{args:?}: {}", o.message());
+        };
+        let hex = head(&d);
+        g(&["branch", &hex]);
+        let wt = std::env::temp_dir().join(format!("gitcraft-test-hex-wt-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&wt);
+        let wt_s = wt.to_string_lossy().to_string();
+        g(&["worktree", "add", "-q", &wt_s, &hex]);
+
+        let found = e.checkout_worktree(&d, &Action::Checkout { target: hex.clone(), changes: Default::default(), branch: true });
+        assert_eq!(found.map(|path| Path::new(&path).canonicalize().unwrap()), Some(wt.canonicalize().unwrap()));
+        assert_eq!(e.checkout_worktree(&d, &Action::Checkout { target: hex, changes: Default::default(), branch: false }), None);
+
+        g(&["worktree", "remove", "--force", &wt_s]);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn hex_checkout_preserves_branch_and_commit_intent() {
+        let (d, repo, e) = drop_repo("hex-checkout-intent");
+        let g = |args: &[&str]| {
+            let o = git::run(&d, args);
+            assert!(o.ok, "{args:?}: {}", o.message());
+        };
+        let selected = head(&d);
+        g(&["branch", &selected]);
+        g(&["checkout", "-q", &selected]);
+        fs::write(d.join("next.txt"), "next\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-q", "-m", "next"]);
+        let next = head(&d);
+        let r = e.perform(&repo, Action::Checkout { target: selected.clone(), changes: Default::default(), branch: false });
+        assert!(r.ok, "{}", r.message);
+        assert_eq!(head(&d), selected);
+        assert!(!git::run(&d, &["symbolic-ref", "-q", "HEAD"]).ok, "a commit checkout must detach");
+
+        g(&["checkout", "-q", "master"]);
+        let r = e.perform(&repo, Action::Checkout { target: selected.clone(), changes: Default::default(), branch: true });
+        assert!(r.ok, "{}", r.message);
+        assert_eq!(git::run(&d, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim(), selected);
+        assert_eq!(head(&d), next);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_hex_named_branch_is_checked_out_as_a_branch() {
+        let (d, repo, e) = drop_repo("hex-branch-drop");
+        let g = |args: &[&str]| {
+            let o = git::run(&d, args);
+            assert!(o.ok, "{args:?}: {}", o.message());
+        };
+        let branch = head(&d);
+        g(&["branch", &branch]);
+        let r = e.perform(&repo, Action::Merge { branch: "refs/heads/master".into(), into: Some(branch.clone()), changes: Default::default() });
+        assert!(r.ok, "{}", r.message);
+        assert_eq!(git::run(&d, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim(), branch);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn merge_and_rebase_check_out_a_branch_other_than_the_current_one() {
+        let (d, repo, e) = drop_repo("drop-branch-actions");
+        let g = |args: &[&str]| {
+            let o = git::run(&d, args);
+            assert!(o.ok, "{args:?}: {}", o.message());
+        };
+        let current = || git::run(&d, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim().to_string();
+        g(&["checkout", "-q", "-b", "side"]);
+        fs::write(d.join("side.txt"), "side\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-q", "-m", "side"]);
+        g(&["checkout", "-q", "master"]);
+        fs::write(d.join("main.txt"), "main\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-q", "-m", "main"]);
+
+        // Rebase checks out "side" first.
+        let r = e.perform(&repo, Action::Rebase { onto: "master".into(), branch: Some("side".into()), changes: Default::default() });
+        assert!(r.ok, "{}", r.message);
+        assert_eq!(current(), "side");
+        let log = git::run(&d, &["log", "--reverse", "--format=%s", "master..HEAD"]).stdout;
+        assert_eq!(log.lines().collect::<Vec<_>>(), vec!["side"]);
+
+        // A new master commit makes the merge a true merge.
+        g(&["checkout", "-q", "master"]);
+        fs::write(d.join("more.txt"), "more\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-q", "-m", "more"]);
+        g(&["checkout", "-q", "side"]);
+        let r = e.perform(&repo, Action::Merge { branch: "side".into(), into: Some("master".into()), changes: Default::default() });
+        assert!(r.ok, "{}", r.message);
+        assert_eq!(current(), "master");
+        assert_eq!(git::run(&d, &["rev-list", "--parents", "-n1", "HEAD"]).stdout.split_whitespace().count(), 3);
+        assert!(d.join("base.txt").exists() && d.join("side.txt").exists() && d.join("main.txt").exists() && d.join("more.txt").exists());
+
+        // Uncommitted work is reported before the checkout.
+        g(&["checkout", "-q", "side"]);
+        fs::write(d.join("base.txt"), "dirty\n").unwrap();
+        let r = e.perform(&repo, Action::Merge { branch: "side".into(), into: Some("master".into()), changes: CheckoutChanges::Ask });
+        assert!(!r.ok);
+        assert_eq!(r.message, "Choose how to handle your uncommitted changes before checkout.");
+        assert_eq!(current(), "side");
+        assert_eq!(fs::read_to_string(d.join("base.txt")).unwrap(), "dirty\n");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn dropped_branch_actions_open_the_worktree_that_owns_the_branch() {
+        let (d, repo, e) = drop_repo("drop-branch-worktree");
+        let g = |args: &[&str]| {
+            let o = git::run(&d, args);
+            assert!(o.ok, "{args:?}: {}", o.message());
+        };
+        g(&["branch", "side"]);
+        let wt = std::env::temp_dir().join(format!("gitcraft-test-drop-wt-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&wt);
+        let wt_s = wt.to_string_lossy().to_string();
+        g(&["worktree", "add", "-q", &wt_s, "side"]);
+
+        let owned = |action: Action| {
+            let found = e.checkout_worktree(&d, &action);
+            found.map(|path| Path::new(&path).canonicalize().unwrap())
+        };
+        for action in [
+            Action::Merge { branch: "refs/heads/master".into(), into: Some("side".into()), changes: CheckoutChanges::Ask },
+            Action::Rebase { onto: "refs/heads/master".into(), branch: Some("side".into()), changes: CheckoutChanges::Ask },
+            Action::FastForward { branch: "side".into(), to: "refs/heads/master".into() },
+        ] {
+            assert_eq!(owned(action), Some(wt.canonicalize().unwrap()));
+        }
+        assert_eq!(owned(Action::FastForward { branch: "master".into(), to: "refs/heads/side".into() }), None);
+
+        let carried = e.perform_for_desktop(&repo, Action::Merge { branch: "refs/heads/master".into(), into: Some("side".into()), changes: CheckoutChanges::Ask });
+        let DesktopActionResult::OpenWorktree { path, action: Some(Action::Merge { into: Some(into), .. }) } = carried else {
+            panic!("the targeted merge must carry its action to the owning worktree");
+        };
+        assert_eq!(Path::new(&path).canonicalize().unwrap(), wt.canonicalize().unwrap());
+        assert_eq!(into, "side");
+
+        g(&["worktree", "remove", "--force", &wt_s]);
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -2409,7 +2706,7 @@ mod tests {
         assert!(e.perform(&repo, Action::CreateBranch { name: "feature x".into(), at: None, checkout: true }).ok);
         let data = git::load(&d, 100);
         assert_eq!(data.head_branch.as_deref(), Some("feature-x"));
-        assert!(e.perform(&repo, Action::Checkout { target: "master".into(), changes: Default::default() }).ok);
+        assert!(e.perform(&repo, Action::Checkout { target: "master".into(), changes: Default::default(), branch: true }).ok);
         assert!(e.perform(&repo, Action::DeleteBranch { name: "feature-x".into() }).ok);
         assert!(e.perform(&repo, Action::Undo).ok, "undo delete branch");
         assert!(git::load(&d, 100).refs.iter().any(|r| r.name == "feature-x"));
@@ -2623,9 +2920,9 @@ mod tests {
 
         // Merge conflict: same line changed on both branches.
         commit("a.txt", "side\n", "side change");
-        assert!(e.perform(&repo, Action::Checkout { target: "master".into(), changes: Default::default() }).ok);
+        assert!(e.perform(&repo, Action::Checkout { target: "master".into(), changes: Default::default(), branch: true }).ok);
         commit("a.txt", "master\n", "master change");
-        let r = e.perform(&repo, Action::Merge { branch: "side".into() });
+        let r = e.perform(&repo, Action::Merge { branch: "side".into(), into: None, changes: Default::default() });
         assert!(!r.ok);
         let data = git::load(&d, 50);
         assert_eq!(data.state_note.as_deref(), Some("merging"));
@@ -2647,8 +2944,12 @@ mod tests {
 
         // Fast-forward a branch that isn't checked out, set an upstream, rename a stash.
         assert!(e.perform(&repo, Action::CreateBranch { name: "old".into(), at: Some(base.clone()), checkout: false }).ok);
+        let old_before = git::run(&d, &["rev-parse", "old"]).stdout;
         assert!(e.perform(&repo, Action::FastForward { branch: "old".into(), to: "master".into() }).ok);
         assert_eq!(git::run(&d, &["rev-parse", "old"]).stdout, git::run(&d, &["rev-parse", "master"]).stdout);
+        assert!(e.perform(&repo, Action::Undo).ok);
+        assert_eq!(git::run(&d, &["rev-parse", "old"]).stdout, old_before);
+        assert_eq!(git::run(&d, &["rev-parse", "--abbrev-ref", "HEAD"]).stdout.trim(), "master");
         assert!(e.perform(&repo, Action::SetUpstream { branch: "old".into(), upstream: "master".into() }).ok);
         assert_eq!(git::run(&d, &["rev-parse", "--abbrev-ref", "old@{u}"]).stdout.trim(), "master");
         fs::write(d.join("e.txt"), "x").unwrap();
@@ -2782,7 +3083,7 @@ mod tests {
         commit("side 1");
         assert!(git::run(&d, &["checkout", "-q", "master"]).ok);
         let before = head(&d);
-        assert!(e.perform(&repo, Action::MergeSquash { branch: "side".into() }).ok);
+        assert!(e.perform(&repo, Action::MergeSquash { branch: "side".into(), into: None, changes: Default::default() }).ok);
         assert_eq!(head(&d), before);
         assert!(git::status(&d).staged.iter().any(|f| f.path == "c.txt"));
         let _ = fs::remove_dir_all(&d);

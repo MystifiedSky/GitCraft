@@ -893,7 +893,7 @@ impl App {
                             later.push(Box::new(move |app| app.ref_dropped(tab, source, target)));
                         }
                         end_x = label_rect.right();
-                        if lresp.hovered() {
+                        if lresp.hovered() || lresp.dnd_hover_payload::<GitRef>().is_some_and(|source| source.full != first.full) {
                             new_hover_ref = Some((i, first.kind == RefKind::Tag));
                             stack = Some((i, clock));
                         }
@@ -921,7 +921,7 @@ impl App {
                             painter.text(mr.center(), Align2::CENTER_CENTER, format!("+{more}"), FontId::proportional(11.0), c.fg);
                             let mresp = ui.interact(mr, ui.scope_id().with(("more_refs", tab, i)), Sense::click());
                             end_x = mr.right();
-                            if mresp.hovered() || mresp.clicked() {
+                            if mresp.hovered() || mresp.clicked() || mresp.dnd_hover_payload::<GitRef>().is_some_and(|source| source.full != first.full) {
                                 new_hover_ref = Some((i, first.kind == RefKind::Tag));
                                 stack = Some((i, clock));
                             }
@@ -978,7 +978,19 @@ impl App {
                                 egui::ScrollArea::vertical().id_salt(stack_id.with("scroll")).max_height(h).auto_shrink([false, true]).show(&mut inner, |ui| {
                                     ui.spacing_mut().item_spacing = Vec2::ZERO;
                                     for (k, (g, rem)) in groups.iter().take(shown).enumerate() {
-                                        let (row, rresp) = ui.allocate_exact_size(vec2(w, INNER), Sense::click());
+                                        let draggable = g.kind != RefKind::Tag;
+                                        let (row, rresp) = ui.allocate_exact_size(vec2(w, INNER), if draggable { Sense::click_and_drag() } else { Sense::click() });
+                                        if draggable && rresp.drag_started() {
+                                            rresp.dnd_set_drag_payload((*g).clone());
+                                        }
+                                        let takes = |source: &GitRef| source.full != g.full && g.kind != RefKind::Tag;
+                                        if rresp.dnd_hover_payload::<GitRef>().filter(|source| takes(source)).is_some() {
+                                            ui.painter().rect_stroke(row, CornerRadius::ZERO, Stroke::new(2.0, ACCENT), StrokeKind::Inside);
+                                        }
+                                        if let Some(source) = rresp.dnd_release_payload::<GitRef>().filter(|source| takes(source)) {
+                                            let (source, target) = ((*source).clone(), (*g).clone());
+                                            later.push(Box::new(move |app| app.ref_dropped(tab, source, target)));
+                                        }
                                         if rresp.hovered() {
                                             ui.painter().rect_filled(row, CornerRadius::ZERO, c.white(0.1));
                                             stack_tag = Some(g.kind == RefKind::Tag);
@@ -1387,7 +1399,7 @@ impl App {
     pub(crate) fn checkout_ref(&mut self, tab: u64, r: &GitRef) {
         let head = self.repo(tab).and_then(|t| t.view.as_ref()).and_then(|v| v.data.head_branch.clone());
         match r.kind {
-            RefKind::Local if Some(&r.name) != head.as_ref() => self.act(tab, Action::Checkout { target: r.name.clone(), changes: gitcraft_core::actions::CheckoutChanges::Ask }),
+            RefKind::Local if Some(&r.name) != head.as_ref() => self.act(tab, Action::Checkout { target: r.name.clone(), changes: gitcraft_core::actions::CheckoutChanges::Ask, branch: true }),
             RefKind::Remote => self.act(tab, Action::CheckoutRemote { remote_branch: r.name.clone(), stash_if_needed: false, changes: gitcraft_core::actions::CheckoutChanges::Ask }),
             _ => {}
         }

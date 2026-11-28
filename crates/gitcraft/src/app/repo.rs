@@ -725,11 +725,11 @@ impl App {
         {
             action = Action::Pull { mode: mode.clone(), autostash: Some(a) };
         }
-        if let Action::Merge { branch } = &action
+        if let Action::Merge { branch, into, changes } = &action
             && self.settings.flag("squashMerge", false)
         {
             // Its commit message draft is filled in once the squash succeeds (see `squash_done`).
-            action = Action::MergeSquash { branch: branch.clone() };
+            action = Action::MergeSquash { branch: branch.clone(), into: into.clone(), changes: *changes };
         }
         if let Action::Commit { strip_comments, .. } = &mut action {
             *strip_comments = self.settings.flag("stripComments", false);
@@ -752,8 +752,11 @@ impl App {
         use super::widgets::Kind;
         use gitcraft_core::actions::CheckoutChanges;
         let (target, changes, remote_stash) = match action {
-            Action::Checkout { target, changes } => (target.clone(), *changes, false),
+            Action::Checkout { target, changes, .. } => (target.clone(), *changes, false),
             Action::CheckoutRemote { remote_branch, stash_if_needed, changes } => (remote_branch.clone(), *changes, *stash_if_needed),
+            Action::Merge { into: Some(target), changes, .. } => (target.clone(), *changes, false),
+            Action::MergeSquash { into: Some(target), changes, .. } => (target.clone(), *changes, false),
+            Action::Rebase { branch: Some(target), changes, .. } => (target.clone(), *changes, false),
             _ => return false,
         };
         let choose = changes == CheckoutChanges::Ask && msg == "Choose how to handle your uncommitted changes before checkout.";
@@ -762,8 +765,11 @@ impl App {
             return false;
         }
         let with = |changes: CheckoutChanges| match action.clone() {
-            Action::Checkout { target, .. } => Action::Checkout { target, changes },
+            Action::Checkout { target, branch, .. } => Action::Checkout { target, changes, branch },
             Action::CheckoutRemote { remote_branch, stash_if_needed, .. } => Action::CheckoutRemote { remote_branch, stash_if_needed, changes },
+            Action::Merge { branch, into, .. } => Action::Merge { branch, into, changes },
+            Action::MergeSquash { branch, into, .. } => Action::MergeSquash { branch, into, changes },
+            Action::Rebase { onto, branch, .. } => Action::Rebase { onto, branch, changes },
             other => other,
         };
         let stash = match action {
@@ -842,7 +848,7 @@ impl App {
         let notify = self.settings.flag("notifySuccess", true);
         let handled = self.after_action(tab, &action, &result, quiet);
         // A checkout that stashed or discarded local changes always says so (and where they went).
-        let stashed = matches!(action, Action::Checkout { .. } | Action::CheckoutRemote { .. }) && (result.message.contains("Your local changes are saved in the stash") || result.message.contains("Discarded changes."));
+        let stashed = matches!(action, Action::Checkout { .. } | Action::CheckoutRemote { .. } | Action::Merge { .. } | Action::MergeSquash { .. } | Action::Rebase { .. }) && (result.message.contains("Your local changes are saved in the stash") || result.message.contains("Discarded changes."));
         if !handled && (!result.ok || (!quiet && (notify || stashed))) {
             self.toast(result.ok, result.message.clone());
         }
@@ -898,7 +904,7 @@ impl App {
         }
         let msg = result.message.as_str();
         match action {
-            Action::Checkout { .. } | Action::CheckoutRemote { .. } if !quiet && self.checkout_changes_dialog(tab, action, msg) => true,
+            Action::Checkout { .. } | Action::CheckoutRemote { .. } | Action::Merge { into: Some(_), .. } | Action::MergeSquash { into: Some(_), .. } | Action::Rebase { branch: Some(_), .. } if !quiet && self.checkout_changes_dialog(tab, action, msg) => true,
             Action::Push { force: false, .. } if msg == "This repository has no remote to push to. Add one first." => {
                 self.dialog = Some(Dialog::confirm(
                     "No remote to push to",
@@ -1007,14 +1013,14 @@ impl App {
     }
 
     /// A squash merge succeeded: offer its message as the commit draft, unless the user already has a draft.
-    pub(crate) fn squash_done(&mut self, tab: u64, branch: &str) {
+    pub(crate) fn squash_done(&mut self, tab: u64, branch: &str, into: Option<&str>) {
         let Some(r) = self.repo(tab) else { return };
         let path = r.path.clone();
         if self.draft(&path) != Draft::default() {
             return;
         }
-        let head = r.view.as_ref().and_then(|v| v.data.head_branch.clone()).unwrap_or_else(|| "HEAD".into());
-        self.pending_drafts.push((path, Draft { summary: format!("Squash merge {branch} into {head}"), description: String::new(), amend: false }));
+        let head = into.map(super::ctxmenu::short_ref).map(str::to_owned).or_else(|| r.view.as_ref().and_then(|v| v.data.head_branch.clone())).unwrap_or_else(|| "HEAD".into());
+        self.pending_drafts.push((path, Draft { summary: format!("Squash merge {} into {head}", super::ctxmenu::short_ref(branch)), description: String::new(), amend: false }));
     }
 
     pub(crate) fn set_draft(&mut self, path: &str, draft: Draft) {
@@ -1150,6 +1156,38 @@ fn headless_superseded_page_cannot_clear_the_active_request() {
     assert_eq!(tab.paging.as_deref(), Some("new request"));
     assert!(tab.finish_page("new request"));
     assert!(!tab.page_loading);
+}
+
+#[cfg(test)]
+#[test]
+fn headless_dropped_actions_offer_checkout_changes_choices() {
+    let ctx = egui::Context::default();
+    let cc = eframe::CreationContext::_new_kittest(ctx);
+    let mut app = App::new(&cc, super::StartOptions::default(), crate::settings::Store::in_memory());
+    let result = ActionResult { ok: false, message: "Choose how to handle your uncommitted changes before checkout.".into() };
+    for action in [
+        Action::Merge { branch: "refs/heads/ff".into(), into: Some("dev".into()), changes: gitcraft_core::actions::CheckoutChanges::Ask },
+        Action::Rebase { onto: "refs/heads/dev".into(), branch: Some("ff".into()), changes: gitcraft_core::actions::CheckoutChanges::Ask },
+    ] {
+        app.dialog = None;
+        assert!(app.after_action(0, &action, &result, false));
+        assert!(app.dialog.is_some());
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn headless_squash_preference_applies_to_targeted_merges() {
+    let ctx = egui::Context::default();
+    let cc = eframe::CreationContext::_new_kittest(ctx);
+    let mut app = App::new(&cc, super::StartOptions::default(), crate::settings::Store::in_memory());
+    app.settings.set("squashMerge", true);
+    let mut repo = RepoTab::new("/repo");
+    repo.running = Some("test".into());
+    app.repos.insert(7, repo);
+    app.act_quiet(7, Action::Merge { branch: "refs/heads/ff".into(), into: Some("dev".into()), changes: gitcraft_core::actions::CheckoutChanges::Ask }, false);
+    let (action, _) = app.repos.get(&7).unwrap().queue.back().expect("queued action");
+    assert!(matches!(action, Action::MergeSquash { branch, into: Some(into), changes: gitcraft_core::actions::CheckoutChanges::Ask } if branch == "refs/heads/ff" && into == "dev"));
 }
 
 #[cfg(test)]

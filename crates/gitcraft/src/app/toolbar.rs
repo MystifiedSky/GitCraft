@@ -209,7 +209,7 @@ impl App {
                     };
                     entries.push(item(label, move |app| {
                         if !is_head {
-                            app.act(tab, Action::Checkout { target: name, changes: gitcraft_core::actions::CheckoutChanges::Ask });
+                            app.act(tab, Action::Checkout { target: name, changes: gitcraft_core::actions::CheckoutChanges::Ask, branch: true });
                         }
                     }));
                 }
